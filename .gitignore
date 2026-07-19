@@ -1,0 +1,38 @@
+# Go
+fastdrop-desktop/fastdrop.exe
+*.exe
+*.test
+*.out
+vendor/
+
+# Node / Vue
+fastdrop-desktop/web/node_modules/
+fastdrop-desktop/web/dist/
+fastdrop-desktop/web/*.tsbuildinfo
+
+# Go build output
+fastdrop-desktop/cmd/fastdrop/webdist/
+
+# Logs & temp
+*.log
+
+# Test/debug artifacts
+fastdrop-desktop/hello.txt
+fastdrop-desktop/qr.json
+fastdrop-desktop/tx.json
+fastdrop-desktop/accepted.json
+fastdrop-desktop/pair_res.json
+
+# Claude local config
+.claude/settings.local.json
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+Thumbs.db
+.DS_Store
+*.tmp
