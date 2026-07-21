@@ -245,12 +245,15 @@ func TestManagerMarkChunkCompleteAndProgress(t *testing.T) {
 	fileID := res.Files[0].FileID
 	transferID := res.TransferID
 
-	count, err := m.MarkChunkComplete(ctx, transferID, fileID, 0, 100)
+	count, justStarted, err := m.MarkChunkComplete(ctx, transferID, fileID, 0, 100)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if count != 1 {
 		t.Errorf("count = %d, want 1", count)
+	}
+	if !justStarted {
+		t.Error("first chunk should set justStarted=true")
 	}
 	if !pushed {
 		t.Error("progress callback not invoked")
@@ -270,5 +273,169 @@ func TestManagerCancel(t *testing.T) {
 	t1, _ := db.GetTransfer(ctx, res.TransferID)
 	if t1.Status != string(StatusCancelled) {
 		t.Errorf("status = %s", t1.Status)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// CompleteFile tests
+// ---------------------------------------------------------------------------
+
+func TestCompleteFileSingleFile(t *testing.T) {
+	db := newDB(t)
+	m := NewManager(db, 4*1024*1024, nil)
+	ctx := context.Background()
+
+	res, err := m.Create(ctx, "s1", "d1", DirClientToServer, "o", []FileSpec{
+		{ClientFileID: "c1", Name: "a.txt", Size: 100},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	tid := res.TransferID
+	fid := res.Files[0].FileID
+
+	// Mark the chunk as complete first.
+	if _, _, err := m.MarkChunkComplete(ctx, tid, fid, 0, 100); err != nil {
+		t.Fatal(err)
+	}
+
+	// Complete the file (no expected hash → any hash accepted).
+	allDone, err := m.CompleteFile(ctx, tid, fid, "abc123", "a.txt", "/downloads/a.txt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !allDone {
+		t.Error("single file transfer should be allDone")
+	}
+
+	// Transfer should be completed.
+	tr, _ := db.GetTransfer(ctx, tid)
+	if tr.Status != string(StatusCompleted) {
+		t.Errorf("transfer status = %s, want completed", tr.Status)
+	}
+
+	// File row should be completed with hash.
+	f, _ := db.GetTransferFile(ctx, fid)
+	if f.Status != string(StatusCompleted) {
+		t.Errorf("file status = %s, want completed", f.Status)
+	}
+	if f.Sha256Actual != "abc123" {
+		t.Errorf("file sha256_actual = %s, want abc123", f.Sha256Actual)
+	}
+}
+
+func TestCompleteFileMultiFile(t *testing.T) {
+	db := newDB(t)
+	m := NewManager(db, 4*1024*1024, nil)
+	ctx := context.Background()
+
+	res, err := m.Create(ctx, "s1", "d1", DirClientToServer, "o", []FileSpec{
+		{ClientFileID: "c1", Name: "a.txt", Size: 50},
+		{ClientFileID: "c2", Name: "b.txt", Size: 60},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	tid := res.TransferID
+	f1 := res.Files[0].FileID
+	f2 := res.Files[1].FileID
+
+	// Complete file 1.
+	m.MarkChunkComplete(ctx, tid, f1, 0, 50)
+	allDone, err := m.CompleteFile(ctx, tid, f1, "hash1", "a.txt", "/downloads/a.txt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if allDone {
+		t.Error("should not be allDone after 1 of 2 files")
+	}
+
+	// Transfer should still be transferring.
+	tr, _ := db.GetTransfer(ctx, tid)
+	if tr.Status != string(StatusTransferring) {
+		t.Errorf("transfer status = %s, want transferring", tr.Status)
+	}
+
+	// Complete file 2.
+	m.MarkChunkComplete(ctx, tid, f2, 0, 60)
+	allDone, err = m.CompleteFile(ctx, tid, f2, "hash2", "b.txt", "/downloads/b.txt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !allDone {
+		t.Error("should be allDone after 2 of 2 files")
+	}
+
+	tr, _ = db.GetTransfer(ctx, tid)
+	if tr.Status != string(StatusCompleted) {
+		t.Errorf("transfer status = %s, want completed", tr.Status)
+	}
+}
+
+func TestCompleteFileHashMismatch(t *testing.T) {
+	db := newDB(t)
+	m := NewManager(db, 4*1024*1024, nil)
+	ctx := context.Background()
+
+	res, _ := m.Create(ctx, "s1", "d1", DirClientToServer, "o", []FileSpec{
+		{ClientFileID: "c1", Name: "a.txt", Size: 100, Sha256: "expected_hash"},
+	})
+	tid := res.TransferID
+	fid := res.Files[0].FileID
+	m.MarkChunkComplete(ctx, tid, fid, 0, 100)
+
+	// Complete with wrong hash.
+	_, err := m.CompleteFile(ctx, tid, fid, "wrong_hash", "a.txt", "/downloads/a.txt")
+	if err != ErrHashMismatch {
+		t.Errorf("expected ErrHashMismatch, got %v", err)
+	}
+
+	// File should be marked failed.
+	f, _ := db.GetTransferFile(ctx, fid)
+	if f.Status != string(StatusFailed) {
+		t.Errorf("file status = %s, want failed", f.Status)
+	}
+}
+
+func TestCompleteFileNotFound(t *testing.T) {
+	db := newDB(t)
+	m := NewManager(db, 4*1024*1024, nil)
+	ctx := context.Background()
+
+	_, err := m.CompleteFile(ctx, "t1", "nonexistent", "hash", "f.txt", "/f.txt")
+	if err != ErrFileNotFound {
+		t.Errorf("expected ErrFileNotFound, got %v", err)
+	}
+}
+
+func TestCancelTerminalTransfer(t *testing.T) {
+	db := newDB(t)
+	m := NewManager(db, 4*1024*1024, nil)
+	ctx := context.Background()
+
+	res, _ := m.Create(ctx, "s1", "d1", DirClientToServer, "o", []FileSpec{
+		{ClientFileID: "c1", Name: "a.txt", Size: 10},
+	})
+	tid := res.TransferID
+
+	// Complete the file to make the transfer terminal.
+	m.MarkChunkComplete(ctx, tid, res.Files[0].FileID, 0, 10)
+	m.CompleteFile(ctx, tid, res.Files[0].FileID, "h", "a.txt", "/a.txt")
+
+	// Cancel should fail on a completed transfer.
+	err := m.Cancel(ctx, tid)
+	if err == nil {
+		t.Error("cancel on completed transfer should fail")
+	}
+}
+
+func TestCancelNonexistentTransfer(t *testing.T) {
+	db := newDB(t)
+	m := NewManager(db, 4*1024*1024, nil)
+	ctx := context.Background()
+
+	err := m.Cancel(ctx, "nonexistent")
+	if err != ErrTransferNotFound {
+		t.Errorf("expected ErrTransferNotFound, got %v", err)
 	}
 }

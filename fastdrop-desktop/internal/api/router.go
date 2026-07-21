@@ -49,9 +49,10 @@ func New(s *Server) http.Handler {
 
 	// --- pairing ---
 	mux.HandleFunc("POST /api/v1/pair/request", s.withSizeLimit(64*1024, s.withPairRateLimit(s.handlePairRequest)))
+	mux.HandleFunc("GET /api/v1/pair/requests", s.handleListPairRequests)
 	mux.HandleFunc("GET /api/v1/pair/requests/{requestId}", s.handlePairStatus)
-	mux.HandleFunc("POST /api/v1/pair/requests/{requestId}/accept", s.handlePairAccept)
-	mux.HandleFunc("POST /api/v1/pair/requests/{requestId}/reject", s.handlePairReject)
+	mux.HandleFunc("POST /api/v1/pair/requests/{requestId}/accept", s.withPairRateLimit(s.handlePairAccept))
+	mux.HandleFunc("POST /api/v1/pair/requests/{requestId}/reject", s.withPairRateLimit(s.handlePairReject))
 	mux.HandleFunc("POST /api/v1/pair/token/refresh", s.withAuth(s.handlePairTokenRefresh))
 
 	// --- session ---
@@ -179,7 +180,10 @@ func (s *Server) withAuth(next http.HandlerFunc) http.HandlerFunc {
 			return
 		}
 		ip := clientIP(r)
-		row, err := s.Session.Validate(r.Context(), sessionID, token, ip, true)
+		// enforceIP=false: the same session is shared by the PC browser
+		// (127.0.0.1) and the phone (LAN IP), so strict IP binding would
+		// reject valid API requests from the phone.
+		row, err := s.Session.Validate(r.Context(), sessionID, token, ip, false)
 		if err != nil {
 			code, status := sessionErrToHTTP(err)
 			writeError(w, status, code, "session rejected", reqID)

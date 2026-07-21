@@ -69,10 +69,10 @@ func (s *Server) withPairRateLimit(next http.HandlerFunc) http.HandlerFunc {
 }
 
 // readJSON decodes the body into out using encoding/json with the upstream
-// MaxBytesReader enforcing size limits.
+// MaxBytesReader enforcing size limits. Unknown fields are tolerated for
+// forward-compatibility with newer clients.
 func readJSON(r *http.Request, out any) error {
 	dec := json.NewDecoder(r.Body)
-	dec.DisallowUnknownFields()
 	return dec.Decode(out)
 }
 

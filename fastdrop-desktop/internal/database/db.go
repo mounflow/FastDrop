@@ -249,19 +249,19 @@ func (d *DB) DeleteExpiredSessions(ctx context.Context, cutoff int64) (int64, er
 // --- transfers ---
 
 type TransferRow struct {
-	ID                string
-	SessionID         string
-	PeerDeviceID      string
-	Direction         string
-	Status            string
-	TotalFiles        int
-	TotalBytes        int64
-	TransferredBytes  int64
-	CreatedAt         int64
-	StartedAt         sql.NullInt64
-	CompletedAt       sql.NullInt64
-	ErrorCode         string
-	ErrorMessage      string
+	ID               string  `json:"id"`
+	SessionID        string  `json:"sessionId"`
+	PeerDeviceID     string  `json:"peerDeviceId"`
+	Direction        string  `json:"direction"`
+	Status           string  `json:"status"`
+	TotalFiles       int     `json:"totalFiles"`
+	TotalBytes       int64   `json:"totalBytes"`
+	TransferredBytes int64   `json:"transferredBytes"`
+	CreatedAt        int64   `json:"createdAt"`
+	StartedAt        *int64  `json:"startedAt"`
+	CompletedAt      *int64  `json:"completedAt"`
+	ErrorCode        string  `json:"errorCode,omitempty"`
+	ErrorMessage     string  `json:"errorMessage,omitempty"`
 }
 
 func (d *DB) InsertTransfer(ctx context.Context, t TransferRow) error {
@@ -280,9 +280,22 @@ func (d *DB) UpdateTransferStatus(ctx context.Context, id, status string, transf
 	return err
 }
 
-func (d *DB) MarkTransferCompleted(ctx context.Context, id string, completedAt int64) error {
-	_, err := d.ExecContext(ctx, `UPDATE transfers SET status = ?, completed_at = ?, error_code = NULL, error_message = NULL WHERE id = ?`,
-		"completed", completedAt, id)
+// MarkTransferStarted sets started_at and status='transferring' only if
+// started_at is still NULL (idempotent — first chunk wins). Returns true
+// if the row was actually updated (i.e. this is the first chunk).
+func (d *DB) MarkTransferStarted(ctx context.Context, id string, startedAt int64) (bool, error) {
+	res, err := d.ExecContext(ctx, `UPDATE transfers SET started_at = ?, status = 'transferring' WHERE id = ? AND started_at IS NULL`,
+		startedAt, id)
+	if err != nil {
+		return false, err
+	}
+	n, _ := res.RowsAffected()
+	return n > 0, nil
+}
+
+func (d *DB) MarkTransferCompleted(ctx context.Context, id string, transferredBytes int64, completedAt int64) error {
+	_, err := d.ExecContext(ctx, `UPDATE transfers SET status = ?, transferred_bytes = ?, completed_at = ?, error_code = NULL, error_message = NULL WHERE id = ?`,
+		"completed", transferredBytes, completedAt, id)
 	return err
 }
 
@@ -290,10 +303,13 @@ func (d *DB) GetTransfer(ctx context.Context, id string) (*TransferRow, error) {
 	row := d.QueryRowContext(ctx, `SELECT id, session_id, peer_device_id, direction, status, total_files, total_bytes, transferred_bytes, created_at, started_at, completed_at, error_code, error_message FROM transfers WHERE id = ?`, id)
 	var t TransferRow
 	var sessionID, errCode, errMsg sql.NullString
-	if err := row.Scan(&t.ID, &sessionID, &t.PeerDeviceID, &t.Direction, &t.Status, &t.TotalFiles, &t.TotalBytes, &t.TransferredBytes, &t.CreatedAt, &t.StartedAt, &t.CompletedAt, &errCode, &errMsg); err != nil {
+	var startedAt, completedAt sql.NullInt64
+	if err := row.Scan(&t.ID, &sessionID, &t.PeerDeviceID, &t.Direction, &t.Status, &t.TotalFiles, &t.TotalBytes, &t.TransferredBytes, &t.CreatedAt, &startedAt, &completedAt, &errCode, &errMsg); err != nil {
 		return nil, err
 	}
 	t.SessionID = sessionID.String
+	t.StartedAt = nullInt64Ptr(startedAt)
+	t.CompletedAt = nullInt64Ptr(completedAt)
 	t.ErrorCode = errCode.String
 	t.ErrorMessage = errMsg.String
 	return &t, nil
@@ -309,10 +325,13 @@ func (d *DB) ListTransfersForSession(ctx context.Context, sessionID string) ([]T
 	for rows.Next() {
 		var t TransferRow
 		var sessionID, errCode, errMsg sql.NullString
-		if err := rows.Scan(&t.ID, &sessionID, &t.PeerDeviceID, &t.Direction, &t.Status, &t.TotalFiles, &t.TotalBytes, &t.TransferredBytes, &t.CreatedAt, &t.StartedAt, &t.CompletedAt, &errCode, &errMsg); err != nil {
+		var startedAt, completedAt sql.NullInt64
+		if err := rows.Scan(&t.ID, &sessionID, &t.PeerDeviceID, &t.Direction, &t.Status, &t.TotalFiles, &t.TotalBytes, &t.TransferredBytes, &t.CreatedAt, &startedAt, &completedAt, &errCode, &errMsg); err != nil {
 			return nil, err
 		}
 		t.SessionID = sessionID.String
+		t.StartedAt = nullInt64Ptr(startedAt)
+		t.CompletedAt = nullInt64Ptr(completedAt)
 		t.ErrorCode = errCode.String
 		t.ErrorMessage = errMsg.String
 		out = append(out, t)
@@ -323,25 +342,25 @@ func (d *DB) ListTransfersForSession(ctx context.Context, sessionID string) ([]T
 // --- transfer_files ---
 
 type TransferFileRow struct {
-	ID                string
-	TransferID        string
-	ClientFileID      string
-	OriginalName      string
-	SavedName         string
-	SourcePath        string
-	TargetPath        string
-	MimeType          string
-	TotalBytes        int64
-	TransferredBytes  int64
-	ChunkSize         int
-	TotalChunks       int
-	CompletedChunks   int
-	Sha256Expected    string
-	Sha256Actual      string
-	Status            string
-	CreatedAt         int64
-	CompletedAt       sql.NullInt64
-	ErrorCode         string
+	ID               string `json:"id"`
+	TransferID       string `json:"transferId"`
+	ClientFileID     string `json:"clientFileId,omitempty"`
+	OriginalName     string `json:"originalName"`
+	SavedName        string `json:"savedName,omitempty"`
+	SourcePath       string `json:"sourcePath,omitempty"`
+	TargetPath       string `json:"targetPath,omitempty"`
+	MimeType         string `json:"mimeType,omitempty"`
+	TotalBytes       int64  `json:"totalBytes"`
+	TransferredBytes int64  `json:"transferredBytes"`
+	ChunkSize        int    `json:"chunkSize"`
+	TotalChunks      int    `json:"totalChunks"`
+	CompletedChunks  int    `json:"completedChunks"`
+	Sha256Expected   string `json:"sha256Expected,omitempty"`
+	Sha256Actual     string `json:"sha256Actual,omitempty"`
+	Status           string `json:"status"`
+	CreatedAt        int64  `json:"createdAt"`
+	CompletedAt      *int64 `json:"completedAt"`
+	ErrorCode        string `json:"errorCode,omitempty"`
 }
 
 func (d *DB) InsertTransferFile(ctx context.Context, f TransferFileRow) error {
@@ -373,7 +392,7 @@ func (d *DB) GetTransferFile(ctx context.Context, fileID string) (*TransferFileR
 	f.Sha256Expected = shaExp.String
 	f.Sha256Actual = shaAct.String
 	f.ErrorCode = errCode.String
-	f.CompletedAt = completedAt
+	f.CompletedAt = nullInt64Ptr(completedAt)
 	return &f, nil
 }
 
@@ -401,7 +420,7 @@ func (d *DB) ListTransferFiles(ctx context.Context, transferID string) ([]Transf
 		f.Sha256Expected = shaExp.String
 		f.Sha256Actual = shaAct.String
 		f.ErrorCode = errCode.String
-		f.CompletedAt = completedAt
+		f.CompletedAt = nullInt64Ptr(completedAt)
 		out = append(out, f)
 	}
 	return out, rows.Err()
@@ -534,4 +553,13 @@ func nullableString(s string) any {
 		return nil
 	}
 	return s
+}
+
+// nullInt64Ptr converts a sql.NullInt64 to *int64 for clean JSON output
+// (null when invalid, integer when valid).
+func nullInt64Ptr(n sql.NullInt64) *int64 {
+	if !n.Valid {
+		return nil
+	}
+	return &n.Int64
 }

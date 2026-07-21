@@ -31,10 +31,9 @@ export async function pollPairStatus(requestId) {
     return asJson(await fetch(`/api/v1/pair/requests/${requestId}`));
 }
 export async function acceptPair(requestId) {
-    await fetch(`/api/v1/pair/requests/${requestId}/accept`, {
+    return asJson(await fetch(`/api/v1/pair/requests/${requestId}/accept`, {
         method: 'POST',
-        ...{ headers: authHeaders() },
-    });
+    }));
 }
 export async function rejectPair(requestId) {
     await fetch(`/api/v1/pair/requests/${requestId}/reject`, {
@@ -42,33 +41,63 @@ export async function rejectPair(requestId) {
         ...{ headers: authHeaders() },
     });
 }
+export async function listPairRequests() {
+    return asJson(await fetch('/api/v1/pair/requests'));
+}
 export async function listTransfers() {
     const data = await asJson(await fetch('/api/v1/transfers', { headers: authHeaders() }));
     return data.transfers || [];
 }
-export async function createTransfer(body) {
+export async function getTransfer(transferId) {
+    return asJson(await fetch(`/api/v1/transfers/${transferId}`, { headers: authHeaders() }));
+}
+export async function createTransfer(body, signal) {
     return asJson(await fetch('/api/v1/transfers', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', ...authHeaders() },
         body: JSON.stringify(body),
+        signal,
     }));
 }
-export async function uploadChunk(url, data) {
+export async function uploadChunk(url, data, signal) {
     const resp = await fetch(url, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/octet-stream', ...authHeaders() },
         body: data,
+        signal,
     });
     if (!resp.ok)
         throw new Error(`chunk upload failed: ${resp.status}`);
 }
-export async function completeFile(url, size, sha256) {
+export async function completeFile(url, size, sha256, signal) {
     return asJson(await fetch(url, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', ...authHeaders() },
         body: JSON.stringify({ size, sha256 }),
+        signal,
     }));
 }
 export async function cancelTransfer(transferId) {
     await fetch(`/api/v1/transfers/${transferId}/cancel`, { method: 'POST', headers: authHeaders() });
+}
+/// Download a file's content as a Blob (full GET, no Range).
+export async function downloadFileBlob(transferId, fileId, signal) {
+    const resp = await fetch(`/api/v1/transfers/${transferId}/files/${fileId}/content`, {
+        headers: authHeaders(),
+        signal,
+    });
+    if (!resp.ok)
+        throw new Error(`download failed: ${resp.status}`);
+    return resp.blob();
+}
+/// Trigger a browser file-save dialog for the given Blob.
+export function triggerBrowserDownload(blob, fileName) {
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = fileName;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
 }

@@ -106,6 +106,12 @@ func (m *Manager) Validate(ctx context.Context, sessionID, token, sourceIP strin
 	return row, nil
 }
 
+// Get returns the raw session row for lightweight validity checks
+// (no token comparison).
+func (m *Manager) Get(ctx context.Context, sessionID string) (*database.SessionRow, error) {
+	return m.db.GetSession(ctx, sessionID)
+}
+
 // Revoke marks a session revoked.
 func (m *Manager) Revoke(ctx context.Context, sessionID string) error {
 	if err := m.db.RevokeSession(ctx, sessionID); err != nil {

@@ -59,8 +59,61 @@ func main() {
 	}
 	pairMgr := pairing.NewManager(time.Duration(cfg.Security.PairTokenTTLSeconds) * time.Second)
 	sessMgr := session.NewManager(db, time.Duration(cfg.Security.SessionTTLSeconds)*time.Second)
-	transferMgr := transfer.NewManager(db, cfg.Transfer.ChunkSize, nil)
 	wsHub := websocket.NewHub(&websocket.SessionValidator{M: sessMgr})
+
+	// WS message router ties the control channel to business logic.
+	wsRouter := &websocket.Router{
+		Hub:      wsHub,
+		Session:  sessMgr,
+		DB:       db,
+		Storage:  store,
+	}
+	// transferMgr needs the router for progress callbacks, so create it after.
+	transferMgr := transfer.NewManager(db, cfg.Transfer.ChunkSize, wsRouter.TransferEventCallback())
+	wsRouter.Transfer = transferMgr
+	wsHub.OnMessage = wsRouter.OnMessage
+
+	// §19: When a session's 60s reconnect grace expires, fail all its
+	// active transfers so the client knows the transfer is lost.
+	wsHub.OnGraceExpired = func(sessionID string) {
+		transfers, err := db.ListTransfersForSession(context.Background(), sessionID)
+		if err != nil {
+			return
+		}
+		for _, t := range transfers {
+			if transfer.Status(t.Status).IsTerminal() {
+				continue
+			}
+			_ = db.UpdateTransferStatus(context.Background(), t.ID, string(transfer.StatusFailed), t.TransferredBytes, "WS_DISCONNECTED", "reconnect grace period expired")
+			env, _ := websocket.NewEnvelope(websocket.MsgTransferFailed, map[string]any{
+				"transferId": t.ID,
+				"error":      "reconnect grace period expired",
+			})
+			_ = wsHub.Send(sessionID, env)
+		}
+	}
+
+	// Broadcast device.info / device.disconnect to the session when
+	// clients connect or leave.
+	wsHub.OnClientConnected = func(sessionID, deviceID string) {
+		name := deviceID
+		if dev, err := db.GetDevice(context.Background(), deviceID); err == nil {
+			name = dev.Name
+		}
+		env, _ := websocket.NewEnvelope(websocket.MsgDeviceInfo, map[string]any{
+			"deviceId":   deviceID,
+			"deviceName": name,
+			"event":      "connected",
+		})
+		_ = wsHub.Send(sessionID, env)
+	}
+	wsHub.OnClientDisconnected = func(sessionID, deviceID string) {
+		env, _ := websocket.NewEnvelope(websocket.MsgDeviceDisconnect, map[string]any{
+			"deviceId": deviceID,
+			"event":    "disconnected",
+		})
+		_ = wsHub.Send(sessionID, env)
+	}
 
 	// Choose discovery implementation.
 	var publisher discovery.DiscoveryPublisher = discovery.NoopPublisher{}
@@ -116,6 +169,8 @@ func main() {
 		for _, ip := range lanIPs {
 			log.Printf("[startup] listening on http://%s:%d", ip, cfg.Server.Port)
 		}
+		log.Println("[startup] NOTE: If your phone cannot reach this server, you may need to allow")
+		log.Println("[startup]       FastDrop through the Windows firewall (private networks).")
 	}
 
 	go func() {
@@ -156,7 +211,10 @@ func wsHandler(hub *websocket.Hub, sessMgr *session.Manager) http.HandlerFunc {
 		if h := r.Header.Get("Authorization"); len(h) > 7 && h[:7] == "Bearer " {
 			sessID := r.Header.Get("X-Session-Id")
 			if sessID != "" {
-				row, err := sessMgr.Validate(r.Context(), sessID, h[7:], clientIP(r), true)
+				// enforceIP=false: the same session is shared by the PC
+				// browser (127.0.0.1) and the phone (LAN IP), so strict
+				// IP binding would reject valid WS connections.
+				row, err := sessMgr.Validate(r.Context(), sessID, h[7:], clientIP(r), false)
 				if err == nil {
 					pre = &websocket.PreAuth{SessionID: row.ID, DeviceID: row.DeviceID}
 				}

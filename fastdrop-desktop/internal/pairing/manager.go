@@ -279,6 +279,20 @@ func (m *Manager) Refresh(pairID, serverName, sourceIP string) (*PairToken, erro
 	return pt, nil
 }
 
+// ListPendingRequests returns all requests still waiting for user action.
+func (m *Manager) ListPendingRequests() []*PairRequest {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	now := m.now()
+	out := make([]*PairRequest, 0)
+	for _, r := range m.requests {
+		if r.Status == StatusWaitingConfirmation && now.Before(r.ExpiresAt) {
+			out = append(out, r)
+		}
+	}
+	return out
+}
+
 // Cleanup evicts expired tokens and expired pending requests. Intended to be
 // called on a timer.
 func (m *Manager) Cleanup() {
@@ -291,7 +305,9 @@ func (m *Manager) Cleanup() {
 		}
 	}
 	for id, r := range m.requests {
-		if r.Status != StatusWaitingConfirmation || now.After(r.ExpiresAt.Add(5*time.Minute)) {
+		// Keep terminal requests (accepted/rejected/expired) for 5 minutes
+		// after creation so the phone has time to poll for the result.
+		if now.After(r.CreatedAt.Add(5 * time.Minute)) {
 			delete(m.requests, id)
 			delete(m.tokenByRequest, id)
 		}

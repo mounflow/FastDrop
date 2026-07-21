@@ -4,6 +4,7 @@ import (
 	"errors"
 	"net/http"
 
+	"fastdrop-desktop/internal/netutil"
 	"fastdrop-desktop/internal/pairing"
 )
 
@@ -109,7 +110,20 @@ func (s *Server) handlePairAccept(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "PAIR_REQUEST_EXPIRED", err.Error(), requestID)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"status": "accepted"})
+	writeJSON(w, http.StatusOK, map[string]any{
+		"status": "accepted",
+		"session": map[string]any{
+			"sessionId":    sess.ID,
+			"accessToken":  sess.Token,
+			"expiresIn":    sess.ExpiresIn(),
+			"websocketUrl": s.WebSocketURL(req.Device.DeviceID),
+		},
+		"server": map[string]any{
+			"deviceId":   "local",
+			"deviceName": s.Cfg.Server.DeviceName,
+			"platform":   "windows",
+		},
+	})
 }
 
 // handlePairReject is invoked by the PC user to decline.
@@ -141,6 +155,23 @@ func (s *Server) handlePairTokenRefresh(w http.ResponseWriter, r *http.Request) 
 	writeJSON(w, http.StatusOK, s.qrPayload(pt))
 }
 
+// handleListPairRequests returns all pending pair requests for the PC UI.
+func (s *Server) handleListPairRequests(w http.ResponseWriter, r *http.Request) {
+	requests := s.Pairing.ListPendingRequests()
+	out := make([]map[string]any, 0, len(requests))
+	for _, req := range requests {
+		out = append(out, map[string]any{
+			"requestId":  req.RequestID,
+			"pairId":     req.PairID,
+			"status":     string(req.Status),
+			"device":     req.Device,
+			"expiresIn":  int(timeUntil(req.ExpiresAt).Seconds()),
+			"createdAt":  req.CreatedAt.UnixMilli(),
+		})
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"requests": out})
+}
+
 // handleCurrentQRPayload returns the active QR data for the Vue UI. If no
 // token has been issued yet (server just started), one is minted on demand.
 func (s *Server) handleCurrentQRPayload(w http.ResponseWriter, r *http.Request) {
@@ -153,14 +184,23 @@ func (s *Server) handleCurrentQRPayload(w http.ResponseWriter, r *http.Request) 
 }
 
 func (s *Server) qrPayload(pt *pairing.PairToken) map[string]any {
-	host := s.Cfg.Server.BindAddress
-	if host == "" || host == "auto" {
-		host = "0.0.0.0"
+	primary := s.resolveHost()
+	candidates := netutil.LANIPv4Addresses()
+	// Build altHosts: every other LAN IPv4 the server is reachable on.
+	// The phone tries `host` first, then each altHost until one connects.
+	// This handles the common case where the phone is on the PC's mobile
+	// hotspot (different subnet from the PC's primary LAN IP).
+	altHosts := make([]string, 0, len(candidates))
+	for _, ip := range candidates {
+		if ip != primary {
+			altHosts = append(altHosts, ip)
+		}
 	}
 	return map[string]any{
 		"version":    1,
 		"protocol":   "fastdrop",
-		"host":       host,
+		"host":       primary,
+		"altHosts":   altHosts,
 		"port":       s.Cfg.Server.Port,
 		"pairId":     pt.PairID,
 		"token":      pt.Token,

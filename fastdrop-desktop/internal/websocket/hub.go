@@ -15,6 +15,9 @@ import (
 // the session package; tests inject a stub.
 type Validator interface {
 	Validate(ctx context.Context, sessionID, token, sourceIP string, enforceIP bool) (deviceID string, err error)
+	// IsSessionValid reports whether the session exists and is not expired
+	// or revoked. Used for periodic WS connection liveness checks.
+	IsSessionValid(ctx context.Context, sessionID string) bool
 }
 
 // Client is a single authenticated WS connection.
@@ -30,20 +33,46 @@ type Client struct {
 	hmu        sync.Mutex // guards lastPong / missedPongs
 }
 
+// MessageHandler receives authenticated WS messages for routing to business logic.
+type MessageHandler func(c *Client, env *Envelope)
+
 // Hub routes messages between the server and connected clients, and runs
 // the heartbeat loop (spec §19).
+//
+// Multiple WS connections may share the same sessionID (e.g. the PC Vue UI
+// and the phone both connect with the session created during pairing). The
+// Hub delivers messages to ALL connected clients on a session.
 type Hub struct {
 	mu          sync.RWMutex
-	clients     map[string]*Client // sessionID -> client
+	clients     map[string]map[*Client]bool // sessionID -> set of clients
 	validator   Validator
 	register    chan *Client
 	unregister  chan *Client
 	broadcast   chan broadcast
 	authTimeout time.Duration
 
+	// OnMessage is called for every non-heartbeat message after auth.
+	OnMessage MessageHandler
+
+	// OnGraceExpired is called when a session's 60s reconnect grace period
+	// expires without a new connection (§19). The callback should fail
+	// active transfers for that session.
+	OnGraceExpired func(sessionID string)
+
+	// OnClientConnected / OnClientDisconnected are called after a client
+	// registers / unregisters. Used to broadcast device.info /
+	// device.disconnect to the session.
+	OnClientConnected    func(sessionID, deviceID string)
+	OnClientDisconnected func(sessionID, deviceID string)
+
 	// Per-session inbox for offline messages (waiting for reconnect).
 	inboxesMu sync.Mutex
 	inboxes   map[string][][]byte
+
+	// Grace timers keyed by sessionID — started when the last client
+	// disconnects, cancelled on reconnect.
+	graceMu     sync.Mutex
+	graceTimers map[string]*time.Timer
 }
 
 type broadcast struct {
@@ -54,13 +83,14 @@ type broadcast struct {
 // NewHub constructs a Hub with the given validator.
 func NewHub(v Validator) *Hub {
 	return &Hub{
-		clients:     make(map[string]*Client),
+		clients:     make(map[string]map[*Client]bool),
 		validator:   v,
 		register:    make(chan *Client, 16),
 		unregister:  make(chan *Client, 16),
 		broadcast:   make(chan broadcast, 64),
 		authTimeout: 10 * time.Second,
 		inboxes:     make(map[string][][]byte),
+		graceTimers: make(map[string]*time.Timer),
 	}
 }
 
@@ -74,15 +104,22 @@ func (h *Hub) Run(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case c := <-h.register:
-			h.mu.Lock()
-			// Drop any existing client on the same session (single-session policy).
-			if old, ok := h.clients[c.sessionID]; ok {
-				close(old.send)
-				_ = old.conn.Close()
+			// Cancel any pending reconnect-grace timer for this session.
+			h.graceMu.Lock()
+			if timer, ok := h.graceTimers[c.sessionID]; ok {
+				timer.Stop()
+				delete(h.graceTimers, c.sessionID)
 			}
-			h.clients[c.sessionID] = c
+			h.graceMu.Unlock()
+			h.mu.Lock()
+			set := h.clients[c.sessionID]
+			if set == nil {
+				set = make(map[*Client]bool)
+				h.clients[c.sessionID] = set
+			}
+			set[c] = true
 			h.mu.Unlock()
-			// Flush any queued messages.
+			// Flush any queued messages to the newly connected client.
 			h.inboxesMu.Lock()
 			if queued, ok := h.inboxes[c.sessionID]; ok {
 				delete(h.inboxes, c.sessionID)
@@ -98,23 +135,35 @@ func (h *Hub) Run(ctx context.Context) {
 			}
 		case c := <-h.unregister:
 			h.mu.Lock()
-			if existing, ok := h.clients[c.sessionID]; ok && existing == c {
-				delete(h.clients, c.sessionID)
-				close(c.send)
+			lastClient := false
+			if set, ok := h.clients[c.sessionID]; ok {
+				if set[c] {
+					delete(set, c)
+					close(c.send)
+				}
+				if len(set) == 0 {
+					delete(h.clients, c.sessionID)
+					lastClient = true
+				}
 			}
 			h.mu.Unlock()
+			// §19: Start 60s reconnect grace when the last client disconnects.
+			if lastClient {
+				h.startGraceTimer(c.sessionID)
+			}
 		case b := <-h.broadcast:
 			h.mu.RLock()
-			c, ok := h.clients[b.sessionID]
-			h.mu.RUnlock()
-			if ok {
+			set := h.clients[b.sessionID]
+			delivered := false
+			for c := range set {
 				select {
 				case c.send <- b.data:
+					delivered = true
 				default:
-					// Backpressure: enqueue for next reconnect.
-					h.enqueueInbox(b.sessionID, b.data)
 				}
-			} else {
+			}
+			h.mu.RUnlock()
+			if !delivered {
 				h.enqueueInbox(b.sessionID, b.data)
 			}
 		case <-ticker.C:
@@ -148,14 +197,42 @@ func (h *Hub) enqueueInbox(sessionID string, data []byte) {
 	h.inboxes[sessionID] = append(q, data)
 }
 
+// startGraceTimer begins the 60s reconnect-grace window for a session.
+// If no client reconnects before it fires, OnGraceExpired is called.
+func (h *Hub) startGraceTimer(sessionID string) {
+	h.graceMu.Lock()
+	defer h.graceMu.Unlock()
+	if _, exists := h.graceTimers[sessionID]; exists {
+		return // already ticking
+	}
+	h.graceTimers[sessionID] = time.AfterFunc(ReconnectGrace, func() {
+		h.graceMu.Lock()
+		delete(h.graceTimers, sessionID)
+		h.graceMu.Unlock()
+		if h.OnGraceExpired != nil {
+			h.OnGraceExpired(sessionID)
+		}
+	})
+}
+
 func (h *Hub) sendHeartbeats(ctx context.Context) {
 	h.mu.RLock()
-	clients := make([]*Client, 0, len(h.clients))
-	for _, c := range h.clients {
-		clients = append(clients, c)
+	clients := make([]*Client, 0)
+	for _, set := range h.clients {
+		for c := range set {
+			clients = append(clients, c)
+		}
 	}
 	h.mu.RUnlock()
 	for _, c := range clients {
+		// Periodic session-expiry check: if the session has been revoked
+		// or expired, disconnect the client.
+		if h.validator != nil && !h.validator.IsSessionValid(ctx, c.sessionID) {
+			_ = h.sendError(c, "SESSION_EXPIRED", "session expired or revoked")
+			h.unregister <- c
+			_ = c.conn.Close()
+			continue
+		}
 		c.hmu.Lock()
 		c.missedPongs++
 		drop := c.missedPongs > MissedPongsThreshold
@@ -195,7 +272,15 @@ func (h *Hub) HandleConn(ctx context.Context, conn *websocket.Conn, sourceIP str
 
 	// Register and start loops.
 	h.register <- c
-	defer func() { h.unregister <- c }()
+	if h.OnClientConnected != nil {
+		h.OnClientConnected(c.sessionID, c.deviceID)
+	}
+	defer func() {
+		if h.OnClientDisconnected != nil {
+			h.OnClientDisconnected(c.sessionID, c.deviceID)
+		}
+		h.unregister <- c
+	}()
 
 	// Set pong handler to reset the missed counter.
 	conn.SetPongHandler(func(string) error {
@@ -206,8 +291,9 @@ func (h *Hub) HandleConn(ctx context.Context, conn *websocket.Conn, sourceIP str
 		return nil
 	})
 
-	// Reader goroutine: pushes inbound messages to the hub (currently only
-	// consumes them; routing is a no-op until business logic is added).
+	// Reader goroutine: inbound messages are decoded here. Heartbeats are
+	// answered inline; everything else is forwarded to OnMessage (set by
+	// the caller — typically *websocket.Router).
 	done := make(chan struct{})
 	go c.writeLoop(done)
 	defer close(done)
@@ -232,9 +318,9 @@ func (h *Hub) HandleConn(ctx context.Context, conn *websocket.Conn, sourceIP str
 			_ = c.sendEnvelope(pong)
 			continue
 		}
-		// Forward to handler hook (set by callers via OnMessage). For now,
-		// just log message type.
-		log.Printf("[ws] received type=%s session=%s", env.Type, maskID(c.sessionID))
+		if h.OnMessage != nil {
+			h.OnMessage(c, &env)
+		}
 	}
 }
 
@@ -261,10 +347,16 @@ func (h *Hub) awaitAuth(ctx context.Context, c *Client) error {
 	if err := json.Unmarshal(env.Payload, &p); err != nil {
 		return err
 	}
-	devID, err := h.validator.Validate(ctx, p.SessionID, p.AccessToken, c.sourceIP, true)
+	// enforceIP=false: the same session is shared by the PC browser
+	// (127.0.0.1) and the phone (LAN IP), so strict IP binding would
+	// reject valid WS connections.
+	devID, err := h.validator.Validate(ctx, p.SessionID, p.AccessToken, c.sourceIP, false)
 	if err != nil {
 		res, _ := NewEnvelope(MsgAuthResult, AuthResultPayload{OK: false, Error: err.Error()})
-		_ = c.sendEnvelope(res)
+		// Write directly to the conn — writeLoop isn't running yet
+		// because it only starts after successful auth.
+		data, _ := json.Marshal(res)
+		_ = c.conn.WriteMessage(websocket.TextMessage, data)
 		return err
 	}
 	c.sessionID = p.SessionID

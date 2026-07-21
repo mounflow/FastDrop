@@ -1,0 +1,53 @@
+# Miscellaneous
+*.class
+*.log
+*.pyc
+*.swp
+.DS_Store
+.atom/
+.buildlog/
+.history
+.svn/
+migrate_working_dir/
+
+# IntelliJ related
+*.iml
+*.ipr
+*.iws
+.idea/
+
+# Visual Studio Code related
+.vscode/
+
+# Flutter / Dart
+**/doc/api/
+.dart_tool/
+.flutter-plugins
+.flutter-plugins-dependencies
+.packages
+build/
+.fvm/
+*.snap
+*.dart.js
+*.info
+*.g.dart
+*.freezed.dart
+
+# Android
+android/.gradle/
+android/app/build/
+android/captures/
+android/key.properties
+local.properties
+*.jks
+*.keystore
+
+# iOS / macOS (not built but keep dirs clean)
+ios/.generated/
+ios/Flutter/Generated.xcconfig
+macos/.generated/
+macos/Flutter/Generated.xcconfig
+
+# FastDrop specific
+.env
+*.part

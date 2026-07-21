@@ -2,10 +2,13 @@ package api
 
 import (
 	"net/http"
+	"strings"
 	"time"
 
 	"fastdrop-desktop/internal/database"
+	"fastdrop-desktop/internal/netutil"
 	"fastdrop-desktop/internal/pairing"
+	ws "fastdrop-desktop/internal/websocket"
 )
 
 // timeUntil returns seconds until t (never negative).
@@ -24,7 +27,6 @@ func upsertDeviceFromRequest(s *Server, dev pairing.ClientDevice, ip string) *da
 		AppVersion: dev.AppVersion, LastIP: ip,
 		FirstSeenAt: database.Now(), LastSeenAt: database.Now(),
 	}
-	_ = s.Session.RevokeAll // keep session import live; no-op
 	if existing, err := s.getDevice(dev.DeviceID); err == nil {
 		row.FirstSeenAt = existing.FirstSeenAt
 	}
@@ -44,12 +46,23 @@ func serverDeviceIdentity(s *Server) pairing.ClientDevice {
 }
 
 // WebSocketURL returns the canonical ws:// URL for the controller.
+// Falls back through: explicit BindAddress -> auto-detected LAN IPv4 ->
+// 127.0.0.1 (loopback only — useful for local dev, never for a real phone).
 func (s *Server) WebSocketURL(_ string) string {
-	host := s.Cfg.Server.BindAddress
-	if host == "" || host == "auto" {
-		host = "127.0.0.1"
+	return "ws://" + s.resolveHost() + ":" + itoaPort(s.Cfg.Server.Port) + "/ws/v1"
+}
+
+// resolveHost returns the host the phone should use to reach this PC.
+// Order: explicit BindAddress (not "auto") -> first LAN IPv4 -> loopback.
+func (s *Server) resolveHost() string {
+	h := s.Cfg.Server.BindAddress
+	if h != "" && h != "auto" && !strings.HasPrefix(h, "0.") {
+		return h
 	}
-	return "ws://" + host + ":" + itoaPort(s.Cfg.Server.Port) + "/ws/v1"
+	if lan := netutil.PreferLANIPv4(); lan != "" {
+		return lan
+	}
+	return "127.0.0.1"
 }
 
 func itoaPort(p int) string {
@@ -97,5 +110,9 @@ func (s *Server) handleSessionDelete(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "SESSION_INVALID", err.Error(), requestID(r))
 		return
 	}
+	// Notify all WS clients on this session that it has been revoked.
+	s.pushWSEvent(sessID, ws.MsgSessionRevoked, map[string]any{
+		"sessionId": sessID,
+	})
 	writeJSON(w, http.StatusOK, map[string]any{"status": "revoked"})
 }

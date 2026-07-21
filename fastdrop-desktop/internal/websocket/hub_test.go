@@ -22,6 +22,10 @@ func (f *fakeValidator) Validate(_ context.Context, _, _, _ string, _ bool) (str
 	return f.deviceID, f.err
 }
 
+func (f *fakeValidator) IsSessionValid(_ context.Context, _ string) bool {
+	return f.err == nil
+}
+
 // TestAuthFirstMessageRule: when no pre-auth, the first message MUST be auth.
 func TestAuthFirstMessageRule(t *testing.T) {
 	h := NewHub(&fakeValidator{deviceID: "dev1", err: nil})

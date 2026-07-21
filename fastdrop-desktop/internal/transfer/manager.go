@@ -144,15 +144,16 @@ func (m *Manager) Create(ctx context.Context, sessionID, peerDeviceID string, di
 }
 
 // MarkChunkComplete records that chunk `idx` for fileID has been received.
-// Returns the new completed-chunk count for that file.
-func (m *Manager) MarkChunkComplete(ctx context.Context, transferID, fileID string, idx int, chunkBytes int64) (int, error) {
+// Returns the new completed-chunk count for that file and whether this was
+// the first chunk for the entire transfer (justStarted).
+func (m *Manager) MarkChunkComplete(ctx context.Context, transferID, fileID string, idx int, chunkBytes int64) (int, bool, error) {
 	f, err := m.db.GetTransferFile(ctx, fileID)
 	if err != nil {
-		return 0, ErrFileNotFound
+		return 0, false, ErrFileNotFound
 	}
 	count, _, err := m.db.SetChunkBit(ctx, fileID, idx, f.TotalChunks)
 	if err != nil {
-		return 0, err
+		return 0, false, err
 	}
 	// In-memory progress (atomic enough for our purposes).
 	m.mu.Lock()
@@ -184,33 +185,38 @@ func (m *Manager) MarkChunkComplete(ctx context.Context, transferID, fileID stri
 	// Persist progress to DB at a coarse cadence; we always persist the chunk
 	// completion count but only the actual byte counter (cheap upserts).
 	if err := m.db.UpdateTransferFileProgress(ctx, fileID, fp.transferred, count, string(StatusTransferring)); err != nil {
-		return count, err
+		return count, false, err
 	}
+
+	// On the very first chunk, mark the transfer as started (sets started_at
+	// and status=transferring). Idempotent — only the first call succeeds.
+	justStarted, _ := m.db.MarkTransferStarted(ctx, transferID, database.Now())
 
 	if cb != nil && throttle.Allow(now) {
 		cb(transferID, fileID, fp.transferred, fp.total, speed)
 	}
-	return count, nil
+	return count, justStarted, nil
 }
 
 // CompleteFile transitions a file to verifying -> completed. The caller
-// supplies the actual hash (from storage.FinalizeAndVerify).
-func (m *Manager) CompleteFile(ctx context.Context, transferID, fileID, shaActual, savedName, targetPath string) error {
+// supplies the actual hash (from storage.FinalizeAndVerify). Returns true
+// if every file in the transfer is now completed (allDone).
+func (m *Manager) CompleteFile(ctx context.Context, transferID, fileID, shaActual, savedName, targetPath string) (bool, error) {
 	f, err := m.db.GetTransferFile(ctx, fileID)
 	if err != nil {
-		return ErrFileNotFound
+		return false, ErrFileNotFound
 	}
 	if f.Sha256Expected != "" && shaActual != f.Sha256Expected {
 		_ = m.db.UpdateTransferFileProgress(ctx, fileID, f.TransferredBytes, f.CompletedChunks, string(StatusFailed))
-		return ErrHashMismatch
+		return false, ErrHashMismatch
 	}
 	if err := m.db.CompleteTransferFile(ctx, fileID, shaActual, savedName, targetPath, string(StatusCompleted), database.Now()); err != nil {
-		return err
+		return false, err
 	}
 	// Check if every file in the transfer is completed.
 	files, err := m.db.ListTransferFiles(ctx, transferID)
 	if err != nil {
-		return err
+		return false, err
 	}
 	allDone := true
 	var sumBytes int64
@@ -221,10 +227,12 @@ func (m *Manager) CompleteFile(ctx context.Context, transferID, fileID, shaActua
 		}
 	}
 	if allDone {
-		return m.db.MarkTransferCompleted(ctx, transferID, database.Now())
+		// §12: transferring → verifying → completed.
+		_ = m.db.UpdateTransferStatus(ctx, transferID, string(StatusVerifying), sumBytes, "", "")
+		return true, m.db.MarkTransferCompleted(ctx, transferID, sumBytes, database.Now())
 	}
 	// Otherwise, update aggregate progress on the parent transfer row.
-	return m.db.UpdateTransferStatus(ctx, transferID, string(StatusTransferring), sumBytes, "", "")
+	return false, m.db.UpdateTransferStatus(ctx, transferID, string(StatusTransferring), sumBytes, "", "")
 }
 
 // Cancel moves a transfer to the cancelled state.

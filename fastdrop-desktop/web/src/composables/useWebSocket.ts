@@ -1,13 +1,15 @@
 // Minimal WS client wrapper. Reconnects with a 60-second grace window (§19).
+// Sends heartbeat.ping every 15s; 3 missed pongs = disconnected (§19).
 import { ref, type Ref } from 'vue'
 
-export type WSStatus = 'disconnected' | 'connecting' | 'connected'
+export type WSStatus = 'disconnected' | 'connecting' | 'connected' | 'reconnecting'
 
 export interface WSHandlers {
   onOpen?: () => void
   onMessage?: (msg: unknown) => void
   onClose?: () => void
   onError?: (err: unknown) => void
+  onAuthFailed?: () => void
 }
 
 export interface UseWebSocketOptions {
@@ -17,6 +19,12 @@ export interface UseWebSocketOptions {
   handlers: WSHandlers
 }
 
+const HEARTBEAT_INTERVAL = 15_000 // §19: 15s ping
+const MAX_MISSED_PONGS = 3        // §19: 3 missed = disconnected
+const GRACE_WINDOW = 60_000       // §19: 60s reconnect grace
+const BACKOFF_BASE = 1_000        // 1s initial backoff
+const BACKOFF_MAX = 15_000        // cap at 15s
+
 export function useWebSocket(opts: UseWebSocketOptions): {
   status: Ref<WSStatus>
   send: (msg: unknown) => void
@@ -25,15 +33,44 @@ export function useWebSocket(opts: UseWebSocketOptions): {
   const status = ref<WSStatus>('disconnected')
   let ws: WebSocket | null = null
   let reconnectTimer: ReturnType<typeof setTimeout> | null = null
-  let firstConnectAt = Date.now()
+  let heartbeatTimer: ReturnType<typeof setInterval> | null = null
+  let missedPongs = 0
+  let disconnectedAt: number | null = null
+  let reconnectAttempts = 0
+  let authFailed = false
+
+  function startHeartbeat() {
+    stopHeartbeat()
+    missedPongs = 0
+    heartbeatTimer = setInterval(() => {
+      if (!ws || ws.readyState !== WebSocket.OPEN) return
+      missedPongs++
+      if (missedPongs > MAX_MISSED_PONGS) {
+        // Server unresponsive — tear down and let reconnect logic handle it.
+        ws?.close()
+        return
+      }
+      ws.send(JSON.stringify({
+        version: 1,
+        type: 'heartbeat.ping',
+        timestamp: Date.now(),
+      }))
+    }, HEARTBEAT_INTERVAL)
+  }
+
+  function stopHeartbeat() {
+    if (heartbeatTimer) {
+      clearInterval(heartbeatTimer)
+      heartbeatTimer = null
+    }
+  }
 
   function connect() {
-    status.value = 'connecting'
-    const url = `${opts.url}?sessionId=${encodeURIComponent(opts.sessionId)}`
-    ws = new WebSocket(url)
+    status.value = reconnectAttempts > 0 ? 'reconnecting' : 'connecting'
+    ws = new WebSocket(opts.url)
     ws.onopen = () => {
-      status.value = 'connected'
-      // Send the first auth message even though we passed headers — fallback.
+      // Send auth as the first message; wait for auth.result before
+      // marking the connection as established.
       ws?.send(JSON.stringify({
         version: 1,
         type: 'auth',
@@ -41,18 +78,42 @@ export function useWebSocket(opts: UseWebSocketOptions): {
         timestamp: Date.now(),
         payload: { sessionId: opts.sessionId, accessToken: opts.accessToken },
       }))
-      opts.handlers.onOpen?.()
     }
     ws.onmessage = (ev) => {
       try {
-        opts.handlers.onMessage?.(JSON.parse(ev.data))
+        const msg = JSON.parse(ev.data)
+        // Handle auth result before forwarding to business logic.
+        if (msg?.type === 'auth.result') {
+          if (msg.payload?.ok) {
+            status.value = 'connected'
+            disconnectedAt = null
+            reconnectAttempts = 0
+            startHeartbeat()
+            opts.handlers.onOpen?.()
+          } else {
+            // Auth rejected — close and do not reconnect.
+            authFailed = true
+            opts.handlers.onAuthFailed?.()
+            ws?.close()
+          }
+          return
+        }
+        // Intercept heartbeat pong — reset miss counter, don't forward.
+        if (msg?.type === 'heartbeat.pong') {
+          missedPongs = 0
+          return
+        }
+        opts.handlers.onMessage?.(msg)
       } catch {
         // ignore malformed frames
       }
     }
     ws.onclose = () => {
       status.value = 'disconnected'
+      stopHeartbeat()
       opts.handlers.onClose?.()
+      if (authFailed) return // session revoked — do not reconnect
+      if (disconnectedAt === null) disconnectedAt = Date.now()
       scheduleReconnect()
     }
     ws.onerror = (err) => {
@@ -61,12 +122,15 @@ export function useWebSocket(opts: UseWebSocketOptions): {
   }
 
   function scheduleReconnect() {
-    if (Date.now() - firstConnectAt > 60_000) {
-      // Past the 60s grace window; give up.
+    // 60-second grace window measured from the moment of disconnect.
+    if (disconnectedAt !== null && Date.now() - disconnectedAt > GRACE_WINDOW) {
       return
     }
     if (reconnectTimer) clearTimeout(reconnectTimer)
-    reconnectTimer = setTimeout(connect, 1000)
+    // Exponential backoff: 1s, 2s, 4s, 8s, capped at 15s.
+    const delay = Math.min(BACKOFF_BASE * Math.pow(2, reconnectAttempts), BACKOFF_MAX)
+    reconnectAttempts++
+    reconnectTimer = setTimeout(connect, delay)
   }
 
   function send(msg: unknown) {
@@ -77,6 +141,8 @@ export function useWebSocket(opts: UseWebSocketOptions): {
 
   function close() {
     if (reconnectTimer) clearTimeout(reconnectTimer)
+    stopHeartbeat()
+    disconnectedAt = null // prevent reconnect on intentional close
     ws?.close()
     ws = null
     status.value = 'disconnected'

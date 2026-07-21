@@ -3,6 +3,7 @@ package storage
 import (
 	"bytes"
 	"context"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -143,6 +144,63 @@ func TestSanitizeAppliedToSavedName(t *testing.T) {
 	// Confirm the file lives inside the download dir.
 	if !strings.HasPrefix(path, m.downloadDir) {
 		t.Errorf("file written outside download dir: %s", path)
+	}
+}
+
+func TestReadChunk(t *testing.T) {
+	m := newMgr(t)
+	m.CreatePart("t1", "f1", 0)
+	// Write 26 bytes at offset 0.
+	m.WriteChunk("t1", "f1", 0, 16, []byte("abcdefghijklmnopqrstuvwxyz"))
+
+	// Read the full content back.
+	rc, err := m.ReadChunk("t1", "f1", 0, 26)
+	if err != nil {
+		t.Fatal(err)
+	}
+	buf, _ := io.ReadAll(rc)
+	rc.Close()
+	if string(buf) != "abcdefghijklmnopqrstuvwxyz" {
+		t.Errorf("full read: got %q", buf)
+	}
+
+	// Read a sub-range: offset 5, length 3 → "fgh".
+	rc, err = m.ReadChunk("t1", "f1", 5, 3)
+	if err != nil {
+		t.Fatal(err)
+	}
+	buf, _ = io.ReadAll(rc)
+	rc.Close()
+	if string(buf) != "fgh" {
+		t.Errorf("sub-range read: got %q", buf)
+	}
+
+	// Read past EOF: offset 20, length 100 → only 6 bytes available.
+	rc, err = m.ReadChunk("t1", "f1", 20, 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	buf, _ = io.ReadAll(rc)
+	rc.Close()
+	if string(buf) != "uvwxyz" {
+		t.Errorf("past-EOF read: got %q (len %d)", buf, len(buf))
+	}
+
+	// Read zero length → empty.
+	rc, err = m.ReadChunk("t1", "f1", 0, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	buf, _ = io.ReadAll(rc)
+	rc.Close()
+	if len(buf) != 0 {
+		t.Errorf("zero-length read: got %q", buf)
+	}
+
+	// Read from non-existent file → error.
+	_, err = m.ReadChunk("t1", "missing", 0, 10)
+	if err == nil {
+		t.Error("expected error for missing file")
 	}
 }
 
