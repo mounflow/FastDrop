@@ -5,6 +5,7 @@ import 'package:fastdrop_mobile/core/network/http_client.dart';
 import 'package:fastdrop_mobile/core/network/ws_client.dart';
 import 'package:fastdrop_mobile/core/storage/session_store.dart';
 import 'package:fastdrop_mobile/core/providers.dart';
+import 'package:fastdrop_mobile/features/pairing/pairing_screen.dart';
 import 'package:fastdrop_mobile/features/transfer/transfer_service.dart';
 import 'package:fastdrop_mobile/shared/models/transfer.dart';
 import 'package:fastdrop_mobile/shared/widgets/status_badge.dart';
@@ -137,6 +138,12 @@ class DeviceConnectionNotifier extends StateNotifier<DeviceConnectionState> {
   /// Transfer IDs that the user has explicitly cancelled.
   final Set<String> _cancelledTransfers = {};
 
+  /// Reset the notifier so [init] can run again (e.g. after re-pairing).
+  void resetForReinit() {
+    _initialized = false;
+    state = const DeviceConnectionState();
+  }
+
   /// Initialize: load session, configure HTTP client, connect WS.
   Future<void> init() async {
     if (_initialized) return;
@@ -215,8 +222,9 @@ class DeviceConnectionNotifier extends StateNotifier<DeviceConnectionState> {
 
   void _onWsAuthFailed() {
     if (!mounted) return;
-    // Session was revoked (e.g. server restarted) — trigger navigation
-    // to the pairing screen.
+    // Session was revoked (e.g. server restarted) — clear the persisted
+    // session and trigger navigation to the pairing screen.
+    _ref.read(sessionStoreProvider).clearSession();
     state = state.copyWith(
       sessionRevoked: true,
       connectionStatus: ConnectionStatus.disconnected,
@@ -502,6 +510,7 @@ class DeviceConnectionNotifier extends StateNotifier<DeviceConnectionState> {
   }
 
   void _handleSessionRevoked() {
+    _ref.read(sessionStoreProvider).clearSession();
     state = state.copyWith(
       sessionRevoked: true,
       connectionStatus: ConnectionStatus.disconnected,
@@ -554,6 +563,8 @@ class DevicesScreen extends ConsumerStatefulWidget {
 }
 
 class _DevicesScreenState extends ConsumerState<DevicesScreen> {
+  bool _navigatedToPairing = false;
+
   @override
   void initState() {
     super.initState();
@@ -567,10 +578,18 @@ class _DevicesScreenState extends ConsumerState<DevicesScreen> {
   Widget build(BuildContext context) {
     final state = ref.watch(deviceConnectionProvider);
 
-    // Navigate to pairing if session was revoked.
-    if (state.sessionRevoked) {
+    // Navigate to pairing if session was revoked. Guard against
+    // repeated navigation calls during the same widget lifetime.
+    if (state.sessionRevoked && !_navigatedToPairing) {
+      _navigatedToPairing = true;
       WidgetsBinding.instance.addPostFrameCallback((_) {
         if (context.mounted) {
+          // Reset the pairing provider so PairingScreen doesn't
+          // auto-navigate back to /devices with stale "paired" state.
+          ref.read(pairingProvider.notifier).resetToScanning();
+          // Reset the device connection so init() can run again
+          // after the user re-pairs.
+          ref.read(deviceConnectionProvider.notifier).resetForReinit();
           ScaffoldMessenger.of(context).showSnackBar(
             const SnackBar(content: Text('Session revoked by PC')),
           );
@@ -904,7 +923,11 @@ class _DevicesScreenState extends ConsumerState<DevicesScreen> {
             ),
             const SizedBox(height: 24),
             ElevatedButton.icon(
-              onPressed: () => Navigator.of(context).pushReplacementNamed('/pairing'),
+              onPressed: () {
+                ref.read(pairingProvider.notifier).resetToScanning();
+                ref.read(deviceConnectionProvider.notifier).resetForReinit();
+                Navigator.of(context).pushReplacementNamed('/pairing');
+              },
               icon: const Icon(Icons.qr_code_scanner),
               label: const Text('Pair with PC'),
             ),
