@@ -3,6 +3,7 @@ import 'dart:io';
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:path_provider/path_provider.dart';
 
 import 'package:fastdrop_mobile/shared/widgets/file_icon.dart';
 
@@ -202,12 +203,13 @@ class _FilePickerScreenState extends State<FilePickerScreen>
 
       if (result == null || result.files.isEmpty) return;
 
-      // Prevent Android MediaScanner from indexing cached copies
-      // (avoids duplicate photos appearing in the gallery).
-      _ensureNoMedia(result.files);
+      // Immediately relocate picked files to app-private temp storage so
+      // Android's MediaScanner never sees the file_picker cache copies
+      // (prevents duplicate photos in the gallery).
+      final relocated = await _relocateToPrivateCache(result.files);
 
       setState(() {
-        for (final pf in result.files) {
+        for (final pf in relocated) {
           // Avoid duplicates by path.
           final alreadyIn = _selected.any((s) => s.platformFile.path == pf.path);
           if (!alreadyIn && pf.path != null) {
@@ -247,26 +249,43 @@ class _FilePickerScreenState extends State<FilePickerScreen>
   // Helpers
   // ---------------------------------------------------------------------------
 
-  /// Creates a `.nomedia` file in each picked file's cache directory so
-  /// Android's MediaScanner does not index the cached copies (which would
-  /// cause duplicate photos in the gallery).
-  void _ensureNoMedia(List<PlatformFile> files) {
-    final dirs = <String>{};
-    for (final f in files) {
-      if (f.path == null) continue;
-      final parent = File(f.path!).parent.path;
-      dirs.add(parent);
+  /// Copy picked files into the app's private temp directory and delete
+  /// the file_picker cache originals. The private temp dir is never
+  /// scanned by MediaScanner, so no gallery duplicates appear.
+  ///
+  /// Returns a new list of [PlatformFile] pointing at the private copies.
+  Future<List<PlatformFile>> _relocateToPrivateCache(
+      List<PlatformFile> files) async {
+    final tempBase = await getTemporaryDirectory();
+    final uploadDir = Directory('${tempBase.path}${Platform.pathSeparator}fastdrop_upload');
+    if (!uploadDir.existsSync()) {
+      uploadDir.createSync(recursive: true);
     }
-    for (final dir in dirs) {
+
+    final result = <PlatformFile>[];
+    for (final pf in files) {
+      if (pf.path == null) continue;
       try {
-        final nomedia = File('$dir/.nomedia');
-        if (!nomedia.existsSync()) {
-          nomedia.createSync(recursive: true);
-        }
+        final src = File(pf.path!);
+        final destPath =
+            '${uploadDir.path}${Platform.pathSeparator}${DateTime.now().millisecondsSinceEpoch}_${pf.name}';
+        final dest = File(destPath);
+        await src.copy(destPath);
+        // Delete the file_picker cache copy immediately.
+        try {
+          await src.delete();
+        } catch (_) {}
+        result.add(PlatformFile(
+          name: pf.name,
+          size: pf.size,
+          path: destPath,
+        ));
       } catch (_) {
-        // Best-effort; not critical.
+        // If copy fails, fall back to the original path.
+        result.add(pf);
       }
     }
+    return result;
   }
 
   static String _formatBytes(int bytes) {

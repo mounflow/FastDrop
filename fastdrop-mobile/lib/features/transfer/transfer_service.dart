@@ -166,12 +166,12 @@ class TransferService {
 
       onStateChange?.call(createResult.transferId, 'completed');
 
-      // Clean up file_picker cache copies to avoid duplicate photos
-      // in the Android gallery.
+      // Clean up private temp copies created by the file picker
+      // relocation step (fastdrop_upload directory).
       for (final fi in fileInfos) {
         try {
           final cached = File(fi.path);
-          if (fi.path.contains('file_picker') && await cached.exists()) {
+          if (fi.path.contains('fastdrop_upload') && await cached.exists()) {
             await cached.delete();
           }
         } catch (_) {
