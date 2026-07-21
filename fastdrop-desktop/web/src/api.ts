@@ -9,10 +9,31 @@ import type {
   TransferRow,
 } from './types'
 
+const SESSION_KEY = 'fastdrop_session'
+
 let cachedSession: { sessionId: string; accessToken: string } | null = null
 
 export function setSession(s: { sessionId: string; accessToken: string } | null) {
   cachedSession = s
+  if (s) {
+    sessionStorage.setItem(SESSION_KEY, JSON.stringify(s))
+  } else {
+    sessionStorage.removeItem(SESSION_KEY)
+  }
+}
+
+/// Restore session from sessionStorage (survives page refresh, cleared on tab close).
+export function restoreSession(): { sessionId: string; accessToken: string } | null {
+  try {
+    const raw = sessionStorage.getItem(SESSION_KEY)
+    if (!raw) return null
+    const s = JSON.parse(raw)
+    if (s && s.sessionId && s.accessToken) {
+      cachedSession = s
+      return s
+    }
+  } catch { /* ignore */ }
+  return null
 }
 
 function authHeaders(): HeadersInit {
@@ -111,6 +132,29 @@ export async function completeFile(url: string, size: number, sha256: string, si
 
 export async function cancelTransfer(transferId: string): Promise<void> {
   await fetch(`/api/v1/transfers/${transferId}/cancel`, { method: 'POST', headers: authHeaders() })
+}
+
+// ========== Settings ==========
+
+export interface Settings {
+  downloadDirectory: string
+  conflictPolicy: string
+  deviceName: string
+}
+
+export async function getSettings(): Promise<Settings> {
+  return asJson(await fetch('/api/v1/settings'))
+}
+
+export async function updateSettings(body: {
+  downloadDirectory?: string
+  conflictPolicy?: string
+}): Promise<Settings> {
+  return asJson(await fetch('/api/v1/settings', {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  }))
 }
 
 /// Download a file's content as a Blob (full GET, no Range).

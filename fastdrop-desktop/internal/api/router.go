@@ -76,6 +76,10 @@ func New(s *Server) http.Handler {
 	mux.HandleFunc("GET /api/v1/transfers/{transferId}/files/{fileId}/content", s.withAuth(s.handleDownloadFile))
 	mux.HandleFunc("HEAD /api/v1/transfers/{transferId}/files/{fileId}/content", s.withAuth(s.handleDownloadFile))
 
+	// --- settings (local PC only, no auth) ---
+	mux.HandleFunc("GET /api/v1/settings", s.handleGetSettings)
+	mux.HandleFunc("PUT /api/v1/settings", s.withSizeLimit(64*1024, s.handleUpdateSettings))
+
 	// --- current pair token (for the QR code) ---
 	mux.HandleFunc("GET /api/v1/pair/qr", s.handleCurrentQRPayload)
 

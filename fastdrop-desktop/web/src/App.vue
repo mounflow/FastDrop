@@ -6,12 +6,15 @@ import {
   createTransfer,
   downloadFileBlob,
   fetchQR,
+  getSettings,
   getTransfer,
   listPairRequests,
   listTransfers,
   rejectPair,
+  restoreSession,
   setSession,
   triggerBrowserDownload,
+  updateSettings,
   uploadChunk,
 } from './api'
 import { useWebSocket } from './composables/useWebSocket'
@@ -294,12 +297,17 @@ function connectWS(sessionId: string, accessToken: string, wsUrl: string) {
       onError: () => {},
       onAuthFailed: () => {
         // Session revoked (e.g. server restarted) — reset to pairing.
+        setSession(null) // clear sessionStorage too
         isPaired.value = false
         wsStatus.value = 'disconnected'
         activeTransfers.value = []
         incomingOffers.value = []
         wsClient = null
         refreshQR()
+        // Restart QR polling if it wasn't running (e.g. after restore).
+        if (!qrTimer) qrTimer = setInterval(refreshQR, 50_000)
+        if (!countdownTimer) countdownTimer = setInterval(tickCountdown, 1000)
+        if (!pairPollTimer) pairPollTimer = setInterval(pollPairRequests, 2000)
       },
     },
   })
@@ -436,6 +444,7 @@ function handleWSMessage(raw: unknown) {
     }
     case 'session.revoked': {
       // Session was revoked — reset all state.
+      setSession(null) // clear sessionStorage too
       isPaired.value = false
       activeTransfers.value = []
       incomingOffers.value = []
@@ -548,6 +557,35 @@ function progressPercent(t: ActiveTransfer): number {
   return Math.min(100, Math.round((t.transferredBytes / t.totalBytes) * 100))
 }
 
+// ========== Settings ==========
+const showSettings = ref(false)
+const settingsDownloadDir = ref('')
+const settingsSaving = ref(false)
+const settingsError = ref<string | null>(null)
+
+async function loadSettings() {
+  try {
+    const s = await getSettings()
+    settingsDownloadDir.value = s.downloadDirectory
+  } catch { /* ignore */ }
+}
+
+async function saveDownloadDir() {
+  const dir = settingsDownloadDir.value.trim()
+  if (!dir) return
+  settingsSaving.value = true
+  settingsError.value = null
+  try {
+    const s = await updateSettings({ downloadDirectory: dir })
+    settingsDownloadDir.value = s.downloadDirectory
+    showSettings.value = false
+  } catch (e) {
+    settingsError.value = (e as Error).message || 'Save failed'
+  } finally {
+    settingsSaving.value = false
+  }
+}
+
 // ========== Lifecycle ==========
 function cleanup() {
   if (qrTimer) clearInterval(qrTimer)
@@ -556,12 +594,39 @@ function cleanup() {
   wsClient?.close()
 }
 
+/// Build the WS URL from the current page origin.
+function wsUrlFromOrigin(): string {
+  const proto = location.protocol === 'https:' ? 'wss:' : 'ws:'
+  return `${proto}//${location.host}/ws/v1`
+}
+
+/// Try to restore a previous session from sessionStorage.
+/// Validates by calling listTransfers (requires auth). On failure,
+/// clears the stale session and falls back to QR pairing.
+async function tryRestoreSession(): Promise<boolean> {
+  const s = restoreSession()
+  if (!s) return false
+  try {
+    await listTransfers()
+    isPaired.value = true
+    connectWS(s.sessionId, s.accessToken, wsUrlFromOrigin())
+    return true
+  } catch {
+    setSession(null)
+    return false
+  }
+}
+
 onMounted(async () => {
-  await refreshQR()
-  qrTimer = setInterval(refreshQR, 50_000)
-  countdownTimer = setInterval(tickCountdown, 1000)
-  pairPollTimer = setInterval(pollPairRequests, 2000)
+  const restored = await tryRestoreSession()
+  if (!restored) {
+    await refreshQR()
+    qrTimer = setInterval(refreshQR, 50_000)
+    countdownTimer = setInterval(tickCountdown, 1000)
+    pairPollTimer = setInterval(pollPairRequests, 2000)
+  }
   await loadHistory()
+  await loadSettings()
 })
 
 onUnmounted(cleanup)
@@ -570,13 +635,40 @@ onUnmounted(cleanup)
 <template>
   <main class="app">
     <header>
-      <h1>FastDrop</h1>
-      <p class="server">{{ serverName }}</p>
+      <div class="header-row">
+        <div>
+          <h1>FastDrop</h1>
+          <p class="server">{{ serverName }}</p>
+        </div>
+        <button class="settings-btn" title="Settings" @click="showSettings = !showSettings">&#9881;</button>
+      </div>
       <div class="ws-indicator" :class="wsStatus" :title="`WebSocket: ${wsStatus}`">
         <span class="ws-dot"></span>
         <span class="ws-label">{{ wsStatus }}</span>
       </div>
     </header>
+
+    <!-- Settings panel -->
+    <section v-if="showSettings" class="settings-panel">
+      <h3>Settings</h3>
+      <div class="settings-field">
+        <label for="downloadDir">Download Directory</label>
+        <div class="settings-input-row">
+          <input
+            id="downloadDir"
+            v-model="settingsDownloadDir"
+            type="text"
+            class="settings-input"
+            placeholder="C:\Users\...\Downloads\FastDrop"
+          />
+          <button class="btn btn-accept" :disabled="settingsSaving" @click="saveDownloadDir">
+            {{ settingsSaving ? 'Saving...' : 'Save' }}
+          </button>
+        </div>
+        <p v-if="settingsError" class="settings-error">{{ settingsError }}</p>
+        <p class="settings-hint">Files received from your phone are saved here.</p>
+      </div>
+    </section>
 
     <!-- Pair confirmation dialog -->
     <Teleport to="body">
@@ -753,8 +845,70 @@ onUnmounted(cleanup)
 }
 
 /* ---- header ---- */
+.header-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+}
 h1 { margin: 0; font-size: 28px; }
-.server { color: #666; margin: 4px 0 24px; }
+.server { color: #666; margin: 4px 0 12px; }
+.settings-btn {
+  background: none;
+  border: none;
+  font-size: 22px;
+  cursor: pointer;
+  color: #999;
+  padding: 4px;
+  line-height: 1;
+  transition: color 0.2s;
+}
+.settings-btn:hover { color: #333; }
+
+/* ---- Settings panel ---- */
+.settings-panel {
+  border: 1px solid #e5e7eb;
+  border-radius: 12px;
+  padding: 16px 20px;
+  margin-bottom: 20px;
+  background: #fafafa;
+}
+.settings-panel h3 {
+  margin: 0 0 12px;
+  font-size: 16px;
+}
+.settings-field label {
+  display: block;
+  font-size: 13px;
+  font-weight: 600;
+  color: #555;
+  margin-bottom: 6px;
+}
+.settings-input-row {
+  display: flex;
+  gap: 8px;
+}
+.settings-input {
+  flex: 1;
+  padding: 8px 12px;
+  border: 1px solid #ccc;
+  border-radius: 8px;
+  font-size: 14px;
+  font-family: monospace;
+}
+.settings-input:focus {
+  outline: none;
+  border-color: #4a90e2;
+}
+.settings-error {
+  color: #ef4444;
+  font-size: 13px;
+  margin: 6px 0 0;
+}
+.settings-hint {
+  color: #999;
+  font-size: 12px;
+  margin: 6px 0 0;
+}
 
 /* ---- WS indicator ---- */
 .ws-indicator {

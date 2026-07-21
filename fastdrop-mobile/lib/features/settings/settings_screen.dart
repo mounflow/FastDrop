@@ -3,6 +3,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import 'package:fastdrop_mobile/core/storage/session_store.dart';
 import 'package:fastdrop_mobile/core/providers.dart';
+import 'package:fastdrop_mobile/core/utils/file_utils.dart';
 
 // ---------------------------------------------------------------------------
 // Screen
@@ -22,11 +23,13 @@ class SettingsScreen extends ConsumerStatefulWidget {
 class _SettingsScreenState extends ConsumerState<SettingsScreen> {
   SessionData? _session;
   final _manualIpController = TextEditingController();
+  String? _customDownloadDir;
 
   @override
   void initState() {
     super.initState();
     _loadSession();
+    _loadDownloadDir();
   }
 
   @override
@@ -39,6 +42,13 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
     final session = await ref.read(sessionStoreProvider).loadSession();
     if (mounted) {
       setState(() => _session = session);
+    }
+  }
+
+  Future<void> _loadDownloadDir() async {
+    final custom = await FileUtils.getCustomDownloadDir();
+    if (mounted) {
+      setState(() => _customDownloadDir = custom);
     }
   }
 
@@ -94,6 +104,29 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
             ),
             const Divider(),
           ],
+
+          // -- Download Directory ------------------------------------------------
+          const _SectionHeader(title: 'Download Directory'),
+          ListTile(
+            leading: const Icon(Icons.folder_open),
+            title: const Text('Save location'),
+            subtitle: Text(
+              _customDownloadDir ?? 'Default (app documents)',
+              style: const TextStyle(fontSize: 13, fontFamily: 'monospace'),
+            ),
+            trailing: const Icon(Icons.chevron_right),
+            onTap: _changeDownloadDir,
+          ),
+          const Padding(
+            padding: EdgeInsets.symmetric(horizontal: 16, vertical: 4),
+            child: Text(
+              'Files received from the PC are saved here. '
+              'Leave empty to use the default location.',
+              style: TextStyle(color: Colors.grey, fontSize: 12),
+            ),
+          ),
+
+          const Divider(),
 
           // -- Manual IP (Phase 2 placeholder) ---------------------------------
           const _SectionHeader(title: 'Manual Connection (Phase 2)'),
@@ -197,6 +230,68 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
 
       // Navigate to pairing screen, clearing the navigation stack.
       Navigator.of(context).pushNamedAndRemoveUntil('/pairing', (_) => false);
+    }
+  }
+
+  Future<void> _changeDownloadDir() async {
+    final controller = TextEditingController(text: _customDownloadDir ?? '');
+    final result = await showDialog<String>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Download Directory'),
+        content: TextField(
+          controller: controller,
+          decoration: const InputDecoration(
+            hintText: 'Leave empty for default',
+            labelText: 'Path',
+            border: OutlineInputBorder(),
+            isDense: true,
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(null),
+            child: const Text('Cancel'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(controller.text.trim()),
+            child: const Text('Save'),
+          ),
+        ],
+      ),
+    );
+    controller.dispose();
+
+    // null means the user pressed Cancel; empty string means "use default".
+    if (result == null) return;
+
+    if (result.isNotEmpty) {
+      // Verify the directory can be created.
+      try {
+        final dir = Directory(result);
+        if (!dir.existsSync()) {
+          dir.createSync(recursive: true);
+        }
+      } catch (e) {
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(content: Text('Cannot create directory: $e')),
+          );
+        }
+        return;
+      }
+    }
+
+    await FileUtils.setCustomDownloadDir(result);
+    if (mounted) {
+      setState(() => _customDownloadDir = result.isEmpty ? null : result);
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(result.isEmpty
+              ? 'Using default download directory'
+              : 'Download directory: $result'),
+        ),
+      );
     }
   }
 

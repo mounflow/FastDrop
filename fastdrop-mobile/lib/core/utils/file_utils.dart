@@ -4,6 +4,7 @@ import 'dart:typed_data';
 import 'package:crypto/crypto.dart';
 import 'package:flutter/services.dart';
 import 'package:path_provider/path_provider.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
 /// Utility functions for local file operations used during transfers.
 class FileUtils {
@@ -132,13 +133,44 @@ class FileUtils {
 
   // -- Downloads directory ----------------------------------------------------
 
+  /// SharedPreferences key for the custom download directory.
+  static const String _downloadDirKey = 'fastdrop_download_dir';
+
+  /// Returns the download directory. If the user has set a custom path
+  /// via SharedPreferences, that path is used; otherwise falls back to
+  /// `<appDocuments>/FastDrop`.
   static Future<Directory> getDownloadsDir({String subDir = 'FastDrop'}) async {
+    final prefs = await SharedPreferences.getInstance();
+    final custom = prefs.getString(_downloadDirKey);
+    if (custom != null && custom.isNotEmpty) {
+      final dir = Directory(custom);
+      if (!dir.existsSync()) {
+        dir.createSync(recursive: true);
+      }
+      return dir;
+    }
     final appDir = await getApplicationDocumentsDirectory();
     final dir = Directory('${appDir.path}${Platform.pathSeparator}$subDir');
     if (!dir.existsSync()) {
       dir.createSync(recursive: true);
     }
     return dir;
+  }
+
+  /// Save a custom download directory path to SharedPreferences.
+  static Future<void> setCustomDownloadDir(String path) async {
+    final prefs = await SharedPreferences.getInstance();
+    if (path.isEmpty) {
+      await prefs.remove(_downloadDirKey);
+    } else {
+      await prefs.setString(_downloadDirKey, path);
+    }
+  }
+
+  /// Get the current custom download directory path (or null if default).
+  static Future<String?> getCustomDownloadDir() async {
+    final prefs = await SharedPreferences.getInstance();
+    return prefs.getString(_downloadDirKey);
   }
 
   // -- Part-file helpers ------------------------------------------------------

@@ -1,6 +1,28 @@
+const SESSION_KEY = 'fastdrop_session';
 let cachedSession = null;
 export function setSession(s) {
     cachedSession = s;
+    if (s) {
+        sessionStorage.setItem(SESSION_KEY, JSON.stringify(s));
+    }
+    else {
+        sessionStorage.removeItem(SESSION_KEY);
+    }
+}
+/// Restore session from sessionStorage (survives page refresh, cleared on tab close).
+export function restoreSession() {
+    try {
+        const raw = sessionStorage.getItem(SESSION_KEY);
+        if (!raw)
+            return null;
+        const s = JSON.parse(raw);
+        if (s && s.sessionId && s.accessToken) {
+            cachedSession = s;
+            return s;
+        }
+    }
+    catch { /* ignore */ }
+    return null;
 }
 function authHeaders() {
     if (!cachedSession)
@@ -79,6 +101,16 @@ export async function completeFile(url, size, sha256, signal) {
 }
 export async function cancelTransfer(transferId) {
     await fetch(`/api/v1/transfers/${transferId}/cancel`, { method: 'POST', headers: authHeaders() });
+}
+export async function getSettings() {
+    return asJson(await fetch('/api/v1/settings'));
+}
+export async function updateSettings(body) {
+    return asJson(await fetch('/api/v1/settings', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+    }));
 }
 /// Download a file's content as a Blob (full GET, no Range).
 export async function downloadFileBlob(transferId, fileId, signal) {

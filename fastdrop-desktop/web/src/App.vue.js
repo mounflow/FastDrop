@@ -1,6 +1,6 @@
 import { onMounted, onUnmounted, ref } from 'vue';
 import QRCode from 'qrcode';
-import { acceptPair, createTransfer, fetchQR, getTransfer, listPairRequests, listTransfers, rejectPair, setSession, uploadChunk, } from './api';
+import { acceptPair, createTransfer, fetchQR, getSettings, getTransfer, listPairRequests, listTransfers, rejectPair, restoreSession, setSession, updateSettings, uploadChunk, } from './api';
 import { useWebSocket } from './composables/useWebSocket';
 // ========== QR code / server info ==========
 const qrDataUrl = ref('');
@@ -235,12 +235,20 @@ function connectWS(sessionId, accessToken, wsUrl) {
             onError: () => { },
             onAuthFailed: () => {
                 // Session revoked (e.g. server restarted) — reset to pairing.
+                setSession(null); // clear sessionStorage too
                 isPaired.value = false;
                 wsStatus.value = 'disconnected';
                 activeTransfers.value = [];
                 incomingOffers.value = [];
                 wsClient = null;
                 refreshQR();
+                // Restart QR polling if it wasn't running (e.g. after restore).
+                if (!qrTimer)
+                    qrTimer = setInterval(refreshQR, 50_000);
+                if (!countdownTimer)
+                    countdownTimer = setInterval(tickCountdown, 1000);
+                if (!pairPollTimer)
+                    pairPollTimer = setInterval(pollPairRequests, 2000);
             },
         },
     });
@@ -361,6 +369,7 @@ function handleWSMessage(raw) {
         }
         case 'session.revoked': {
             // Session was revoked — reset all state.
+            setSession(null); // clear sessionStorage too
             isPaired.value = false;
             activeTransfers.value = [];
             incomingOffers.value = [];
@@ -464,6 +473,36 @@ function progressPercent(t) {
         return 0;
     return Math.min(100, Math.round((t.transferredBytes / t.totalBytes) * 100));
 }
+// ========== Settings ==========
+const showSettings = ref(false);
+const settingsDownloadDir = ref('');
+const settingsSaving = ref(false);
+const settingsError = ref(null);
+async function loadSettings() {
+    try {
+        const s = await getSettings();
+        settingsDownloadDir.value = s.downloadDirectory;
+    }
+    catch { /* ignore */ }
+}
+async function saveDownloadDir() {
+    const dir = settingsDownloadDir.value.trim();
+    if (!dir)
+        return;
+    settingsSaving.value = true;
+    settingsError.value = null;
+    try {
+        const s = await updateSettings({ downloadDirectory: dir });
+        settingsDownloadDir.value = s.downloadDirectory;
+        showSettings.value = false;
+    }
+    catch (e) {
+        settingsError.value = e.message || 'Save failed';
+    }
+    finally {
+        settingsSaving.value = false;
+    }
+}
 // ========== Lifecycle ==========
 function cleanup() {
     if (qrTimer)
@@ -474,18 +513,48 @@ function cleanup() {
         clearInterval(pairPollTimer);
     wsClient?.close();
 }
+/// Build the WS URL from the current page origin.
+function wsUrlFromOrigin() {
+    const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+    return `${proto}//${location.host}/ws/v1`;
+}
+/// Try to restore a previous session from sessionStorage.
+/// Validates by calling listTransfers (requires auth). On failure,
+/// clears the stale session and falls back to QR pairing.
+async function tryRestoreSession() {
+    const s = restoreSession();
+    if (!s)
+        return false;
+    try {
+        await listTransfers();
+        isPaired.value = true;
+        connectWS(s.sessionId, s.accessToken, wsUrlFromOrigin());
+        return true;
+    }
+    catch {
+        setSession(null);
+        return false;
+    }
+}
 onMounted(async () => {
-    await refreshQR();
-    qrTimer = setInterval(refreshQR, 50_000);
-    countdownTimer = setInterval(tickCountdown, 1000);
-    pairPollTimer = setInterval(pollPairRequests, 2000);
+    const restored = await tryRestoreSession();
+    if (!restored) {
+        await refreshQR();
+        qrTimer = setInterval(refreshQR, 50_000);
+        countdownTimer = setInterval(tickCountdown, 1000);
+        pairPollTimer = setInterval(pollPairRequests, 2000);
+    }
     await loadHistory();
+    await loadSettings();
 });
 onUnmounted(cleanup);
 debugger; /* PartiallyEnd: #3632/scriptSetup.vue */
 const __VLS_ctx = {};
 let __VLS_components;
 let __VLS_directives;
+/** @type {__VLS_StyleScopedClasses['settings-btn']} */ ;
+/** @type {__VLS_StyleScopedClasses['settings-panel']} */ ;
+/** @type {__VLS_StyleScopedClasses['settings-input']} */ ;
 /** @type {__VLS_StyleScopedClasses['ws-indicator']} */ ;
 /** @type {__VLS_StyleScopedClasses['ws-dot']} */ ;
 /** @type {__VLS_StyleScopedClasses['ws-indicator']} */ ;
@@ -528,11 +597,22 @@ __VLS_asFunctionalElement(__VLS_intrinsicElements.main, __VLS_intrinsicElements.
     ...{ class: "app" },
 });
 __VLS_asFunctionalElement(__VLS_intrinsicElements.header, __VLS_intrinsicElements.header)({});
+__VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+    ...{ class: "header-row" },
+});
+__VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({});
 __VLS_asFunctionalElement(__VLS_intrinsicElements.h1, __VLS_intrinsicElements.h1)({});
 __VLS_asFunctionalElement(__VLS_intrinsicElements.p, __VLS_intrinsicElements.p)({
     ...{ class: "server" },
 });
 (__VLS_ctx.serverName);
+__VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
+    ...{ onClick: (...[$event]) => {
+            __VLS_ctx.showSettings = !__VLS_ctx.showSettings;
+        } },
+    ...{ class: "settings-btn" },
+    title: "Settings",
+});
 __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
     ...{ class: "ws-indicator" },
     ...{ class: (__VLS_ctx.wsStatus) },
@@ -545,6 +625,43 @@ __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.
     ...{ class: "ws-label" },
 });
 (__VLS_ctx.wsStatus);
+if (__VLS_ctx.showSettings) {
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.section, __VLS_intrinsicElements.section)({
+        ...{ class: "settings-panel" },
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.h3, __VLS_intrinsicElements.h3)({});
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+        ...{ class: "settings-field" },
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.label, __VLS_intrinsicElements.label)({
+        for: "downloadDir",
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+        ...{ class: "settings-input-row" },
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.input)({
+        id: "downloadDir",
+        value: (__VLS_ctx.settingsDownloadDir),
+        type: "text",
+        ...{ class: "settings-input" },
+        placeholder: "\u0043\u003a\u005c\u0055\u0073\u0065\u0072\u0073\u005c\u002e\u002e\u002e\u005c\u0044\u006f\u0077\u006e\u006c\u006f\u0061\u0064\u0073\u005c\u0046\u0061\u0073\u0074\u0044\u0072\u006f\u0070",
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
+        ...{ onClick: (__VLS_ctx.saveDownloadDir) },
+        ...{ class: "btn btn-accept" },
+        disabled: (__VLS_ctx.settingsSaving),
+    });
+    (__VLS_ctx.settingsSaving ? 'Saving...' : 'Save');
+    if (__VLS_ctx.settingsError) {
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.p, __VLS_intrinsicElements.p)({
+            ...{ class: "settings-error" },
+        });
+        (__VLS_ctx.settingsError);
+    }
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.p, __VLS_intrinsicElements.p)({
+        ...{ class: "settings-hint" },
+    });
+}
 const __VLS_0 = {}.Teleport;
 /** @type {[typeof __VLS_components.Teleport, typeof __VLS_components.Teleport, ]} */ ;
 // @ts-ignore
@@ -879,10 +996,20 @@ if (__VLS_ctx.transfers.length === 0 && !__VLS_ctx.historyLoading) {
     __VLS_asFunctionalElement(__VLS_intrinsicElements.li, __VLS_intrinsicElements.li)({});
 }
 /** @type {__VLS_StyleScopedClasses['app']} */ ;
+/** @type {__VLS_StyleScopedClasses['header-row']} */ ;
 /** @type {__VLS_StyleScopedClasses['server']} */ ;
+/** @type {__VLS_StyleScopedClasses['settings-btn']} */ ;
 /** @type {__VLS_StyleScopedClasses['ws-indicator']} */ ;
 /** @type {__VLS_StyleScopedClasses['ws-dot']} */ ;
 /** @type {__VLS_StyleScopedClasses['ws-label']} */ ;
+/** @type {__VLS_StyleScopedClasses['settings-panel']} */ ;
+/** @type {__VLS_StyleScopedClasses['settings-field']} */ ;
+/** @type {__VLS_StyleScopedClasses['settings-input-row']} */ ;
+/** @type {__VLS_StyleScopedClasses['settings-input']} */ ;
+/** @type {__VLS_StyleScopedClasses['btn']} */ ;
+/** @type {__VLS_StyleScopedClasses['btn-accept']} */ ;
+/** @type {__VLS_StyleScopedClasses['settings-error']} */ ;
+/** @type {__VLS_StyleScopedClasses['settings-hint']} */ ;
 /** @type {__VLS_StyleScopedClasses['modal-overlay']} */ ;
 /** @type {__VLS_StyleScopedClasses['modal-card']} */ ;
 /** @type {__VLS_StyleScopedClasses['modal-header']} */ ;
@@ -977,6 +1104,11 @@ const __VLS_self = (await import('vue')).defineComponent({
             formatSize: formatSize,
             formatSpeed: formatSpeed,
             progressPercent: progressPercent,
+            showSettings: showSettings,
+            settingsDownloadDir: settingsDownloadDir,
+            settingsSaving: settingsSaving,
+            settingsError: settingsError,
+            saveDownloadDir: saveDownloadDir,
         };
     },
 });

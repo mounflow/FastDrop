@@ -165,6 +165,19 @@ class TransferService {
       );
 
       onStateChange?.call(createResult.transferId, 'completed');
+
+      // Clean up file_picker cache copies to avoid duplicate photos
+      // in the Android gallery.
+      for (final fi in fileInfos) {
+        try {
+          final cached = File(fi.path);
+          if (fi.path.contains('file_picker') && await cached.exists()) {
+            await cached.delete();
+          }
+        } catch (_) {
+          // Best-effort cleanup.
+        }
+      }
     } catch (e) {
       debugPrint('[TransferService] uploadFiles error: $e');
       if (cancelToken.isCancelled) {

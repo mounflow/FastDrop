@@ -202,6 +202,10 @@ class _FilePickerScreenState extends State<FilePickerScreen>
 
       if (result == null || result.files.isEmpty) return;
 
+      // Prevent Android MediaScanner from indexing cached copies
+      // (avoids duplicate photos appearing in the gallery).
+      _ensureNoMedia(result.files);
+
       setState(() {
         for (final pf in result.files) {
           // Avoid duplicates by path.
@@ -242,6 +246,28 @@ class _FilePickerScreenState extends State<FilePickerScreen>
   // ---------------------------------------------------------------------------
   // Helpers
   // ---------------------------------------------------------------------------
+
+  /// Creates a `.nomedia` file in each picked file's cache directory so
+  /// Android's MediaScanner does not index the cached copies (which would
+  /// cause duplicate photos in the gallery).
+  void _ensureNoMedia(List<PlatformFile> files) {
+    final dirs = <String>{};
+    for (final f in files) {
+      if (f.path == null) continue;
+      final parent = File(f.path!).parent.path;
+      dirs.add(parent);
+    }
+    for (final dir in dirs) {
+      try {
+        final nomedia = File('$dir/.nomedia');
+        if (!nomedia.existsSync()) {
+          nomedia.createSync(recursive: true);
+        }
+      } catch (_) {
+        // Best-effort; not critical.
+      }
+    }
+  }
 
   static String _formatBytes(int bytes) {
     if (bytes < 1024) return '$bytes B';

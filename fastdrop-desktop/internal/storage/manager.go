@@ -40,16 +40,44 @@ func NewManager(downloadDir string) (*Manager, error) {
 }
 
 // DownloadDir returns the absolute downloads path.
-func (m *Manager) DownloadDir() string { return m.downloadDir }
+func (m *Manager) DownloadDir() string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.downloadDir
+}
+
+// SetDownloadDir changes the download directory at runtime.
+// It creates the new directory (and temp subdir) if they don't exist.
+// Active .part file handles are unaffected; new transfers use the new path.
+func (m *Manager) SetDownloadDir(dir string) error {
+	abs, err := filepath.Abs(dir)
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(abs, 0o755); err != nil {
+		return fmt.Errorf("mkdir download dir: %w", err)
+	}
+	if err := os.MkdirAll(filepath.Join(abs, TempSubdir), 0o755); err != nil {
+		return fmt.Errorf("mkdir temp: %w", err)
+	}
+	m.mu.Lock()
+	m.downloadDir = abs
+	m.mu.Unlock()
+	return nil
+}
 
 // TempDir returns the .fastdrop-temp path.
-func (m *Manager) TempDir() string { return filepath.Join(m.downloadDir, TempSubdir) }
+func (m *Manager) TempDir() string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return filepath.Join(m.downloadDir, TempSubdir)
+}
 
 // HasSpaceFor returns true if the volume containing the download directory
 // has at least `size + max(100MB, size*5%)` bytes free. Spec §18.
 func (m *Manager) HasSpaceFor(size int64) (bool, int64, error) {
 	required := size + safetyMargin(size)
-	free, err := diskFreeBytes(m.downloadDir)
+	free, err := diskFreeBytes(m.DownloadDir())
 	if err != nil {
 		return false, 0, err
 	}
@@ -144,13 +172,14 @@ func (m *Manager) FinalizeAndVerify(ctx context.Context, transferID, fileID, ori
 	}
 
 	safeName := security.SanitizeFilename(originalName)
-	finalName := security.ResolveConflict(m.downloadDir, safeName, conflictPolicy, fileExists)
+	dlDir := m.DownloadDir()
+	finalName := security.ResolveConflict(dlDir, safeName, conflictPolicy, fileExists)
 	if finalName == "" {
 		// "skip" policy and target exists: remove the .part, return no-op.
 		_ = os.Remove(partPath)
 		return "", actualSha, ErrSkipConflict
 	}
-	finalPath := filepath.Join(m.downloadDir, finalName)
+	finalPath := filepath.Join(dlDir, finalName)
 	// Atomic-ish rename. Windows does not atomic-rename over an existing
 	// file, but ResolveConflict guarantees finalName is unused.
 	if err := os.Rename(partPath, finalPath); err != nil {
