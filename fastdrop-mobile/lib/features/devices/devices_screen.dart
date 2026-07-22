@@ -1,8 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
-import 'package:fastdrop_mobile/core/network/http_client.dart';
-import 'package:fastdrop_mobile/core/network/ws_client.dart';
 import 'package:fastdrop_mobile/core/storage/session_store.dart';
 import 'package:fastdrop_mobile/core/providers.dart';
 import 'package:fastdrop_mobile/features/pairing/pairing_screen.dart';
@@ -77,6 +75,7 @@ class ActiveDownload {
 
 /// Describes the current WebSocket connection status.
 enum ConnectionStatus {
+  idle, // no device selected
   connecting,
   connected,
   disconnected,
@@ -85,38 +84,45 @@ enum ConnectionStatus {
 
 class DeviceConnectionState {
   const DeviceConnectionState({
-    this.connectionStatus = ConnectionStatus.disconnected,
-    this.sessionData,
+    this.activeDeviceId,
+    this.activeDevice,
+    this.connectionStatus = ConnectionStatus.idle,
     this.errorMessage,
     this.incomingOffers = const [],
     this.activeDownloads = const [],
-    this.sessionRevoked = false,
+    this.sessionExpired = false,
   });
 
+  final String? activeDeviceId;
+  final Device? activeDevice;
   final ConnectionStatus connectionStatus;
-  final SessionData? sessionData;
   final String? errorMessage;
   final List<IncomingOffer> incomingOffers;
   final List<ActiveDownload> activeDownloads;
-  final bool sessionRevoked;
+
+  /// True when the server rejected our session (e.g. PC restarted).
+  /// UI uses this to prompt the user to re-pair.
+  final bool sessionExpired;
 
   bool get isConnected => connectionStatus == ConnectionStatus.connected;
 
   DeviceConnectionState copyWith({
+    String? activeDeviceId,
+    Device? activeDevice,
     ConnectionStatus? connectionStatus,
-    SessionData? sessionData,
     String? errorMessage,
     List<IncomingOffer>? incomingOffers,
     List<ActiveDownload>? activeDownloads,
-    bool? sessionRevoked,
+    bool? sessionExpired,
   }) {
     return DeviceConnectionState(
+      activeDeviceId: activeDeviceId ?? this.activeDeviceId,
+      activeDevice: activeDevice ?? this.activeDevice,
       connectionStatus: connectionStatus ?? this.connectionStatus,
-      sessionData: sessionData ?? this.sessionData,
       errorMessage: errorMessage,
       incomingOffers: incomingOffers ?? this.incomingOffers,
       activeDownloads: activeDownloads ?? this.activeDownloads,
-      sessionRevoked: sessionRevoked ?? this.sessionRevoked,
+      sessionExpired: sessionExpired ?? this.sessionExpired,
     );
   }
 }
@@ -125,57 +131,55 @@ class DeviceConnectionState {
 // Notifier
 // ---------------------------------------------------------------------------
 
-/// Manages the device screen: loads session, connects WebSocket, tracks
+/// Manages the currently-active device: connects its WebSocket, tracks
 /// connection status, handles incoming file offers, and drives downloads.
+///
+/// Only one device is connected at a time. Switching tabs in
+/// [DevicesScreen] calls [switchToDevice], which disconnects the previous
+/// WS and connects the new one.
 class DeviceConnectionNotifier extends StateNotifier<DeviceConnectionState> {
   DeviceConnectionNotifier(this._ref) : super(const DeviceConnectionState());
 
   final Ref _ref;
 
-  bool _initialized = false;
   TransferService? _transferService;
 
   /// Transfer IDs that the user has explicitly cancelled.
   final Set<String> _cancelledTransfers = {};
 
-  /// Reset the notifier so [init] can run again (e.g. after re-pairing).
-  void resetForReinit() {
-    _initialized = false;
-    state = const DeviceConnectionState();
-  }
+  // ---------------------------------------------------------------------------
+  // Public API
+  // ---------------------------------------------------------------------------
 
-  /// Initialize: load session, configure HTTP client, connect WS.
-  Future<void> init() async {
-    if (_initialized) return;
-    _initialized = true;
-
-    final session = await _ref.read(sessionStoreProvider).loadSession();
-
-    if (session == null) {
-      state = const DeviceConnectionState(
-        connectionStatus: ConnectionStatus.error,
-        errorMessage: 'No saved session. Please pair with your PC first.',
-      );
-      return;
+  /// Connect to [device]. Disconnects any previously-active device first.
+  Future<void> switchToDevice(Device device) async {
+    if (state.activeDeviceId == device.id &&
+        state.connectionStatus != ConnectionStatus.error) {
+      // Already active — nothing to do unless we're in error state, in which
+      // case we fall through and retry the connection.
+      if (state.connectionStatus == ConnectionStatus.connected ||
+          state.connectionStatus == ConnectionStatus.connecting) {
+        return;
+      }
     }
 
-    if (session.isExpired) {
-      state = const DeviceConnectionState(
-        connectionStatus: ConnectionStatus.error,
-        errorMessage: 'Session expired. Please pair with your PC again.',
-      );
-      return;
-    }
+    // Bump lastSeen so getActiveDevice() returns this one next launch.
+    final touched = device.copyWith(lastSeen: DateTime.now());
+    await _ref.read(deviceStoreProvider).saveDevice(touched);
+
+    // Tear down the previous connection.
+    _disconnectInternal();
 
     state = DeviceConnectionState(
+      activeDeviceId: device.id,
+      activeDevice: touched,
       connectionStatus: ConnectionStatus.connecting,
-      sessionData: session,
     );
 
     // Configure HTTP client.
     final httpClient = _ref.read(httpClientProvider);
-    httpClient.baseUrl = session.serverBaseUrl;
-    httpClient.setSession(session.sessionId, session.accessToken);
+    httpClient.baseUrl = touched.serverBaseUrl;
+    httpClient.setSession(touched.sessionId, touched.accessToken);
 
     // Create TransferService for downloads.
     final wsClient = _ref.read(wsClientProvider);
@@ -187,8 +191,8 @@ class DeviceConnectionNotifier extends StateNotifier<DeviceConnectionState> {
     );
 
     // Configure and connect WS client.
-    wsClient.baseUrl = session.serverBaseUrl;
-    wsClient.setSession(session.sessionId, session.accessToken);
+    wsClient.baseUrl = touched.serverBaseUrl;
+    wsClient.setSession(touched.sessionId, touched.accessToken);
 
     wsClient
       ..onConnected = _onWsConnected
@@ -206,28 +210,62 @@ class DeviceConnectionNotifier extends StateNotifier<DeviceConnectionState> {
     }
   }
 
+  /// Re-connect the currently-active device. Used by the "重连" button.
+  Future<void> reconnect() async {
+    final device = state.activeDevice;
+    if (device == null) return;
+    // Force switchToDevice to retry even though the id matches.
+    state = state.copyWith(connectionStatus: ConnectionStatus.idle);
+    await switchToDevice(device);
+  }
+
+  /// Disconnect the active device and reset state.
+  void disconnect() {
+    _disconnectInternal();
+    state = const DeviceConnectionState();
+  }
+
+  void _disconnectInternal() {
+    _cancelledTransfers.clear();
+    _transferService?.dispose();
+    _transferService = null;
+    try {
+      _ref.read(wsClientProvider).disconnect();
+    } catch (_) {}
+  }
+
   // ---------------------------------------------------------------------------
   // WS callbacks
   // ---------------------------------------------------------------------------
 
   void _onWsConnected() {
     if (!mounted) return;
-    state = state.copyWith(connectionStatus: ConnectionStatus.connected);
+    state = state.copyWith(
+      connectionStatus: ConnectionStatus.connected,
+      errorMessage: null,
+      sessionExpired: false,
+    );
   }
 
   void _onWsDisconnected() {
     if (!mounted) return;
-    state = state.copyWith(connectionStatus: ConnectionStatus.disconnected);
+    // Only flip to "disconnected" if we were connected/connecting. The WS
+    // client calls this on graceful disconnect too; if we just called
+    // disconnect() we want to stay idle.
+    if (state.connectionStatus == ConnectionStatus.connected ||
+        state.connectionStatus == ConnectionStatus.connecting) {
+      state = state.copyWith(connectionStatus: ConnectionStatus.disconnected);
+    }
   }
 
   void _onWsAuthFailed() {
     if (!mounted) return;
-    // Session was revoked (e.g. server restarted) — clear the persisted
-    // session and trigger navigation to the pairing screen.
-    _ref.read(sessionStoreProvider).clearSession();
+    // Server rejected our session. Stay on this tab so the user can
+    // choose to delete or re-pair.
     state = state.copyWith(
-      sessionRevoked: true,
-      connectionStatus: ConnectionStatus.disconnected,
+      sessionExpired: true,
+      connectionStatus: ConnectionStatus.error,
+      errorMessage: 'Session 已过期，请删除设备后重新扫码',
       incomingOffers: [],
     );
   }
@@ -243,7 +281,6 @@ class DeviceConnectionNotifier extends StateNotifier<DeviceConnectionState> {
         _handleIncomingOffer(payload);
         break;
       case 'transfer.started':
-        // Transfer began — no UI change needed beyond what progress provides.
         break;
       case 'transfer.progress':
         _handleTransferProgress(payload);
@@ -267,7 +304,6 @@ class DeviceConnectionNotifier extends StateNotifier<DeviceConnectionState> {
         _handleSessionRevoked();
         break;
       case 'error':
-        // Server-side error — log but don't crash.
         break;
     }
   }
@@ -308,7 +344,6 @@ class DeviceConnectionNotifier extends StateNotifier<DeviceConnectionState> {
   /// Accept an incoming offer: notify the server, then download each file
   /// with retry (max 3 attempts, exponential backoff).
   Future<void> acceptOffer(IncomingOffer offer) async {
-    // Remove from pending offers.
     _cancelledTransfers.remove(offer.transferId);
     state = state.copyWith(
       incomingOffers: state.incomingOffers
@@ -316,7 +351,6 @@ class DeviceConnectionNotifier extends StateNotifier<DeviceConnectionState> {
           .toList(),
     );
 
-    // Send file.offer.accept via WS.
     final wsClient = _ref.read(wsClientProvider);
     wsClient.send({
       'version': 1,
@@ -325,7 +359,6 @@ class DeviceConnectionNotifier extends StateNotifier<DeviceConnectionState> {
       'payload': {'offerId': offer.transferId},
     });
 
-    // Create download tracking entries.
     final downloads = [...state.activeDownloads];
     for (final f in offer.files) {
       downloads.add(ActiveDownload(
@@ -337,7 +370,6 @@ class DeviceConnectionNotifier extends StateNotifier<DeviceConnectionState> {
     }
     state = state.copyWith(activeDownloads: downloads);
 
-    // Download each file with retry.
     const maxRetries = 3;
     const backoffMs = [1000, 2000, 4000];
     for (final f in offer.files) {
@@ -354,15 +386,13 @@ class DeviceConnectionNotifier extends StateNotifier<DeviceConnectionState> {
             totalBytes: f.size,
             expectedSha256: f.sha256 ?? '',
           );
-          _updateDownload(offer.transferId, f.fileId,
-              status: 'completed');
+          _updateDownload(offer.transferId, f.fileId, status: 'completed');
           lastError = null;
           break;
         } catch (e) {
           lastError = e is Exception ? e : Exception(e.toString());
           if (attempt < maxRetries - 1) {
-            await Future.delayed(
-                Duration(milliseconds: backoffMs[attempt]));
+            await Future.delayed(Duration(milliseconds: backoffMs[attempt]));
           }
         }
       }
@@ -419,7 +449,6 @@ class DeviceConnectionNotifier extends StateNotifier<DeviceConnectionState> {
       {String? errorCode, String? errorMessage}) {
     if (!mounted) return;
     if (status == 'completed' || status == 'failed') {
-      // Update all downloads for this transfer.
       final downloads = state.activeDownloads.map((d) {
         if (d.transferId == transferId && d.status == 'downloading') {
           d.status = status;
@@ -510,10 +539,10 @@ class DeviceConnectionNotifier extends StateNotifier<DeviceConnectionState> {
   }
 
   void _handleSessionRevoked() {
-    _ref.read(sessionStoreProvider).clearSession();
     state = state.copyWith(
-      sessionRevoked: true,
-      connectionStatus: ConnectionStatus.disconnected,
+      sessionExpired: true,
+      connectionStatus: ConnectionStatus.error,
+      errorMessage: 'PC 已撤销此设备的会话，请删除设备后重新扫码',
       incomingOffers: [],
     );
   }
@@ -529,11 +558,7 @@ class DeviceConnectionNotifier extends StateNotifier<DeviceConnectionState> {
 
   @override
   void dispose() {
-    _cancelledTransfers.clear();
-    _transferService?.dispose();
-    try {
-      _ref.read(wsClientProvider).disconnect();
-    } catch (_) {}
+    _disconnectInternal();
     super.dispose();
   }
 }
@@ -543,7 +568,8 @@ class DeviceConnectionNotifier extends StateNotifier<DeviceConnectionState> {
 // ---------------------------------------------------------------------------
 
 final deviceConnectionProvider =
-    StateNotifierProvider<DeviceConnectionNotifier, DeviceConnectionState>((ref) {
+    StateNotifierProvider<DeviceConnectionNotifier, DeviceConnectionState>(
+        (ref) {
   return DeviceConnectionNotifier(ref);
 });
 
@@ -551,10 +577,11 @@ final deviceConnectionProvider =
 // Screen
 // ---------------------------------------------------------------------------
 
-/// Displays the paired PC with connection status and navigation options.
+/// Devices home screen.
 ///
-/// Phase 1: shows the single paired PC. Phase 2 will also show mDNS-discovered
-/// devices.
+/// Each paired PC is a tab. Tapping a tab switches the active WS
+/// connection. The "+" action in the AppBar opens the pairing screen to
+/// add a new PC. An empty state is shown when no devices are paired.
 class DevicesScreen extends ConsumerStatefulWidget {
   const DevicesScreen({super.key});
 
@@ -562,42 +589,145 @@ class DevicesScreen extends ConsumerStatefulWidget {
   ConsumerState<DevicesScreen> createState() => _DevicesScreenState();
 }
 
-class _DevicesScreenState extends ConsumerState<DevicesScreen> {
-  bool _navigatedToPairing = false;
+class _DevicesScreenState extends ConsumerState<DevicesScreen>
+    with TickerProviderStateMixin {
+  List<Device> _devices = [];
+  bool _loading = true;
+  TabController? _tabController;
 
   @override
   void initState() {
     super.initState();
-    // Initialize after the first frame to ensure providers are available.
+    _loadDevices();
+  }
+
+  @override
+  void dispose() {
+    _tabController?.dispose();
+    super.dispose();
+  }
+
+  Future<void> _loadDevices({int preferredIndex = -1}) async {
+    final store = ref.read(deviceStoreProvider);
+    final devices = await store.loadDevices();
+    if (!mounted) return;
+
+    setState(() {
+      _devices = devices;
+      _loading = false;
+      _rebuildTabController(devices);
+    });
+
+    if (devices.isEmpty) {
+      // Make sure the notifier is idle.
+      ref.read(deviceConnectionProvider.notifier).disconnect();
+      return;
+    }
+
+    // Pick the initial tab: honour the caller's preference, otherwise fall
+    // back to the most-recently-used device.
+    int idx = preferredIndex;
+    if (idx < 0 || idx >= devices.length) {
+      final active = await store.getActiveDevice();
+      idx = devices.indexWhere((d) => d.id == active?.id);
+      if (idx < 0) idx = 0;
+    }
+
+    final initIdx = idx;
     WidgetsBinding.instance.addPostFrameCallback((_) {
-      ref.read(deviceConnectionProvider.notifier).init();
+      if (!mounted || _tabController == null) return;
+      _tabController!.index = initIdx.clamp(0, devices.length - 1);
+      ref
+          .read(deviceConnectionProvider.notifier)
+          .switchToDevice(devices[_tabController!.index]);
+    });
+  }
+
+  void _rebuildTabController(List<Device> devices) {
+    _tabController?.dispose();
+    if (devices.isEmpty) {
+      _tabController = null;
+      return;
+    }
+    _tabController = TabController(length: devices.length, vsync: this);
+    _tabController!.addListener(_onTabChanged);
+  }
+
+  void _onTabChanged() {
+    final controller = _tabController;
+    if (controller == null) return;
+    // indexIsChanging fires on tap-down; we want the settled index.
+    if (controller.indexIsChanging) return;
+    if (!mounted) return;
+    final idx = controller.index;
+    if (idx < 0 || idx >= _devices.length) return;
+    ref.read(deviceConnectionProvider.notifier).switchToDevice(_devices[idx]);
+  }
+
+  Future<void> _onAddDevice() async {
+    ref.read(pairingProvider.notifier).resetToScanning();
+    await Navigator.of(context).pushNamed('/pairing');
+    // PairingScreen pops back here after success — reload to pick up the
+    // new device.
+    if (mounted) {
+      _loadDevices(preferredIndex: _devices.length); // new device is appended
+    }
+  }
+
+  Future<void> _onDeleteDevice(Device device) async {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('删除设备？'),
+        content: Text(
+          '将删除 "${device.name}" 及其会话。'
+          '\n需要再次发送文件请重新扫码配对。',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(false),
+            child: const Text('取消'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(true),
+            style: TextButton.styleFrom(foregroundColor: Colors.red),
+            child: const Text('删除'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true) return;
+
+    final notifier = ref.read(deviceConnectionProvider.notifier);
+    if (ref.read(deviceConnectionProvider).activeDeviceId == device.id) {
+      notifier.disconnect();
+    }
+    await ref.read(deviceStoreProvider).removeDevice(device.id);
+
+    final remaining = await ref.read(deviceStoreProvider).loadDevices();
+    if (!mounted) return;
+    setState(() {
+      _devices = remaining;
+      _rebuildTabController(remaining);
+    });
+
+    if (remaining.isEmpty) {
+      // Notifier already disconnected above.
+      return;
+    }
+    // Connect to the first remaining device.
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted || _tabController == null) return;
+      _tabController!.index = 0;
+      ref
+          .read(deviceConnectionProvider.notifier)
+          .switchToDevice(remaining.first);
     });
   }
 
   @override
   Widget build(BuildContext context) {
-    final state = ref.watch(deviceConnectionProvider);
-
-    // Navigate to pairing if session was revoked. Guard against
-    // repeated navigation calls during the same widget lifetime.
-    if (state.sessionRevoked && !_navigatedToPairing) {
-      _navigatedToPairing = true;
-      WidgetsBinding.instance.addPostFrameCallback((_) {
-        if (context.mounted) {
-          // Reset the pairing provider so PairingScreen doesn't
-          // auto-navigate back to /devices with stale "paired" state.
-          ref.read(pairingProvider.notifier).resetToScanning();
-          // Reset the device connection so init() can run again
-          // after the user re-pairs.
-          ref.read(deviceConnectionProvider.notifier).resetForReinit();
-          ScaffoldMessenger.of(context).showSnackBar(
-            const SnackBar(content: Text('Session revoked by PC')),
-          );
-          Navigator.of(context).pushNamedAndRemoveUntil(
-              '/pairing', (route) => false);
-        }
-      });
-    }
+    final connState = ref.watch(deviceConnectionProvider);
 
     return Scaffold(
       appBar: AppBar(
@@ -613,102 +743,201 @@ class _DevicesScreenState extends ConsumerState<DevicesScreen> {
             tooltip: 'Settings',
             onPressed: () => Navigator.of(context).pushNamed('/settings'),
           ),
+          IconButton(
+            icon: const Icon(Icons.add),
+            tooltip: '添加设备',
+            onPressed: _onAddDevice,
+          ),
         ],
+        bottom: (_devices.isEmpty || _tabController == null)
+            ? null
+            : PreferredSize(
+                preferredSize: const Size.fromHeight(48),
+                child: TabBar(
+                  controller: _tabController,
+                  isScrollable: true,
+                  tabs: _devices
+                      .map((d) => Tab(
+                            child: Row(
+                              mainAxisSize: MainAxisSize.min,
+                              children: [
+                                const Icon(Icons.computer, size: 16),
+                                const SizedBox(width: 6),
+                                Text(
+                                  d.name,
+                                  style: const TextStyle(fontSize: 13),
+                                ),
+                              ],
+                            ),
+                          ))
+                      .toList(),
+                ),
+              ),
       ),
-      body: _buildBody(context, state),
+      body: _buildBody(connState),
     );
   }
 
-  Widget _buildBody(BuildContext context, DeviceConnectionState state) {
-    if (state.sessionData == null) {
-      return _buildNoSession(context, state.errorMessage);
+  Widget _buildBody(DeviceConnectionState connState) {
+    if (_loading) {
+      return const Center(child: CircularProgressIndicator());
     }
+    if (_devices.isEmpty) {
+      return _buildEmptyState();
+    }
+    return TabBarView(
+      controller: _tabController,
+      children: _devices
+          .asMap()
+          .entries
+          .map((entry) =>
+              _buildDeviceTab(entry.key, entry.value, connState))
+          .toList(),
+    );
+  }
+
+  // -- Empty state ------------------------------------------------------------
+
+  Widget _buildEmptyState() {
+    return Center(
+      child: Padding(
+        padding: const EdgeInsets.all(32),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const Icon(Icons.devices_other, size: 72, color: Colors.grey),
+            const SizedBox(height: 16),
+            const Text(
+              '还没有配对的设备',
+              style: TextStyle(fontSize: 16, color: Colors.grey),
+            ),
+            const SizedBox(height: 8),
+            const Text(
+              '点击右上角的 + 扫码添加一台 PC',
+              style: TextStyle(color: Colors.grey),
+            ),
+            const SizedBox(height: 24),
+            ElevatedButton.icon(
+              onPressed: _onAddDevice,
+              icon: const Icon(Icons.qr_code_scanner),
+              label: const Text('扫码添加设备'),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  // -- Per-device tab content -------------------------------------------------
+
+  Widget _buildDeviceTab(
+      int index, Device device, DeviceConnectionState connState) {
+    final isActive = connState.activeDeviceId == device.id;
+    final status =
+        isActive ? connState.connectionStatus : ConnectionStatus.idle;
+    final errorMessage = isActive ? connState.errorMessage : null;
+    final sessionExpired = isActive && connState.sessionExpired;
 
     return SingleChildScrollView(
       padding: const EdgeInsets.all(16),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
-          // Server info card.
-          Card(
-            child: Padding(
-              padding: const EdgeInsets.all(16),
-              child: Row(
-                children: [
-                  const Icon(Icons.computer, size: 48),
-                  const SizedBox(width: 16),
-                  Expanded(
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        Text(
-                          state.sessionData!.serverName ?? 'PC',
-                          style: Theme.of(context).textTheme.titleMedium,
-                        ),
-                        const SizedBox(height: 4),
-                        Text(
-                          state.sessionData!.serverBaseUrl,
-                          style: const TextStyle(
-                            color: Colors.grey,
-                            fontSize: 12,
-                          ),
-                        ),
-                      ],
-                    ),
-                  ),
-                  _connectionBadge(state.connectionStatus),
-                ],
+          _DeviceCard(
+            device: device,
+            status: status,
+            errorMessage: errorMessage,
+            sessionExpired: sessionExpired,
+          ),
+          const SizedBox(height: 16),
+          // Primary actions depend on connection state.
+          if (status == ConnectionStatus.connected) ...[
+            ElevatedButton.icon(
+              onPressed: _onSendFiles,
+              icon: const Icon(Icons.file_upload),
+              label: const Text('发送文件'),
+              style: ElevatedButton.styleFrom(
+                padding: const EdgeInsets.symmetric(vertical: 14),
               ),
             ),
-          ),
-
-          const SizedBox(height: 16),
-
-          // Send Files button.
-          ElevatedButton.icon(
-            onPressed: state.isConnected ? _onSendFiles : null,
-            icon: const Icon(Icons.file_upload),
-            label: const Text('Send Files'),
-            style: ElevatedButton.styleFrom(
-              padding: const EdgeInsets.symmetric(vertical: 16),
+          ] else if (status == ConnectionStatus.connecting) ...[
+            const _InfoRow(
+              icon: Icons.hourglass_top,
+              text: '正在连接…',
             ),
-          ),
-
-          // Incoming offers section.
-          if (state.incomingOffers.isNotEmpty) ...[
-            const SizedBox(height: 24),
-            _buildIncomingOffers(context, state),
+          ] else ...[
+            Row(
+              children: [
+                Expanded(
+                  child: OutlinedButton.icon(
+                    onPressed: isActive
+                        ? () => ref
+                            .read(deviceConnectionProvider.notifier)
+                            .reconnect()
+                        : () => ref
+                            .read(deviceConnectionProvider.notifier)
+                            .switchToDevice(device),
+                    icon: const Icon(Icons.refresh),
+                    label: const Text('重新连接'),
+                    style: OutlinedButton.styleFrom(
+                      padding: const EdgeInsets.symmetric(vertical: 14),
+                    ),
+                  ),
+                ),
+                const SizedBox(width: 12),
+                Expanded(
+                  child: OutlinedButton.icon(
+                    onPressed: () => _onDeleteDevice(device),
+                    icon: const Icon(Icons.delete_outline,
+                        color: Colors.red),
+                    label: const Text('删除设备',
+                        style: TextStyle(color: Colors.red)),
+                    style: OutlinedButton.styleFrom(
+                      padding: const EdgeInsets.symmetric(vertical: 14),
+                      side: const BorderSide(color: Colors.red),
+                    ),
+                  ),
+                ),
+              ],
+            ),
           ],
 
-          // Active downloads section.
-          if (state.activeDownloads.isNotEmpty) ...[
-            const SizedBox(height: 24),
-            _buildActiveDownloads(context, state),
+          // Active-device-only sections.
+          if (isActive) ...[
+            if (connState.incomingOffers.isNotEmpty) ...[
+              const SizedBox(height: 24),
+              _buildIncomingOffers(connState),
+            ],
+            if (connState.activeDownloads.isNotEmpty) ...[
+              const SizedBox(height: 24),
+              _buildActiveDownloads(connState),
+            ],
           ],
 
           const SizedBox(height: 24),
-
-          // Tip.
           Center(
             child: Text(
-              'Send files to your paired PC over the local network.\nNo cloud, no accounts, no limits.',
+              isActive
+                  ? '在局域网内向 ${device.name} 发送文件。\n无云、无账号、无限制。'
+                  : '此设备非当前活跃连接。\n切换到此 Tab 即可连接。',
               textAlign: TextAlign.center,
               style: TextStyle(
-                color: Theme.of(context).colorScheme.onSurface.withOpacity(0.5),
+                color: Theme.of(context)
+                    .colorScheme
+                    .onSurface
+                    .withOpacity(0.5),
                 fontSize: 12,
               ),
             ),
           ),
-          const SizedBox(height: 16),
         ],
       ),
     );
   }
 
-  // -- Incoming offers UI -------------------------------------------------------
+  // -- Incoming offers UI -----------------------------------------------------
 
-  Widget _buildIncomingOffers(
-      BuildContext context, DeviceConnectionState state) {
+  Widget _buildIncomingOffers(DeviceConnectionState state) {
     final notifier = ref.read(deviceConnectionProvider.notifier);
     final theme = Theme.of(context);
 
@@ -772,10 +1001,9 @@ class _DevicesScreenState extends ConsumerState<DevicesScreen> {
     );
   }
 
-  // -- Active downloads UI ------------------------------------------------------
+  // -- Active downloads UI ----------------------------------------------------
 
-  Widget _buildActiveDownloads(
-      BuildContext context, DeviceConnectionState state) {
+  Widget _buildActiveDownloads(DeviceConnectionState state) {
     final notifier = ref.read(deviceConnectionProvider.notifier);
     final theme = Theme.of(context);
     final hasFinished =
@@ -905,32 +1133,79 @@ class _DevicesScreenState extends ConsumerState<DevicesScreen> {
     );
   }
 
-  // -- Shared widgets -----------------------------------------------------------
+  void _onSendFiles() {
+    Navigator.of(context).pushNamed('/file-picker');
+  }
 
-  Widget _buildNoSession(BuildContext context, String? errorMessage) {
-    return Center(
+  static String _formatBytes(int bytes) {
+    if (bytes < 1024) return '$bytes B';
+    if (bytes < 1024 * 1024) return '${(bytes / 1024).toStringAsFixed(1)} KB';
+    if (bytes < 1024 * 1024 * 1024) {
+      return '${(bytes / (1024 * 1024)).toStringAsFixed(1)} MB';
+    }
+    return '${(bytes / (1024 * 1024 * 1024)).toStringAsFixed(1)} GB';
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Small private widgets
+// ---------------------------------------------------------------------------
+
+class _DeviceCard extends StatelessWidget {
+  const _DeviceCard({
+    required this.device,
+    required this.status,
+    required this.errorMessage,
+    required this.sessionExpired,
+  });
+
+  final Device device;
+  final ConnectionStatus status;
+  final String? errorMessage;
+  final bool sessionExpired;
+
+  @override
+  Widget build(BuildContext context) {
+    return Card(
       child: Padding(
-        padding: const EdgeInsets.all(32),
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
+        padding: const EdgeInsets.all(16),
+        child: Row(
           children: [
-            const Icon(Icons.computer, size: 64, color: Colors.grey),
-            const SizedBox(height: 16),
-            Text(
-              errorMessage ?? 'No devices paired yet.',
-              textAlign: TextAlign.center,
-              style: const TextStyle(color: Colors.grey),
+            const Icon(Icons.computer, size: 48),
+            const SizedBox(width: 16),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    device.name,
+                    style: Theme.of(context).textTheme.titleMedium,
+                  ),
+                  const SizedBox(height: 4),
+                  Text(
+                    device.serverBaseUrl,
+                    style: const TextStyle(
+                      color: Colors.grey,
+                      fontSize: 12,
+                    ),
+                  ),
+                  if (errorMessage != null) ...[
+                    const SizedBox(height: 6),
+                    Text(
+                      errorMessage!,
+                      style: const TextStyle(color: Colors.red, fontSize: 12),
+                    ),
+                  ] else if (sessionExpired) ...[
+                    const SizedBox(height: 6),
+                    const Text(
+                      'Session 已过期，请删除设备后重新扫码。',
+                      style: TextStyle(color: Colors.red, fontSize: 12),
+                    ),
+                  ],
+                ],
+              ),
             ),
-            const SizedBox(height: 24),
-            ElevatedButton.icon(
-              onPressed: () {
-                ref.read(pairingProvider.notifier).resetToScanning();
-                ref.read(deviceConnectionProvider.notifier).resetForReinit();
-                Navigator.of(context).pushReplacementNamed('/pairing');
-              },
-              icon: const Icon(Icons.qr_code_scanner),
-              label: const Text('Pair with PC'),
-            ),
+            _connectionBadge(status),
           ],
         ),
       ),
@@ -947,19 +1222,30 @@ class _DevicesScreenState extends ConsumerState<DevicesScreen> {
         return const StatusBadge(label: 'Disconnected', color: Colors.red);
       case ConnectionStatus.error:
         return const StatusBadge(label: 'Error', color: Colors.red);
+      case ConnectionStatus.idle:
+        return const StatusBadge(label: 'Offline', color: Colors.grey);
     }
   }
+}
 
-  void _onSendFiles() {
-    Navigator.of(context).pushNamed('/file-picker');
-  }
+class _InfoRow extends StatelessWidget {
+  const _InfoRow({required this.icon, required this.text});
 
-  static String _formatBytes(int bytes) {
-    if (bytes < 1024) return '$bytes B';
-    if (bytes < 1024 * 1024) return '${(bytes / 1024).toStringAsFixed(1)} KB';
-    if (bytes < 1024 * 1024 * 1024) {
-      return '${(bytes / (1024 * 1024)).toStringAsFixed(1)} MB';
-    }
-    return '${(bytes / (1024 * 1024 * 1024)).toStringAsFixed(1)} GB';
+  final IconData icon;
+  final String text;
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 12),
+      child: Row(
+        mainAxisAlignment: MainAxisAlignment.center,
+        children: [
+          Icon(icon, size: 18, color: Colors.grey),
+          const SizedBox(width: 8),
+          Text(text, style: const TextStyle(color: Colors.grey)),
+        ],
+      ),
+    );
   }
 }

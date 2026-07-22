@@ -3,6 +3,7 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"embed"
 	"errors"
@@ -10,10 +11,12 @@ import (
 	"fmt"
 	"io/fs"
 	"log"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -94,25 +97,83 @@ func main() {
 	}
 
 	// Broadcast device.info / device.disconnect to the session when
-	// clients connect or leave.
-	wsHub.OnClientConnected = func(sessionID, deviceID string) {
-		name := deviceID
-		if dev, err := db.GetDevice(context.Background(), deviceID); err == nil {
+	// phone clients connect or leave. Connections from local IPs
+	// (the PC's own Vue UI) don't trigger a broadcast themselves —
+	// otherwise every browser refresh would fool the UI into thinking
+	// a phone just connected. Instead, on a local connect we look up
+	// the current phone-online state (tracked in phoneOnline) and
+	// send a snapshot so the refreshed browser learns whether the
+	// phone is currently connected.
+	phoneOnline := struct {
+		mu    sync.RWMutex
+		bySes map[string]string // sessionID -> phone deviceID
+	}{bySes: make(map[string]string)}
+
+	// sendDeviceInfo broadcasts a device.info envelope for the given phone.
+	sendDeviceInfo := func(sessionID, phoneDeviceID string) {
+		name := phoneDeviceID
+		if dev, err := db.GetDevice(context.Background(), phoneDeviceID); err == nil {
 			name = dev.Name
 		}
 		env, _ := websocket.NewEnvelope(websocket.MsgDeviceInfo, map[string]any{
-			"deviceId":   deviceID,
+			"deviceId":   phoneDeviceID,
 			"deviceName": name,
 			"event":      "connected",
 		})
 		_ = wsHub.Send(sessionID, env)
 	}
-	wsHub.OnClientDisconnected = func(sessionID, deviceID string) {
+	sendDeviceDisconnect := func(sessionID, phoneDeviceID string) {
 		env, _ := websocket.NewEnvelope(websocket.MsgDeviceDisconnect, map[string]any{
-			"deviceId": deviceID,
+			"deviceId": phoneDeviceID,
 			"event":    "disconnected",
 		})
 		_ = wsHub.Send(sessionID, env)
+	}
+
+	wsHub.OnClientConnected = func(sessionID, deviceID, sourceIP string) {
+		local := isLocalIP(sourceIP)
+		log.Printf("[hub] connect session=****%s device=****%s sourceIP=%s local=%v",
+			lastN(sessionID, 4), lastN(deviceID, 4), sourceIP, local)
+
+		if !local {
+			// Phone connected — record state and broadcast info.
+			phoneOnline.mu.Lock()
+			phoneOnline.bySes[sessionID] = deviceID
+			phoneOnline.mu.Unlock()
+			sendDeviceInfo(sessionID, deviceID)
+			return
+		}
+
+		// Local browser connected (page load / refresh). Send a
+		// snapshot of the current phone state so the UI doesn't
+		// get stuck showing whatever it had before the refresh.
+		phoneOnline.mu.RLock()
+		phoneDevID, online := phoneOnline.bySes[sessionID]
+		phoneOnline.mu.RUnlock()
+		if online {
+			sendDeviceInfo(sessionID, phoneDevID)
+		} else {
+			sendDeviceDisconnect(sessionID, "")
+		}
+	}
+	wsHub.OnClientDisconnected = func(sessionID, deviceID, sourceIP string) {
+		local := isLocalIP(sourceIP)
+		log.Printf("[hub] disconnect session=****%s device=****%s sourceIP=%s local=%v",
+			lastN(sessionID, 4), lastN(deviceID, 4), sourceIP, local)
+
+		if local {
+			// Browser going away — doesn't affect phone state.
+			return
+		}
+
+		// Phone disconnected — clear state (only if it's still us)
+		// and broadcast so browsers update.
+		phoneOnline.mu.Lock()
+		if cur, ok := phoneOnline.bySes[sessionID]; ok && cur == deviceID {
+			delete(phoneOnline.bySes, sessionID)
+		}
+		phoneOnline.mu.Unlock()
+		sendDeviceDisconnect(sessionID, deviceID)
 	}
 
 	// Choose discovery implementation.
@@ -255,9 +316,39 @@ func webUIHandler() http.Handler {
 func requestLogger(h http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		start := time.Now()
-		h.ServeHTTP(w, r)
-		log.Printf("%s %s %s %s", r.Method, r.URL.Path, r.RemoteAddr, time.Since(start))
+		ww := &statusRecorder{ResponseWriter: w, status: 200}
+		h.ServeHTTP(ww, r)
+		log.Printf("%s %s %d %s %s", r.Method, r.URL.Path, ww.status, r.RemoteAddr, time.Since(start))
 	})
+}
+
+// statusRecorder wraps http.ResponseWriter to capture the status code.
+// It forwards Flush and Hijack so WebSocket and streaming handlers keep
+// working — gorilla/websocket's Upgrader calls Hijack to take over the
+// TCP connection, and skipping the forward would make every /ws/v1
+// upgrade fail with HTTP 500.
+type statusRecorder struct {
+	http.ResponseWriter
+	status int
+}
+
+func (r *statusRecorder) WriteHeader(code int) {
+	r.status = code
+	r.ResponseWriter.WriteHeader(code)
+}
+
+func (r *statusRecorder) Flush() {
+	if f, ok := r.ResponseWriter.(http.Flusher); ok {
+		f.Flush()
+	}
+}
+
+func (r *statusRecorder) Hijack() (net.Conn, *bufio.ReadWriter, error) {
+	h, ok := r.ResponseWriter.(http.Hijacker)
+	if !ok {
+		return nil, nil, errors.New("ResponseWriter does not implement http.Hijacker")
+	}
+	return h.Hijack()
 }
 
 // clientIP strips the port from RemoteAddr.
@@ -267,6 +358,78 @@ func clientIP(r *http.Request) string {
 		host = host[:i]
 	}
 	return host
+}
+
+// localIPSet is the set of IP addresses assigned to this machine's
+// network interfaces (including loopback). It's populated once at
+// startup and used by isLocalIP to tell the PC's own Vue UI connections
+// apart from phone connections — the browser may connect via the PC's
+// LAN IP (e.g. http://192.168.1.19:9527) rather than 127.0.0.1, so a
+// pure loopback check is not enough.
+var localIPSet = func() map[string]bool {
+	set := map[string]bool{
+		"127.0.0.1": true,
+		"::1":       true,
+		"::":        true,
+	}
+	ifaces, err := net.Interfaces()
+	if err != nil {
+		log.Printf("[startup] net.Interfaces failed: %v", err)
+		return set
+	}
+	for _, iface := range ifaces {
+		addrs, err := iface.Addrs()
+		if err != nil {
+			continue
+		}
+		for _, addr := range addrs {
+			var ip net.IP
+			switch v := addr.(type) {
+			case *net.IPNet:
+				ip = v.IP
+			case *net.IPAddr:
+				ip = v.IP
+			}
+			if ip == nil {
+				continue
+			}
+			set[ip.String()] = true
+			if v4 := ip.To4(); v4 != nil {
+				set[v4.String()] = true
+			}
+		}
+	}
+	log.Printf("[startup] local IPs: %v", keysOf(set))
+	return set
+}()
+
+func keysOf(m map[string]bool) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	return out
+}
+
+// isLocalIP reports whether ip belongs to the local machine (loopback
+// or any NIC address). WS connections from local IPs are the PC's own
+// Vue UI, not a phone — callers use this to skip device.info broadcasts
+// that would otherwise fool the UI into thinking a phone just connected.
+func isLocalIP(ip string) bool {
+	host := ip
+	if i := lastIndexByte(host, '%'); i > 0 {
+		host = host[:i]
+	}
+	host = strings.Trim(host, "[]")
+	return localIPSet[host]
+}
+
+// lastN returns the last n characters of s for safe log masking.
+func lastN(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	return s[len(s)-n:]
 }
 
 func lastIndexByte(s string, b byte) int {

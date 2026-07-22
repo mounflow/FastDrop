@@ -6,6 +6,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:mobile_scanner/mobile_scanner.dart';
 
 import 'package:fastdrop_mobile/core/providers.dart';
+import 'package:fastdrop_mobile/core/storage/session_store.dart';
 import 'package:fastdrop_mobile/shared/models/qr_payload.dart';
 import 'package:fastdrop_mobile/shared/models/device_info.dart';
 import 'package:fastdrop_mobile/shared/models/pair_request.dart';
@@ -219,16 +220,20 @@ class PairingNotifier extends StateNotifier<PairingState> {
           Duration(seconds: sessionInfo.expiresIn),
         );
 
-        // Persist the session.
-        final sessionStore = _ref.read(sessionStoreProvider);
-        await sessionStore.saveSession(
+        // Persist the paired PC as a Device. Using serverBaseUrl as id
+        // means re-pairing the same PC overwrites the stale entry instead
+        // of creating a duplicate tab.
+        final now = DateTime.now();
+        final device = Device(
+          id: payload.baseUrl,
+          name: serverInfo.deviceName,
+          serverBaseUrl: payload.baseUrl,
           sessionId: sessionInfo.sessionId,
           accessToken: sessionInfo.accessToken,
-          serverBaseUrl: payload.baseUrl,
-          serverName: serverInfo.deviceName,
-          deviceName: 'My Phone',
+          lastSeen: now,
           expiresAt: expiresAt,
         );
+        await _ref.read(deviceStoreProvider).saveDevice(device);
 
         // Configure the HTTP client with session credentials for future calls.
         httpClient.setSession(sessionInfo.sessionId, sessionInfo.accessToken);

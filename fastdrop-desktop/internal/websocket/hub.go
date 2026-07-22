@@ -31,6 +31,7 @@ type Client struct {
 	lastPong   time.Time
 	missedPongs int
 	hmu        sync.Mutex // guards lastPong / missedPongs
+	disconnOnce sync.Once  // ensures OnClientDisconnected fires exactly once
 }
 
 // MessageHandler receives authenticated WS messages for routing to business logic.
@@ -61,9 +62,11 @@ type Hub struct {
 
 	// OnClientConnected / OnClientDisconnected are called after a client
 	// registers / unregisters. Used to broadcast device.info /
-	// device.disconnect to the session.
-	OnClientConnected    func(sessionID, deviceID string)
-	OnClientDisconnected func(sessionID, deviceID string)
+	// device.disconnect to the session. The sourceIP is the remote address
+	// of the WS handshake — callers can use it to distinguish the PC's own
+	// browser (loopback) from a real phone (LAN IP).
+	OnClientConnected    func(sessionID, deviceID, sourceIP string)
+	OnClientDisconnected func(sessionID, deviceID, sourceIP string)
 
 	// Per-session inbox for offline messages (waiting for reconnect).
 	inboxesMu sync.Mutex
@@ -155,14 +158,20 @@ func (h *Hub) Run(ctx context.Context) {
 			h.mu.RLock()
 			set := h.clients[b.sessionID]
 			delivered := false
+			clients := 0
 			for c := range set {
+				clients++
 				select {
 				case c.send <- b.data:
 					delivered = true
 				default:
+					log.Printf("[hub] broadcast DROP session=****%s client=****%s (send buffer full)",
+						maskID(b.sessionID), maskID(c.deviceID))
 				}
 			}
 			h.mu.RUnlock()
+			log.Printf("[hub] broadcast session=****%s clients=%d delivered=%v",
+				maskID(b.sessionID), clients, delivered)
 			if !delivered {
 				h.enqueueInbox(b.sessionID, b.data)
 			}
@@ -178,9 +187,11 @@ func (h *Hub) Send(sessionID string, msg *Envelope) error {
 	if err != nil {
 		return err
 	}
+	log.Printf("[hub] Send session=****%s type=%s bytes=%d", maskID(sessionID), msg.Type, len(data))
 	select {
 	case h.broadcast <- broadcast{sessionID: sessionID, data: data}:
 	default:
+		log.Printf("[hub] Send ENQUEUE-INBOX session=****%s type=%s (broadcast chan full)", maskID(sessionID), msg.Type)
 		h.enqueueInbox(sessionID, data)
 	}
 	return nil
@@ -238,6 +249,8 @@ func (h *Hub) sendHeartbeats(ctx context.Context) {
 		drop := c.missedPongs > MissedPongsThreshold
 		c.hmu.Unlock()
 		if drop {
+			log.Printf("[hub] dropping client session=****%s sourceIP=%s after %d missed pongs",
+				maskID(c.sessionID), c.sourceIP, c.missedPongs)
 			h.unregister <- c
 			_ = c.conn.Close()
 			continue
@@ -273,12 +286,14 @@ func (h *Hub) HandleConn(ctx context.Context, conn *websocket.Conn, sourceIP str
 	// Register and start loops.
 	h.register <- c
 	if h.OnClientConnected != nil {
-		h.OnClientConnected(c.sessionID, c.deviceID)
+		h.OnClientConnected(c.sessionID, c.deviceID, c.sourceIP)
 	}
 	defer func() {
-		if h.OnClientDisconnected != nil {
-			h.OnClientDisconnected(c.sessionID, c.deviceID)
-		}
+		c.disconnOnce.Do(func() {
+			if h.OnClientDisconnected != nil {
+				h.OnClientDisconnected(c.sessionID, c.deviceID, c.sourceIP)
+			}
+		})
 		h.unregister <- c
 	}()
 

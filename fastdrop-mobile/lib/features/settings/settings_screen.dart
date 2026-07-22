@@ -23,14 +23,14 @@ class SettingsScreen extends ConsumerStatefulWidget {
 }
 
 class _SettingsScreenState extends ConsumerState<SettingsScreen> {
-  SessionData? _session;
+  Device? _activeDevice;
   final _manualIpController = TextEditingController();
   String? _customDownloadDir;
 
   @override
   void initState() {
     super.initState();
-    _loadSession();
+    _loadActiveDevice();
     _loadDownloadDir();
   }
 
@@ -40,10 +40,10 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
     super.dispose();
   }
 
-  Future<void> _loadSession() async {
-    final session = await ref.read(sessionStoreProvider).loadSession();
+  Future<void> _loadActiveDevice() async {
+    final device = await ref.read(deviceStoreProvider).getActiveDevice();
     if (mounted) {
-      setState(() => _session = session);
+      setState(() => _activeDevice = device);
     }
   }
 
@@ -63,15 +63,15 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
       body: ListView(
         children: [
           // -- Paired Device ---------------------------------------------------
-          if (_session != null) ...[
-            const _SectionHeader(title: 'Paired Device'),
+          if (_activeDevice != null) ...[
+            const _SectionHeader(title: '当前设备'),
             Card(
               margin: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
               child: ListTile(
                 leading: const Icon(Icons.computer),
-                title: Text(_session!.serverName ?? 'PC'),
-                subtitle: Text(_session!.serverBaseUrl),
-                trailing: _session!.isExpired
+                title: Text(_activeDevice!.name),
+                subtitle: Text(_activeDevice!.serverBaseUrl),
+                trailing: _activeDevice!.isExpired
                     ? const Chip(
                         label: Text('Expired', style: TextStyle(fontSize: 11)),
                         backgroundColor: Colors.red,
@@ -88,7 +88,7 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
           ],
 
           // -- Unpair ----------------------------------------------------------
-          if (_session != null) ...[
+          if (_activeDevice != null) ...[
             const Divider(),
             Padding(
               padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
@@ -96,7 +96,7 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
                 onPressed: _confirmUnpair,
                 icon: const Icon(Icons.link_off, color: Colors.red),
                 label: const Text(
-                  'Unpair',
+                  '删除此设备',
                   style: TextStyle(color: Colors.red),
                 ),
                 style: OutlinedButton.styleFrom(
@@ -192,23 +192,26 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
   // -- Actions ---------------------------------------------------------------
 
   Future<void> _confirmUnpair() async {
+    final device = _activeDevice;
+    if (device == null) return;
+
     final confirmed = await showDialog<bool>(
       context: context,
       builder: (ctx) => AlertDialog(
-        title: const Text('Unpair?'),
-        content: const Text(
-          'This will disconnect from the PC and clear the saved session. '
-          'You will need to scan the QR code again to reconnect.',
+        title: const Text('删除此设备？'),
+        content: Text(
+          '将断开与 "${device.name}" 的连接并删除其会话。\n'
+          '如需再次发送文件请重新扫码配对。',
         ),
         actions: [
           TextButton(
             onPressed: () => Navigator.of(ctx).pop(false),
-            child: const Text('Cancel'),
+            child: const Text('取消'),
           ),
           TextButton(
             onPressed: () => Navigator.of(ctx).pop(true),
             style: TextButton.styleFrom(foregroundColor: Colors.red),
-            child: const Text('Unpair'),
+            child: const Text('删除'),
           ),
         ],
       ),
@@ -216,22 +219,23 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
 
     if (confirmed != true) return;
 
-    // Disconnect WebSocket.
+    // Disconnect WebSocket if this is the active connection.
     try {
       ref.read(wsClientProvider).disconnect();
     } catch (_) {}
 
-    // Clear HTTP client session.
     ref.read(httpClientProvider).clearSession();
 
-    // Clear persisted session.
-    await ref.read(sessionStoreProvider).clearSession();
+    // Remove the device from the store.
+    await ref.read(deviceStoreProvider).removeDevice(device.id);
 
     if (mounted) {
-      setState(() => _session = null);
+      setState(() => _activeDevice = null);
 
-      // Navigate to pairing screen, clearing the navigation stack.
-      Navigator.of(context).pushNamedAndRemoveUntil('/pairing', (_) => false);
+      // Back to devices screen — it will show the next device or the
+      // empty state.
+      Navigator.of(context).pushNamedAndRemoveUntil(
+          '/devices', (_) => false);
     }
   }
 

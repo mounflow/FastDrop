@@ -188,6 +188,8 @@ async function handleReject(requestId) {
 }
 // ========== WebSocket ==========
 const wsStatus = ref('disconnected');
+const phoneConnected = ref(false);
+const phoneName = ref('');
 let wsClient = null;
 const incomingOffers = ref([]);
 const activeTransfers = ref([]);
@@ -238,6 +240,8 @@ function connectWS(sessionId, accessToken, wsUrl) {
                 setSession(null); // clear sessionStorage too
                 isPaired.value = false;
                 wsStatus.value = 'disconnected';
+                phoneConnected.value = false;
+                phoneName.value = '';
                 activeTransfers.value = [];
                 incomingOffers.value = [];
                 wsClient = null;
@@ -357,8 +361,16 @@ function handleWSMessage(raw) {
             uploadStatus.value = `[${code}] ${message}`;
             break;
         }
+        case 'device.info': {
+            // Phone connected to this session.
+            phoneConnected.value = true;
+            phoneName.value = p.deviceName || 'Phone';
+            break;
+        }
         case 'device.disconnect': {
-            // Phone disconnected — mark active transfers accordingly.
+            // Phone disconnected — update status and mark active transfers.
+            phoneConnected.value = false;
+            phoneName.value = '';
             for (const t of activeTransfers.value) {
                 if (t.status === 'transferring' || t.status === 'paused') {
                     t.status = 'failed';
@@ -371,6 +383,8 @@ function handleWSMessage(raw) {
             // Session was revoked — reset all state.
             setSession(null); // clear sessionStorage too
             isPaired.value = false;
+            phoneConnected.value = false;
+            phoneName.value = '';
             activeTransfers.value = [];
             incomingOffers.value = [];
             wsClient?.close();
@@ -625,6 +639,20 @@ __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.
     ...{ class: "ws-label" },
 });
 (__VLS_ctx.wsStatus);
+if (__VLS_ctx.isPaired) {
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+        ...{ class: "ws-indicator phone" },
+        ...{ class: (__VLS_ctx.phoneConnected ? 'connected' : 'disconnected') },
+        title: (__VLS_ctx.phoneConnected ? `${__VLS_ctx.phoneName} 已连接` : '手机未连接'),
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({
+        ...{ class: "ws-dot" },
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({
+        ...{ class: "ws-label" },
+    });
+    (__VLS_ctx.phoneConnected ? (__VLS_ctx.phoneName || '手机') : '手机离线');
+}
 if (__VLS_ctx.showSettings) {
     __VLS_asFunctionalElement(__VLS_intrinsicElements.section, __VLS_intrinsicElements.section)({
         ...{ class: "settings-panel" },
@@ -1002,6 +1030,10 @@ if (__VLS_ctx.transfers.length === 0 && !__VLS_ctx.historyLoading) {
 /** @type {__VLS_StyleScopedClasses['ws-indicator']} */ ;
 /** @type {__VLS_StyleScopedClasses['ws-dot']} */ ;
 /** @type {__VLS_StyleScopedClasses['ws-label']} */ ;
+/** @type {__VLS_StyleScopedClasses['ws-indicator']} */ ;
+/** @type {__VLS_StyleScopedClasses['phone']} */ ;
+/** @type {__VLS_StyleScopedClasses['ws-dot']} */ ;
+/** @type {__VLS_StyleScopedClasses['ws-label']} */ ;
 /** @type {__VLS_StyleScopedClasses['settings-panel']} */ ;
 /** @type {__VLS_StyleScopedClasses['settings-field']} */ ;
 /** @type {__VLS_StyleScopedClasses['settings-input-row']} */ ;
@@ -1091,6 +1123,8 @@ const __VLS_self = (await import('vue')).defineComponent({
             handleAccept: handleAccept,
             handleReject: handleReject,
             wsStatus: wsStatus,
+            phoneConnected: phoneConnected,
+            phoneName: phoneName,
             incomingOffers: incomingOffers,
             activeTransfers: activeTransfers,
             pauseTransfer: pauseTransfer,

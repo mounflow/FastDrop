@@ -1,5 +1,4 @@
 import 'package:flutter/material.dart';
-import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import 'package:fastdrop_mobile/features/pairing/pairing_screen.dart';
 import 'package:fastdrop_mobile/features/devices/devices_screen.dart';
@@ -7,7 +6,6 @@ import 'package:fastdrop_mobile/features/file_picker/file_picker_screen.dart';
 import 'package:fastdrop_mobile/features/transfer/transfer_screen.dart';
 import 'package:fastdrop_mobile/features/history/history_screen.dart';
 import 'package:fastdrop_mobile/features/settings/settings_screen.dart';
-import 'package:fastdrop_mobile/core/providers.dart';
 
 /// Central route definitions and generator for the FastDrop app.
 class AppRoutes {
@@ -56,59 +54,37 @@ class AppRoutes {
 }
 
 // ---------------------------------------------------------------------------
-// Splash gate — checks for existing session and redirects accordingly.
+// Splash gate — brief branded splash, then always into /devices.
+// DevicesScreen handles the empty state (no paired PCs) and routes the
+// user to pairing via the "+" action. We no longer decide pairing here,
+// because a stale session after a server restart would otherwise trap the
+// user on the pairing screen even when they have previously paired PCs.
 // ---------------------------------------------------------------------------
 
-final _sessionCheckProvider = FutureProvider<String?>((ref) async {
-  final session = await ref.read(sessionStoreProvider).loadSession();
-  if (session != null && session.isSessionValid) {
-    return session.serverBaseUrl;
-  }
-  return null;
-});
-
-class _SplashGate extends ConsumerStatefulWidget {
+class _SplashGate extends StatefulWidget {
   const _SplashGate();
 
   @override
-  ConsumerState<_SplashGate> createState() => _SplashGateState();
+  State<_SplashGate> createState() => _SplashGateState();
 }
 
-class _SplashGateState extends ConsumerState<_SplashGate> {
+class _SplashGateState extends State<_SplashGate> {
   bool _navigated = false;
 
   @override
+  void initState() {
+    super.initState();
+    // Give the frame one render, then move on to /devices.
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!_navigated && mounted) {
+        _navigated = true;
+        Navigator.of(context).pushReplacementNamed(AppRoutes.devices);
+      }
+    });
+  }
+
+  @override
   Widget build(BuildContext context) {
-    final sessionCheck = ref.watch(_sessionCheckProvider);
-
-    // Once the session check completes, redirect to the appropriate screen.
-    // Navigation must be deferred to after the frame — calling Navigator
-    // inside build() triggers a '!navigator._debugLocked' assertion.
-    if (!_navigated) {
-      sessionCheck.when(
-        data: (serverBaseUrl) {
-          _navigated = true;
-          final target = serverBaseUrl != null ? AppRoutes.devices : AppRoutes.pairing;
-          WidgetsBinding.instance.addPostFrameCallback((_) {
-            if (mounted) {
-              Navigator.of(context).pushReplacementNamed(target);
-            }
-          });
-        },
-        error: (_, __) {
-          // On error (e.g. SharedPreferences unavailable), go to pairing.
-          _navigated = true;
-          WidgetsBinding.instance.addPostFrameCallback((_) {
-            if (mounted) {
-              Navigator.of(context).pushReplacementNamed(AppRoutes.pairing);
-            }
-          });
-        },
-        loading: () {},
-      );
-    }
-
-    // Show branded splash while checking.
     return Scaffold(
       body: Center(
         child: Column(

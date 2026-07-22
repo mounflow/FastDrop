@@ -21,8 +21,17 @@ final wsClientProvider = Provider<FastDropWsClient>((ref) {
 });
 
 /// Shared [SessionStore] for persisting session data.
+///
+/// Deprecated: prefer [deviceStoreProvider]. Retained for screens that
+/// still consume a single active session.
+@Deprecated('Use deviceStoreProvider instead.')
 final sessionStoreProvider = Provider<SessionStore>((ref) {
   return SessionStore();
+});
+
+/// Shared [DeviceStore] — the source of truth for paired PCs.
+final deviceStoreProvider = Provider<DeviceStore>((ref) {
+  return DeviceStore();
 });
 
 // ---------------------------------------------------------------------------

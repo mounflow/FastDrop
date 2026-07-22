@@ -199,6 +199,7 @@ class _FilePickerScreenState extends State<FilePickerScreen>
       final result = await FilePicker.platform.pickFiles(
         type: fileType,
         allowMultiple: true,
+        allowCompression: false,
       );
 
       if (result == null || result.files.isEmpty) return;
@@ -239,6 +240,15 @@ class _FilePickerScreenState extends State<FilePickerScreen>
 
     if (paths.isEmpty) return;
 
+    // Snapshot the paths, then clear the selection BEFORE navigating.
+    // TransferService.uploadFiles deletes the fastdrop_upload temp
+    // copies in its finally block (success / failure / cancel), so any
+    // entry we keep here becomes a dangling path — the next Send would
+    // hit "File not found" on that path and abort the whole batch.
+    setState(() {
+      _selected.clear();
+    });
+
     Navigator.of(context).pushNamed(
       '/transfer',
       arguments: {'filePaths': paths},
@@ -260,6 +270,17 @@ class _FilePickerScreenState extends State<FilePickerScreen>
     final uploadDir = Directory('${tempBase.path}${Platform.pathSeparator}fastdrop_upload');
     if (!uploadDir.existsSync()) {
       uploadDir.createSync(recursive: true);
+    }
+    // Prevent Android MediaScanner from indexing temp copies (avoids
+    // duplicate photos appearing in the gallery).
+    _ensureNoMedia(uploadDir);
+
+    // Also place .nomedia in the file_picker cache directory to close the
+    // race window between file_picker writing its cache copy and our
+    // delete below.
+    if (files.isNotEmpty && files.first.path != null) {
+      final pickerCacheDir = File(files.first.path!).parent;
+      _ensureNoMedia(pickerCacheDir);
     }
 
     final result = <PlatformFile>[];
@@ -286,6 +307,18 @@ class _FilePickerScreenState extends State<FilePickerScreen>
       }
     }
     return result;
+  }
+
+  /// Create a `.nomedia` file in [dir] so Android's MediaScanner skips it.
+  static void _ensureNoMedia(Directory dir) {
+    try {
+      final nomedia = File('${dir.path}${Platform.pathSeparator}.nomedia');
+      if (!nomedia.existsSync()) {
+        nomedia.createSync();
+      }
+    } catch (_) {
+      // Best-effort; if we can't write .nomedia the transfer still works.
+    }
   }
 
   static String _formatBytes(int bytes) {

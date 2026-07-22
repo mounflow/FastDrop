@@ -229,6 +229,8 @@ async function handleReject(requestId: string) {
 
 // ========== WebSocket ==========
 const wsStatus = ref<WSStatus>('disconnected')
+const phoneConnected = ref(false)
+const phoneName = ref('')
 let wsClient: ReturnType<typeof useWebSocket> | null = null
 
 interface IncomingOffer {
@@ -300,6 +302,8 @@ function connectWS(sessionId: string, accessToken: string, wsUrl: string) {
         setSession(null) // clear sessionStorage too
         isPaired.value = false
         wsStatus.value = 'disconnected'
+        phoneConnected.value = false
+        phoneName.value = ''
         activeTransfers.value = []
         incomingOffers.value = []
         wsClient = null
@@ -432,8 +436,16 @@ function handleWSMessage(raw: unknown) {
       uploadStatus.value = `[${code}] ${message}`
       break
     }
+    case 'device.info': {
+      // Phone connected to this session.
+      phoneConnected.value = true
+      phoneName.value = (p.deviceName as string) || 'Phone'
+      break
+    }
     case 'device.disconnect': {
-      // Phone disconnected — mark active transfers accordingly.
+      // Phone disconnected — update status and mark active transfers.
+      phoneConnected.value = false
+      phoneName.value = ''
       for (const t of activeTransfers.value) {
         if (t.status === 'transferring' || t.status === 'paused') {
           t.status = 'failed'
@@ -446,6 +458,8 @@ function handleWSMessage(raw: unknown) {
       // Session was revoked — reset all state.
       setSession(null) // clear sessionStorage too
       isPaired.value = false
+      phoneConnected.value = false
+      phoneName.value = ''
       activeTransfers.value = []
       incomingOffers.value = []
       wsClient?.close()
@@ -645,6 +659,15 @@ onUnmounted(cleanup)
       <div class="ws-indicator" :class="wsStatus" :title="`WebSocket: ${wsStatus}`">
         <span class="ws-dot"></span>
         <span class="ws-label">{{ wsStatus }}</span>
+      </div>
+      <div
+        v-if="isPaired"
+        class="ws-indicator phone"
+        :class="phoneConnected ? 'connected' : 'disconnected'"
+        :title="phoneConnected ? `${phoneName} 已连接` : '手机未连接'"
+      >
+        <span class="ws-dot"></span>
+        <span class="ws-label">{{ phoneConnected ? (phoneName || '手机') : '手机离线' }}</span>
       </div>
     </header>
 

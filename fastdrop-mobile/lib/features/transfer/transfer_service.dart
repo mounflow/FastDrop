@@ -90,9 +90,11 @@ class TransferService {
     final cancelToken = CancelToken();
     _cancelTokens[batchOfferId] = cancelToken;
 
+    // Declared outside try so the finally block can clean up temp copies.
+    final fileInfos = <_FileInfo>[];
+
     try {
       // 1. Validate all files exist and compute SHA-256.
-      final fileInfos = <_FileInfo>[];
       for (final path in filePaths) {
         final file = File(path);
         if (!await file.exists()) {
@@ -165,19 +167,6 @@ class TransferService {
       );
 
       onStateChange?.call(createResult.transferId, 'completed');
-
-      // Clean up private temp copies created by the file picker
-      // relocation step (fastdrop_upload directory).
-      for (final fi in fileInfos) {
-        try {
-          final cached = File(fi.path);
-          if (fi.path.contains('fastdrop_upload') && await cached.exists()) {
-            await cached.delete();
-          }
-        } catch (_) {
-          // Best-effort cleanup.
-        }
-      }
     } catch (e) {
       debugPrint('[TransferService] uploadFiles error: $e');
       if (cancelToken.isCancelled) {
@@ -193,6 +182,19 @@ class TransferService {
       }
       rethrow;
     } finally {
+      // Clean up private temp copies created by the file picker
+      // relocation step (fastdrop_upload directory). Runs on success,
+      // failure, AND cancel so no scannable images linger on disk.
+      for (final fi in fileInfos) {
+        try {
+          final cached = File(fi.path);
+          if (fi.path.contains('fastdrop_upload') && await cached.exists()) {
+            await cached.delete();
+          }
+        } catch (_) {
+          // Best-effort cleanup.
+        }
+      }
       _cancelTokens.remove(batchOfferId);
       _transferIdToOfferId
           .removeWhere((_, offerId) => offerId == batchOfferId);
