@@ -1,6 +1,6 @@
 import { onMounted, onUnmounted, ref } from 'vue';
 import QRCode from 'qrcode';
-import { acceptPair, createTransfer, fetchQR, getSettings, getTransfer, listPairRequests, listTransfers, rejectPair, restoreSession, setSession, updateSettings, uploadChunk, } from './api';
+import { acceptPair, createTransfer, fetchQR, getSettings, getTransfer, listPairRequests, listTransfers, rejectPair, restoreSession, revokeSession, setSession, updateSettings, uploadChunk, } from './api';
 import { useWebSocket } from './composables/useWebSocket';
 // ========== QR code / server info ==========
 const qrDataUrl = ref('');
@@ -184,6 +184,29 @@ async function handleReject(requestId) {
     }
     catch (e) {
         console.error('Reject failed:', e);
+    }
+}
+/// User clicked "重新配对" — revoke the current session so the server
+/// broadcasts session.revoked, which our WS handler already turns
+/// into the QR pairing view. No local state reset needed here; the
+/// revoked handler does it all.
+async function handleReconnect() {
+    if (!confirm('确定要作废当前配对，回到扫码页吗？'))
+        return;
+    try {
+        await revokeSession();
+    }
+    catch (e) {
+        console.error('Revoke failed:', e);
+        // Fall back to manual reset so the user isn't stuck.
+        setSession(null);
+        isPaired.value = false;
+        phoneConnected.value = false;
+        phoneName.value = '';
+        wsClient?.close();
+        wsClient = null;
+        wsStatus.value = 'disconnected';
+        refreshQR();
     }
 }
 // ========== WebSocket ==========
@@ -567,6 +590,7 @@ const __VLS_ctx = {};
 let __VLS_components;
 let __VLS_directives;
 /** @type {__VLS_StyleScopedClasses['settings-btn']} */ ;
+/** @type {__VLS_StyleScopedClasses['reconnect-btn']} */ ;
 /** @type {__VLS_StyleScopedClasses['settings-panel']} */ ;
 /** @type {__VLS_StyleScopedClasses['settings-input']} */ ;
 /** @type {__VLS_StyleScopedClasses['ws-indicator']} */ ;
@@ -620,6 +644,16 @@ __VLS_asFunctionalElement(__VLS_intrinsicElements.p, __VLS_intrinsicElements.p)(
     ...{ class: "server" },
 });
 (__VLS_ctx.serverName);
+__VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+    ...{ class: "header-actions" },
+});
+if (__VLS_ctx.isPaired) {
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
+        ...{ onClick: (__VLS_ctx.handleReconnect) },
+        ...{ class: "reconnect-btn" },
+        title: "作废当前配对，重新显示二维码（用于换手机或会话失効）",
+    });
+}
 __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
     ...{ onClick: (...[$event]) => {
             __VLS_ctx.showSettings = !__VLS_ctx.showSettings;
@@ -1026,6 +1060,8 @@ if (__VLS_ctx.transfers.length === 0 && !__VLS_ctx.historyLoading) {
 /** @type {__VLS_StyleScopedClasses['app']} */ ;
 /** @type {__VLS_StyleScopedClasses['header-row']} */ ;
 /** @type {__VLS_StyleScopedClasses['server']} */ ;
+/** @type {__VLS_StyleScopedClasses['header-actions']} */ ;
+/** @type {__VLS_StyleScopedClasses['reconnect-btn']} */ ;
 /** @type {__VLS_StyleScopedClasses['settings-btn']} */ ;
 /** @type {__VLS_StyleScopedClasses['ws-indicator']} */ ;
 /** @type {__VLS_StyleScopedClasses['ws-dot']} */ ;
@@ -1122,6 +1158,7 @@ const __VLS_self = (await import('vue')).defineComponent({
             isPaired: isPaired,
             handleAccept: handleAccept,
             handleReject: handleReject,
+            handleReconnect: handleReconnect,
             wsStatus: wsStatus,
             phoneConnected: phoneConnected,
             phoneName: phoneName,

@@ -91,22 +91,12 @@ func (s *Server) handleCreateTransfer(w http.ResponseWriter, r *http.Request) {
 		for _, f := range res.Files {
 			_ = s.Storage.CreatePart(res.TransferID, f.FileID, fileSizeByID(body, f.ClientFileID))
 		}
-		// Notify the PC UI (and other WS clients on this session) that a
-		// phone→PC transfer has been created, so it can show progress.
-		offerFiles := make([]map[string]any, 0, len(res.Files))
-		for _, f := range res.Files {
-			offerFiles = append(offerFiles, map[string]any{
-				"fileId": f.FileID,
-				"name":   f.Name,
-				"size":   fileSizeByID(body, f.ClientFileID),
-			})
-		}
-		s.pushWSEvent(sessID, ws.MsgFileOffer, map[string]any{
-			"offerId":    body.OfferID,
-			"transferId": res.TransferID,
-			"deviceName": "Phone",
-			"files":      offerFiles,
-		})
+		// Intentionally NOT broadcasting file.offer here. Per spec,
+		// file.offer is for the PC→phone direction so the phone can
+		// accept/reject. For phone→PC uploads the PC is the passive
+		// receiver and doesn't need to accept anything — sending
+		// file.offer made the Vue UI pop an Accept/Reject dialog
+		// for the user's own outgoing upload.
 	}
 
 	resp := map[string]any{

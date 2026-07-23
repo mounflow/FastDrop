@@ -98,6 +98,18 @@ export async function listTransfers(): Promise<TransferRow[]> {
   return data.transfers || []
 }
 
+/// Revoke the current session (DELETE /api/v1/session). Server then
+/// broadcasts session.revoked, which the Vue side already handles by
+/// clearing state and falling back to the QR pairing page. Used by
+/// the "重新配对" button when the user wants to pair a different
+/// phone or recovery from a stale session.
+export async function revokeSession(): Promise<void> {
+  await fetch('/api/v1/session', {
+    method: 'DELETE',
+    headers: authHeaders(),
+  })
+}
+
 export async function getTransfer(transferId: string): Promise<TransferRow> {
   return asJson<TransferRow>(await fetch(`/api/v1/transfers/${transferId}`, { headers: authHeaders() }))
 }

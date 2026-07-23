@@ -12,6 +12,7 @@ import {
   listTransfers,
   rejectPair,
   restoreSession,
+  revokeSession,
   setSession,
   triggerBrowserDownload,
   updateSettings,
@@ -224,6 +225,28 @@ async function handleReject(requestId: string) {
     pendingRequests.value = pendingRequests.value.filter((r) => r.requestId !== requestId)
   } catch (e) {
     console.error('Reject failed:', e)
+  }
+}
+
+/// User clicked "重新配对" — revoke the current session so the server
+/// broadcasts session.revoked, which our WS handler already turns
+/// into the QR pairing view. No local state reset needed here; the
+/// revoked handler does it all.
+async function handleReconnect() {
+  if (!confirm('确定要作废当前配对，回到扫码页吗？')) return
+  try {
+    await revokeSession()
+  } catch (e) {
+    console.error('Revoke failed:', e)
+    // Fall back to manual reset so the user isn't stuck.
+    setSession(null)
+    isPaired.value = false
+    phoneConnected.value = false
+    phoneName.value = ''
+    wsClient?.close()
+    wsClient = null
+    wsStatus.value = 'disconnected'
+    refreshQR()
   }
 }
 
@@ -654,7 +677,15 @@ onUnmounted(cleanup)
           <h1>FastDrop</h1>
           <p class="server">{{ serverName }}</p>
         </div>
-        <button class="settings-btn" title="Settings" @click="showSettings = !showSettings">&#9881;</button>
+        <div class="header-actions">
+          <button
+            v-if="isPaired"
+            class="reconnect-btn"
+            title="作废当前配对，重新显示二维码（用于换手机或会话失効）"
+            @click="handleReconnect"
+          >重新配对</button>
+          <button class="settings-btn" title="Settings" @click="showSettings = !showSettings">&#9881;</button>
+        </div>
       </div>
       <div class="ws-indicator" :class="wsStatus" :title="`WebSocket: ${wsStatus}`">
         <span class="ws-dot"></span>
@@ -886,6 +917,28 @@ h1 { margin: 0; font-size: 28px; }
   transition: color 0.2s;
 }
 .settings-btn:hover { color: #333; }
+
+.header-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.reconnect-btn {
+  background: #fff;
+  color: #ef4444;
+  border: 1px solid #ef4444;
+  border-radius: 8px;
+  padding: 6px 14px;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background 0.15s, color 0.15s;
+}
+.reconnect-btn:hover {
+  background: #ef4444;
+  color: #fff;
+}
 
 /* ---- Settings panel ---- */
 .settings-panel {
