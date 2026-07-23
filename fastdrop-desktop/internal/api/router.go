@@ -10,6 +10,7 @@ import (
 
 	"fastdrop-desktop/internal/config"
 	"fastdrop-desktop/internal/database"
+	"fastdrop-desktop/internal/discovery"
 	"fastdrop-desktop/internal/pairing"
 	"fastdrop-desktop/internal/session"
 	"fastdrop-desktop/internal/storage"
@@ -19,13 +20,14 @@ import (
 
 // Server bundles all subsystems the API needs.
 type Server struct {
-	Cfg      *config.Config
-	DB       *database.DB
-	Pairing  *pairing.Manager
-	Session  *session.Manager
-	Transfer *transfer.Manager
-	Storage  *storage.Manager
-	WSHub    *websocket.Hub
+	Cfg       *config.Config
+	DB        *database.DB
+	Pairing   *pairing.Manager
+	Session   *session.Manager
+	Transfer  *transfer.Manager
+	Storage   *storage.Manager
+	WSHub     *websocket.Hub
+	Discovery *discovery.Controller // nil-safe: handlers must check
 }
 
 // upsertDevice persists a device row.

@@ -513,12 +513,14 @@ function progressPercent(t) {
 // ========== Settings ==========
 const showSettings = ref(false);
 const settingsDownloadDir = ref('');
+const settingsMdnsEnabled = ref(false);
 const settingsSaving = ref(false);
 const settingsError = ref(null);
 async function loadSettings() {
     try {
         const s = await getSettings();
         settingsDownloadDir.value = s.downloadDirectory;
+        settingsMdnsEnabled.value = !!s.mdnsEnabled;
     }
     catch { /* ignore */ }
 }
@@ -535,6 +537,25 @@ async function saveDownloadDir() {
     }
     catch (e) {
         settingsError.value = e.message || 'Save failed';
+    }
+    finally {
+        settingsSaving.value = false;
+    }
+}
+/// Toggle mDNS broadcasting on the server. The server hot-swaps the
+/// publisher; no restart required. We optimistically flip the toggle
+/// and roll back on error so the user sees immediate feedback.
+async function toggleMdns() {
+    const next = !settingsMdnsEnabled.value;
+    settingsSaving.value = true;
+    settingsError.value = null;
+    try {
+        const s = await updateSettings({ mdnsEnabled: next });
+        settingsMdnsEnabled.value = s.mdnsEnabled;
+    }
+    catch (e) {
+        settingsError.value = e.message || 'mDNS toggle failed';
+        // Keep the toggle at its previous position.
     }
     finally {
         settingsSaving.value = false;
@@ -593,6 +614,16 @@ let __VLS_directives;
 /** @type {__VLS_StyleScopedClasses['reconnect-btn']} */ ;
 /** @type {__VLS_StyleScopedClasses['settings-panel']} */ ;
 /** @type {__VLS_StyleScopedClasses['settings-input']} */ ;
+/** @type {__VLS_StyleScopedClasses['switch']} */ ;
+/** @type {__VLS_StyleScopedClasses['switch']} */ ;
+/** @type {__VLS_StyleScopedClasses['switch']} */ ;
+/** @type {__VLS_StyleScopedClasses['slider']} */ ;
+/** @type {__VLS_StyleScopedClasses['switch']} */ ;
+/** @type {__VLS_StyleScopedClasses['slider']} */ ;
+/** @type {__VLS_StyleScopedClasses['switch']} */ ;
+/** @type {__VLS_StyleScopedClasses['slider']} */ ;
+/** @type {__VLS_StyleScopedClasses['switch']} */ ;
+/** @type {__VLS_StyleScopedClasses['slider']} */ ;
 /** @type {__VLS_StyleScopedClasses['ws-indicator']} */ ;
 /** @type {__VLS_StyleScopedClasses['ws-dot']} */ ;
 /** @type {__VLS_StyleScopedClasses['ws-indicator']} */ ;
@@ -722,6 +753,30 @@ if (__VLS_ctx.showSettings) {
     }
     __VLS_asFunctionalElement(__VLS_intrinsicElements.p, __VLS_intrinsicElements.p)({
         ...{ class: "settings-hint" },
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+        ...{ class: "settings-field" },
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.label, __VLS_intrinsicElements.label)({
+        ...{ class: "settings-toggle-row" },
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.strong, __VLS_intrinsicElements.strong)({});
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({
+        ...{ class: "settings-hint" },
+        ...{ style: {} },
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.label, __VLS_intrinsicElements.label)({
+        ...{ class: "switch" },
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.input)({
+        ...{ onChange: (__VLS_ctx.toggleMdns) },
+        type: "checkbox",
+        checked: (__VLS_ctx.settingsMdnsEnabled),
+        disabled: (__VLS_ctx.settingsSaving),
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({
+        ...{ class: "slider" },
     });
 }
 const __VLS_0 = {}.Teleport;
@@ -1078,6 +1133,11 @@ if (__VLS_ctx.transfers.length === 0 && !__VLS_ctx.historyLoading) {
 /** @type {__VLS_StyleScopedClasses['btn-accept']} */ ;
 /** @type {__VLS_StyleScopedClasses['settings-error']} */ ;
 /** @type {__VLS_StyleScopedClasses['settings-hint']} */ ;
+/** @type {__VLS_StyleScopedClasses['settings-field']} */ ;
+/** @type {__VLS_StyleScopedClasses['settings-toggle-row']} */ ;
+/** @type {__VLS_StyleScopedClasses['settings-hint']} */ ;
+/** @type {__VLS_StyleScopedClasses['switch']} */ ;
+/** @type {__VLS_StyleScopedClasses['slider']} */ ;
 /** @type {__VLS_StyleScopedClasses['modal-overlay']} */ ;
 /** @type {__VLS_StyleScopedClasses['modal-card']} */ ;
 /** @type {__VLS_StyleScopedClasses['modal-header']} */ ;
@@ -1177,9 +1237,11 @@ const __VLS_self = (await import('vue')).defineComponent({
             progressPercent: progressPercent,
             showSettings: showSettings,
             settingsDownloadDir: settingsDownloadDir,
+            settingsMdnsEnabled: settingsMdnsEnabled,
             settingsSaving: settingsSaving,
             settingsError: settingsError,
             saveDownloadDir: saveDownloadDir,
+            toggleMdns: toggleMdns,
         };
     },
 });

@@ -19,22 +19,32 @@ type settingsResponse struct {
 	DownloadDirectory string `json:"downloadDirectory"`
 	ConflictPolicy    string `json:"conflictPolicy"`
 	DeviceName        string `json:"deviceName"`
+	MdnsEnabled       bool   `json:"mdnsEnabled"`
 }
 
 // updateSettingsRequest is the JSON body for PUT /api/v1/settings.
 type updateSettingsRequest struct {
 	DownloadDirectory *string `json:"downloadDirectory,omitempty"`
 	ConflictPolicy    *string `json:"conflictPolicy,omitempty"`
+	MdnsEnabled       *bool   `json:"mdnsEnabled,omitempty"`
 }
 
 // handleGetSettings returns the current configurable settings.
 // No auth required — this endpoint is only reachable from the local PC
 // browser (same-origin, embedded UI).
 func (s *Server) handleGetSettings(w http.ResponseWriter, r *http.Request) {
+	mdnsEnabled := s.Cfg.Discovery.MdnsEnabled
+	if s.Discovery != nil {
+		// Prefer the live controller state — it may have been toggled
+		// without making it to disk yet (shouldn't happen in practice
+		// since SetEnabled persists below, but defensive).
+		mdnsEnabled = s.Discovery.IsEnabled()
+	}
 	writeJSON(w, http.StatusOK, settingsResponse{
 		DownloadDirectory: s.Storage.DownloadDir(),
 		ConflictPolicy:    s.Cfg.Storage.ConflictPolicy,
 		DeviceName:        s.Cfg.Server.DeviceName,
+		MdnsEnabled:       mdnsEnabled,
 	})
 }
 
@@ -87,6 +97,19 @@ func (s *Server) handleUpdateSettings(w http.ResponseWriter, r *http.Request) {
 		changed = true
 	}
 
+	// Toggle mDNS broadcasting. Hot-swapped via the Discovery
+	// controller — no server restart required.
+	if req.MdnsEnabled != nil {
+		if s.Discovery != nil {
+			if err := s.Discovery.SetEnabled(*req.MdnsEnabled); err != nil {
+				writeError(w, http.StatusInternalServerError, "INTERNAL_ERROR", "failed to toggle mDNS: "+err.Error(), reqID)
+				return
+			}
+		}
+		s.Cfg.Discovery.MdnsEnabled = *req.MdnsEnabled
+		changed = true
+	}
+
 	if changed {
 		if err := saveCfg(s.Cfg); err != nil {
 			writeError(w, http.StatusInternalServerError, "INTERNAL_ERROR", "failed to save config: "+err.Error(), reqID)
@@ -95,9 +118,14 @@ func (s *Server) handleUpdateSettings(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Return the updated settings.
+	mdnsEnabled := s.Cfg.Discovery.MdnsEnabled
+	if s.Discovery != nil {
+		mdnsEnabled = s.Discovery.IsEnabled()
+	}
 	writeJSON(w, http.StatusOK, settingsResponse{
 		DownloadDirectory: s.Storage.DownloadDir(),
 		ConflictPolicy:    s.Cfg.Storage.ConflictPolicy,
 		DeviceName:        s.Cfg.Server.DeviceName,
+		MdnsEnabled:       mdnsEnabled,
 	})
 }

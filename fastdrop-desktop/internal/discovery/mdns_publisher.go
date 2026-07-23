@@ -37,6 +37,11 @@ func (p *MdnsPublisher) Start(_ context.Context, info ServiceInfo) error {
 	if host == "" {
 		host = "FastDrop"
 	}
+	// hashicorp/mdns rejects non-FQDN hostNames (must end in a dot).
+	// info.Host from main.go is a literal IP like "192.168.1.19", which
+	// the library won't accept — synthesize "<deviceName>.local."
+	// instead and let the library pick the actual interface IPs.
+	fqdn := strings.ReplaceAll(host, " ", "-") + ".local."
 	// TXT keys follow §30.2.
 	txt := []string{
 		"id=" + info.DeviceID,
@@ -48,12 +53,12 @@ func (p *MdnsPublisher) Start(_ context.Context, info ServiceInfo) error {
 		"tls=0",
 	}
 	service, err := mdns.NewMDNSService(
-		host,                // instance name
+		host,                                      // instance name (human-readable)
 		strings.TrimSuffix(ServiceType, ".local."), // "_fastdrop._tcp"
-		"",                  // domain
-		info.Host,           // host
-		info.Port,           // port
-		nil,                 // IPs (let mdns pick)
+		"",                                        // domain
+		fqdn,                                      // hostName (FQDN)
+		info.Port,                                 // port
+		nil,                                       // IPs (let mdns pick)
 		txt,
 	)
 	if err != nil {
@@ -65,8 +70,18 @@ func (p *MdnsPublisher) Start(_ context.Context, info ServiceInfo) error {
 	}
 	p.server = server
 	p.running = true
-	log.Printf("[discovery] mdns publisher started: %s.%s port=%d", host, ServiceType, info.Port)
+	log.Printf("[discovery] visible as %s.%s on %s:%d (TXT: id=%s platform=%s protocol=%d)",
+		host, ServiceType, hostOrLocal(info.Host), info.Port, info.DeviceID, info.Platform, info.ProtocolVersion)
 	return nil
+}
+
+// hostOrLocal falls back to "localhost" when info.Host is empty so
+// the log line is still readable in single-NIC setups.
+func hostOrLocal(h string) string {
+	if h == "" {
+		return "localhost"
+	}
+	return h
 }
 
 func (p *MdnsPublisher) Stop() error {

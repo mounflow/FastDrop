@@ -597,6 +597,7 @@ function progressPercent(t: ActiveTransfer): number {
 // ========== Settings ==========
 const showSettings = ref(false)
 const settingsDownloadDir = ref('')
+const settingsMdnsEnabled = ref(false)
 const settingsSaving = ref(false)
 const settingsError = ref<string | null>(null)
 
@@ -604,6 +605,7 @@ async function loadSettings() {
   try {
     const s = await getSettings()
     settingsDownloadDir.value = s.downloadDirectory
+    settingsMdnsEnabled.value = !!s.mdnsEnabled
   } catch { /* ignore */ }
 }
 
@@ -618,6 +620,24 @@ async function saveDownloadDir() {
     showSettings.value = false
   } catch (e) {
     settingsError.value = (e as Error).message || 'Save failed'
+  } finally {
+    settingsSaving.value = false
+  }
+}
+
+/// Toggle mDNS broadcasting on the server. The server hot-swaps the
+/// publisher; no restart required. We optimistically flip the toggle
+/// and roll back on error so the user sees immediate feedback.
+async function toggleMdns() {
+  const next = !settingsMdnsEnabled.value
+  settingsSaving.value = true
+  settingsError.value = null
+  try {
+    const s = await updateSettings({ mdnsEnabled: next })
+    settingsMdnsEnabled.value = s.mdnsEnabled
+  } catch (e) {
+    settingsError.value = (e as Error).message || 'mDNS toggle failed'
+    // Keep the toggle at its previous position.
   } finally {
     settingsSaving.value = false
   }
@@ -721,6 +741,26 @@ onUnmounted(cleanup)
         </div>
         <p v-if="settingsError" class="settings-error">{{ settingsError }}</p>
         <p class="settings-hint">Files received from your phone are saved here.</p>
+      </div>
+
+      <div class="settings-field">
+        <label class="settings-toggle-row">
+          <span>
+            <strong>局域网设备发现 (mDNS)</strong>
+            <span class="settings-hint" style="display:block; margin-top:2px;">
+              开启后本机会在局域网广播 _fastdrop._tcp，手机端 Phase 2 可免扫码发现。
+            </span>
+          </span>
+          <label class="switch">
+            <input
+              type="checkbox"
+              :checked="settingsMdnsEnabled"
+              :disabled="settingsSaving"
+              @change="toggleMdns"
+            />
+            <span class="slider"></span>
+          </label>
+        </label>
       </div>
     </section>
 
@@ -984,6 +1024,57 @@ h1 { margin: 0; font-size: 28px; }
   color: #999;
   font-size: 12px;
   margin: 6px 0 0;
+}
+
+.settings-toggle-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-top: 12px;
+}
+
+/* iOS-style toggle switch */
+.switch {
+  position: relative;
+  display: inline-block;
+  width: 44px;
+  height: 24px;
+  flex-shrink: 0;
+}
+.switch input {
+  opacity: 0;
+  width: 0;
+  height: 0;
+}
+.switch .slider {
+  position: absolute;
+  cursor: pointer;
+  top: 0; left: 0; right: 0; bottom: 0;
+  background-color: #ccc;
+  border-radius: 24px;
+  transition: 0.2s;
+}
+.switch .slider::before {
+  position: absolute;
+  content: "";
+  height: 18px;
+  width: 18px;
+  left: 3px;
+  bottom: 3px;
+  background-color: #fff;
+  border-radius: 50%;
+  transition: 0.2s;
+}
+.switch input:checked + .slider {
+  background-color: #22c55e;
+}
+.switch input:checked + .slider::before {
+  transform: translateX(20px);
+}
+.switch input:disabled + .slider {
+  opacity: 0.6;
+  cursor: not-allowed;
 }
 
 /* ---- WS indicator ---- */

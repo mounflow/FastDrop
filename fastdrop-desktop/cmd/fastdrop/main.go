@@ -176,17 +176,17 @@ func main() {
 		sendDeviceDisconnect(sessionID, deviceID)
 	}
 
-	// Choose discovery implementation.
-	var publisher discovery.DiscoveryPublisher = discovery.NoopPublisher{}
-	if cfg.Discovery.MdnsEnabled {
-		publisher = discovery.NewMdnsPublisher()
-	}
+	// Choose discovery implementation. Controller wraps both the mDNS
+	// publisher and the NoopPublisher, allowing the user to toggle at
+	// runtime through PUT /api/v1/settings {mdnsEnabled: true/false}
+	// without restarting the server.
+	discoveryCtl := discovery.NewController(cfg.Discovery.MdnsEnabled)
 
 	apiSrv := &api.Server{
 		Cfg: cfg, DB: db,
 		Pairing: pairMgr, Session: sessMgr,
 		Transfer: transferMgr, Storage: store,
-		WSHub: wsHub,
+		WSHub: wsHub, Discovery: discoveryCtl,
 	}
 
 	// Background tasks.
@@ -198,13 +198,13 @@ func main() {
 
 	// Publish on mDNS (Phase 2).
 	host, port := resolveBindAddress(cfg)
-	if err := publisher.Start(rootCtx, discovery.ServiceInfo{
+	if err := discoveryCtl.Start(rootCtx, discovery.ServiceInfo{
 		DeviceID: "windows-local", DeviceName: cfg.Server.DeviceName,
 		Host: host, Port: port, ProtocolVersion: 1, Platform: "windows",
 	}); err != nil {
 		log.Printf("[discovery] start failed: %v (continuing without mDNS)", err)
 	}
-	defer publisher.Stop()
+	defer discoveryCtl.Stop()
 
 	// Router.
 	mux := http.NewServeMux()
@@ -245,7 +245,7 @@ func main() {
 	signal.Notify(sig, syscall.SIGINT, syscall.SIGTERM)
 	<-sig
 	log.Println("[shutdown] interrupt received, draining...")
-	publisher.Stop()
+	discoveryCtl.Stop()
 
 	shutCtx, shutCancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer shutCancel()

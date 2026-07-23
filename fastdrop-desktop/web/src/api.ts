@@ -152,6 +152,7 @@ export interface Settings {
   downloadDirectory: string
   conflictPolicy: string
   deviceName: string
+  mdnsEnabled: boolean
 }
 
 export async function getSettings(): Promise<Settings> {
@@ -161,6 +162,7 @@ export async function getSettings(): Promise<Settings> {
 export async function updateSettings(body: {
   downloadDirectory?: string
   conflictPolicy?: string
+  mdnsEnabled?: boolean
 }): Promise<Settings> {
   return asJson(await fetch('/api/v1/settings', {
     method: 'PUT',
