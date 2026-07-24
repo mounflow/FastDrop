@@ -3,6 +3,7 @@ import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import 'package:fastdrop_mobile/core/discovery/discovery_providers.dart';
 import 'package:fastdrop_mobile/core/storage/session_store.dart';
 import 'package:fastdrop_mobile/core/providers.dart';
 import 'package:fastdrop_mobile/core/utils/file_utils.dart';
@@ -124,6 +125,34 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
             child: Text(
               'Files received from the PC are saved here. '
               'Leave empty to use the default location.',
+              style: TextStyle(color: Colors.grey, fontSize: 12),
+            ),
+          ),
+
+          const Divider(),
+
+          // -- 局域网发现 (mDNS) ------------------------------------------------
+          const _SectionHeader(title: '局域网发现'),
+          Consumer(
+            builder: (context, ref, child) {
+              final mdnsEnabled = ref.watch(mdnsEnabledProvider);
+              return SwitchListTile(
+                secondary: const Icon(Icons.radar),
+                title: const Text('自动发现附近 PC'),
+                subtitle: const Text(
+                  '开启后可通过 mDNS 自动发现同一 WiFi 下的 FastDrop PC',
+                ),
+                value: mdnsEnabled,
+                onChanged: (value) {
+                  ref.read(mdnsEnabledProvider.notifier).setEnabled(value);
+                },
+              );
+            },
+          ),
+          const Padding(
+            padding: EdgeInsets.symmetric(horizontal: 16, vertical: 4),
+            child: Text(
+              '需要 PC 端也开启 mDNS 广播（PC 网页版 Settings → 局域网设备发现）。',
               style: TextStyle(color: Colors.grey, fontSize: 12),
             ),
           ),

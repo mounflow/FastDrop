@@ -1,8 +1,10 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import 'package:fastdrop_mobile/core/discovery/discovery_providers.dart';
 import 'package:fastdrop_mobile/core/storage/session_store.dart';
 import 'package:fastdrop_mobile/core/providers.dart';
+import 'package:fastdrop_mobile/features/devices/nearby_devices_sheet.dart';
 import 'package:fastdrop_mobile/features/pairing/pairing_screen.dart';
 import 'package:fastdrop_mobile/features/transfer/transfer_service.dart';
 import 'package:fastdrop_mobile/shared/models/transfer.dart';
@@ -664,13 +666,55 @@ class _DevicesScreenState extends ConsumerState<DevicesScreen>
     ref.read(deviceConnectionProvider.notifier).switchToDevice(_devices[idx]);
   }
 
+  /// "+" 按钮入口：根据 mDNS 开关状态走不同流程。
+  ///
+  /// mDNS 关闭 → 弹窗确认"开启局域网发现？" → 开启 + 扫码
+  /// mDNS 开启 → 弹出附近设备列表 + 扫码入口
   Future<void> _onAddDevice() async {
+    final mdnsEnabled = ref.read(mdnsEnabledProvider);
+
+    if (!mdnsEnabled) {
+      // mDNS 未开启：弹窗确认
+      final enable = await showDialog<bool>(
+        context: context,
+        builder: (ctx) => AlertDialog(
+          title: const Text('开启局域网发现？'),
+          content: const Text(
+            '开启后可自动发现同一 WiFi 下运行 FastDrop 的 PC，'
+            '无需每次手动扫码。\n\n'
+            '也可以仍然使用扫码配对。',
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.of(ctx).pop(false),
+              child: const Text('仅扫码'),
+            ),
+            ElevatedButton(
+              onPressed: () => Navigator.of(ctx).pop(true),
+              child: const Text('开启并扫码'),
+            ),
+          ],
+        ),
+      );
+
+      if (enable == true) {
+        // 用户选择开启 mDNS
+        await ref.read(mdnsEnabledProvider.notifier).setEnabled(true);
+      }
+      // 无论是否开启 mDNS，都进扫码页
+      _goToPairing();
+    } else {
+      // mDNS 已开启：弹出附近设备列表
+      NearbyDevicesSheet.show(context);
+    }
+  }
+
+  /// 导航到扫码配对页。
+  Future<void> _goToPairing() async {
     ref.read(pairingProvider.notifier).resetToScanning();
     await Navigator.of(context).pushNamed('/pairing');
-    // PairingScreen pops back here after success — reload to pick up the
-    // new device.
     if (mounted) {
-      _loadDevices(preferredIndex: _devices.length); // new device is appended
+      _loadDevices(preferredIndex: _devices.length);
     }
   }
 
@@ -799,6 +843,7 @@ class _DevicesScreenState extends ConsumerState<DevicesScreen>
   // -- Empty state ------------------------------------------------------------
 
   Widget _buildEmptyState() {
+    final mdnsEnabled = ref.watch(mdnsEnabledProvider);
     return Center(
       child: Padding(
         padding: const EdgeInsets.all(32),
@@ -813,7 +858,7 @@ class _DevicesScreenState extends ConsumerState<DevicesScreen>
             ),
             const SizedBox(height: 8),
             const Text(
-              '点击右上角的 + 扫码添加一台 PC',
+              '点击右上角的 + 添加一台 PC',
               style: TextStyle(color: Colors.grey),
             ),
             const SizedBox(height: 24),
@@ -822,6 +867,14 @@ class _DevicesScreenState extends ConsumerState<DevicesScreen>
               icon: const Icon(Icons.qr_code_scanner),
               label: const Text('扫码添加设备'),
             ),
+            if (mdnsEnabled) ...[
+              const SizedBox(height: 12),
+              OutlinedButton.icon(
+                onPressed: () => NearbyDevicesSheet.show(context),
+                icon: const Icon(Icons.radar),
+                label: const Text('查看附近设备'),
+              ),
+            ],
           ],
         ),
       ),
