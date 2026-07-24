@@ -160,6 +160,20 @@ class DeviceStore {
     await _write(devices);
   }
 
+  /// Find a stored device matching the given base URL or device name.
+  /// Tries exact [baseUrl] match first, then falls back to [deviceName]
+  /// (handles the case where the PC's IP changed between sessions).
+  Future<Device?> findMatch(String baseUrl, String deviceName) async {
+    final devices = await loadDevices();
+    for (final d in devices) {
+      if (d.serverBaseUrl == baseUrl) return d;
+    }
+    for (final d in devices) {
+      if (d.name == deviceName) return d;
+    }
+    return null;
+  }
+
   /// Returns the most-recently-used device, or null if none.
   Future<Device?> getActiveDevice() async {
     final devices = await loadDevices();

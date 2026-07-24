@@ -3,6 +3,9 @@ import 'dart:async';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
+import 'package:fastdrop_mobile/core/providers.dart';
+import 'package:fastdrop_mobile/core/storage/session_store.dart';
+
 import 'device_discovery.dart';
 import 'mdns_discovery.dart';
 
@@ -108,3 +111,16 @@ class NearbyDevicesNotifier extends StateNotifier<List<DiscoveredDevice>> {
     super.dispose();
   }
 }
+
+// ---------------------------------------------------------------------------
+// 已配对设备列表（供 UI 判断配对状态）
+// ---------------------------------------------------------------------------
+
+/// 异步加载已配对设备列表。NearbyDevicesSheet 用它判断
+/// 发现到的设备是否已配对（有 session 记录）。
+///
+/// 用 FutureProvider 而非同步读取，因为 DeviceStore 底层是
+/// SharedPreferences（异步）。UI 层 watch 此 provider 即可。
+final pairedDevicesProvider = FutureProvider<List<Device>>((ref) async {
+  return ref.read(deviceStoreProvider).loadDevices();
+});

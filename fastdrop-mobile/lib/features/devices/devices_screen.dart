@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import 'package:fastdrop_mobile/core/discovery/device_discovery.dart';
 import 'package:fastdrop_mobile/core/discovery/discovery_providers.dart';
 import 'package:fastdrop_mobile/core/storage/session_store.dart';
 import 'package:fastdrop_mobile/core/providers.dart';
@@ -597,6 +598,9 @@ class _DevicesScreenState extends ConsumerState<DevicesScreen>
   bool _loading = true;
   TabController? _tabController;
 
+  /// 上次自动重连的时间戳（防抖，10 秒内不重复尝试）。
+  DateTime? _lastAutoReconnect;
+
   @override
   void initState() {
     super.initState();
@@ -704,9 +708,54 @@ class _DevicesScreenState extends ConsumerState<DevicesScreen>
       // 无论是否开启 mDNS，都进扫码页
       _goToPairing();
     } else {
-      // mDNS 已开启：弹出附近设备列表
-      NearbyDevicesSheet.show(context);
+      // mDNS 已开启：弹出附近设备列表（刷新配对缓存）
+      ref.invalidate(pairedDevicesProvider);
+      final discovered = await NearbyDevicesSheet.show(context);
+      if (discovered == null || !mounted) return;
+      await _onNearbyDeviceSelected(discovered);
     }
+  }
+
+  /// 用户在附近设备列表中选择了某台设备。
+  /// 已配对 → 直接 switchToDevice（跳过扫码）；未配对 → 进扫码页。
+  Future<void> _onNearbyDeviceSelected(DiscoveredDevice discovered) async {
+    final store = ref.read(deviceStoreProvider);
+    final matched = await store.findMatch(
+        discovered.baseUrl, discovered.deviceName);
+
+    if (matched == null) {
+      // 未配对 → 进扫码页
+      _goToPairing();
+      return;
+    }
+
+    // 已配对 → 直接连接
+    Device device = matched;
+
+    // IP 可能变了（mDNS 发现新 IP）→ 更新存储
+    if (matched.serverBaseUrl != discovered.baseUrl) {
+      device = Device(
+        id: discovered.baseUrl,
+        name: matched.name,
+        serverBaseUrl: discovered.baseUrl,
+        sessionId: matched.sessionId,
+        accessToken: matched.accessToken,
+        lastSeen: DateTime.now(),
+        expiresAt: matched.expiresAt,
+      );
+      await store.removeDevice(matched.id);
+      await store.saveDevice(device);
+      ref.invalidate(pairedDevicesProvider);
+    }
+
+    if (!mounted) return;
+
+    // 切到对应 tab（如果存在）
+    final idx = _devices.indexWhere((d) => d.id == device.id);
+    if (idx >= 0 && _tabController != null) {
+      _tabController!.animateTo(idx);
+    }
+    ref.read(deviceConnectionProvider.notifier).switchToDevice(device);
   }
 
   /// 导航到扫码配对页。
@@ -716,6 +765,45 @@ class _DevicesScreenState extends ConsumerState<DevicesScreen>
     if (mounted) {
       _loadDevices(preferredIndex: _devices.length);
     }
+  }
+
+  /// mDNS 设备列表变化回调：如果当前活跃设备处于 error/disconnected
+  /// 状态且被 mDNS 重新发现，自动尝试重连（阶段 4 核心逻辑）。
+  void _onNearbyDevicesChanged(
+      List<DiscoveredDevice> devices, DeviceConnectionState connState) {
+    if (devices.isEmpty) return;
+    final status = connState.connectionStatus;
+    if (status != ConnectionStatus.error &&
+        status != ConnectionStatus.disconnected) {
+      return;
+    }
+    // Session 过期不自动重连——需要用户重新配对
+    if (connState.sessionExpired) return;
+    final activeDevice = connState.activeDevice;
+    if (activeDevice == null) return;
+
+    // 在发现的设备中查找匹配项
+    final found = devices.any((d) =>
+        d.baseUrl == activeDevice.serverBaseUrl ||
+        d.deviceName == activeDevice.name);
+    if (!found) return;
+
+    // 冷却：10 秒内不重复尝试
+    if (_lastAutoReconnect != null &&
+        DateTime.now().difference(_lastAutoReconnect!) <
+            const Duration(seconds: 10)) {
+      return;
+    }
+    _lastAutoReconnect = DateTime.now();
+    ref.read(deviceConnectionProvider.notifier).reconnect();
+  }
+
+  /// Session 过期后重新扫码配对：删除旧设备 → 进扫码页。
+  Future<void> _reScanPair(Device device) async {
+    ref.read(deviceConnectionProvider.notifier).disconnect();
+    await ref.read(deviceStoreProvider).removeDevice(device.id);
+    ref.invalidate(pairedDevicesProvider);
+    _goToPairing();
   }
 
   Future<void> _onDeleteDevice(Device device) async {
@@ -747,6 +835,7 @@ class _DevicesScreenState extends ConsumerState<DevicesScreen>
       notifier.disconnect();
     }
     await ref.read(deviceStoreProvider).removeDevice(device.id);
+    ref.invalidate(pairedDevicesProvider);
 
     final remaining = await ref.read(deviceStoreProvider).loadDevices();
     if (!mounted) return;
@@ -772,6 +861,11 @@ class _DevicesScreenState extends ConsumerState<DevicesScreen>
   @override
   Widget build(BuildContext context) {
     final connState = ref.watch(deviceConnectionProvider);
+
+    // 阶段4: mDNS 发现已配对设备 → 自动重连
+    ref.listen<List<DiscoveredDevice>>(nearbyDevicesProvider, (_, devices) {
+      _onNearbyDevicesChanged(devices, connState);
+    });
 
     return Scaffold(
       appBar: AppBar(
@@ -870,7 +964,13 @@ class _DevicesScreenState extends ConsumerState<DevicesScreen>
             if (mdnsEnabled) ...[
               const SizedBox(height: 12),
               OutlinedButton.icon(
-                onPressed: () => NearbyDevicesSheet.show(context),
+                onPressed: () async {
+                  ref.invalidate(pairedDevicesProvider);
+                  final discovered = await NearbyDevicesSheet.show(context);
+                  if (discovered != null && mounted) {
+                    await _onNearbyDeviceSelected(discovered);
+                  }
+                },
                 icon: const Icon(Icons.radar),
                 label: const Text('查看附近设备'),
               ),
@@ -919,6 +1019,18 @@ class _DevicesScreenState extends ConsumerState<DevicesScreen>
               text: '正在连接…',
             ),
           ] else ...[
+            // Session 过期时提供重新扫码入口（阶段 4: D-3 降级）
+            if (sessionExpired) ...[
+              ElevatedButton.icon(
+                onPressed: () => _reScanPair(device),
+                icon: const Icon(Icons.qr_code_scanner),
+                label: const Text('重新扫码配对'),
+                style: ElevatedButton.styleFrom(
+                  padding: const EdgeInsets.symmetric(vertical: 14),
+                ),
+              ),
+              const SizedBox(height: 12),
+            ],
             Row(
               children: [
                 Expanded(

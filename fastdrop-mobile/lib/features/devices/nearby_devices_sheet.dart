@@ -3,6 +3,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import 'package:fastdrop_mobile/core/discovery/device_discovery.dart';
 import 'package:fastdrop_mobile/core/discovery/discovery_providers.dart';
+import 'package:fastdrop_mobile/core/storage/session_store.dart';
 import 'package:fastdrop_mobile/features/pairing/pairing_screen.dart';
 
 // ---------------------------------------------------------------------------
@@ -12,15 +13,14 @@ import 'package:fastdrop_mobile/features/pairing/pairing_screen.dart';
 /// 显示 mDNS 发现到的附近 FastDrop PC 列表。
 ///
 /// 每行显示：🖥 设备名 / IP / protocol 版本 / 状态（已配对✓ / 待配对）。
-/// 点击已配对设备 → 直接切换连接（阶段 4 实现）。
-/// 点击未配对设备 → 进配对流程（阶段 5 实现）。
-/// 当前阶段（3）只做展示 + 点击后进扫码页。
+/// 点击已配对设备 → 直接 switchToDevice 自动重连（阶段 4）。
+/// 点击未配对设备 → 进扫码配对页（阶段 5 会改为半自动 D-2）。
 class NearbyDevicesSheet extends ConsumerWidget {
   const NearbyDevicesSheet({super.key});
 
-  /// 以 BottomSheet 形式弹出。
-  static void show(BuildContext context) {
-    showModalBottomSheet(
+  /// 以 BottomSheet 形式弹出。返回用户点击的设备（null = 未选择）。
+  static Future<DiscoveredDevice?> show(BuildContext context) {
+    return showModalBottomSheet<DiscoveredDevice?>(
       context: context,
       isScrollControlled: true,
       shape: const RoundedRectangleBorder(
@@ -168,8 +168,12 @@ class _NearbyDeviceTile extends ConsumerWidget {
   Widget build(BuildContext context, WidgetRef ref) {
     final theme = Theme.of(context);
 
-    // 检查此设备是否已配对（DeviceStore 里有记录）
-    final isPaired = _checkPaired(ref);
+    // 查 DeviceStore 判断是否已配对（阶段 4：真正查存储）
+    final pairedAsync = ref.watch(pairedDevicesProvider);
+    final pairedDevice = pairedAsync.whenOrNull(
+      data: (devices) => _findMatch(devices),
+    );
+    final isPaired = pairedDevice != null;
 
     // 从 baseUrl 提取 IP 显示
     final displayUrl = device.baseUrl
@@ -216,31 +220,27 @@ class _NearbyDeviceTile extends ConsumerWidget {
     );
   }
 
-  /// 检查 DeviceStore 里是否有此设备的记录。
-  /// 用 baseUrl 匹配（Device.id == serverBaseUrl）。
-  bool _checkPaired(WidgetRef ref) {
-    // 同步检查不可行（DeviceStore 是异步的），
-    // 用 device.pairingRequired 字段作为近似判断。
-    // 阶段 4 会改为真正查 DeviceStore。
-    return !device.pairingRequired;
+  /// 在已配对设备列表中查找匹配项。
+  /// 先按 baseUrl 精确匹配，再按 deviceName 匹配（IP 可能变了）。
+  Device? _findMatch(List<Device> devices) {
+    for (final d in devices) {
+      if (d.serverBaseUrl == device.baseUrl) return d;
+    }
+    for (final d in devices) {
+      if (d.name == device.deviceName) return d;
+    }
+    return null;
   }
 
   void _onTap(BuildContext context, WidgetRef ref, bool isPaired) {
-    // 关闭 BottomSheet
-    Navigator.of(context).pop();
-
     if (isPaired) {
-      // 阶段 4：自动重连（switchToDevice）
-      // 当前阶段：提示用户
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('已配对设备 — 自动重连将在后续版本支持')),
-      );
+      // 阶段 4：返回此设备，由调用方 switchToDevice 自动重连
+      Navigator.of(context).pop(device);
     } else {
-      // 阶段 5：半自动配对（D-2）
-      // 当前阶段：进扫码页
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('请通过扫码配对此设备')),
-      );
+      // 阶段 5 会改为半自动 D-2 配对；当前仍进扫码页
+      Navigator.of(context).pop();
+      ref.read(pairingProvider.notifier).resetToScanning();
+      Navigator.of(context).pushNamed('/pairing');
     }
   }
 }

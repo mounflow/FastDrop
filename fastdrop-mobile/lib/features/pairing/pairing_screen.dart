@@ -5,6 +5,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:mobile_scanner/mobile_scanner.dart';
 
+import 'package:fastdrop_mobile/core/discovery/discovery_providers.dart';
 import 'package:fastdrop_mobile/core/providers.dart';
 import 'package:fastdrop_mobile/core/storage/session_store.dart';
 import 'package:fastdrop_mobile/shared/models/qr_payload.dart';
@@ -234,6 +235,7 @@ class PairingNotifier extends StateNotifier<PairingState> {
           expiresAt: expiresAt,
         );
         await _ref.read(deviceStoreProvider).saveDevice(device);
+        _ref.invalidate(pairedDevicesProvider);
 
         // Configure the HTTP client with session credentials for future calls.
         httpClient.setSession(sessionInfo.sessionId, sessionInfo.accessToken);
