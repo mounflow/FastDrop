@@ -51,6 +51,7 @@ func New(s *Server) http.Handler {
 
 	// --- pairing ---
 	mux.HandleFunc("POST /api/v1/pair/request", s.withSizeLimit(64*1024, s.withPairRateLimit(s.handlePairRequest)))
+	mux.HandleFunc("POST /api/v1/pair/discover", s.withSizeLimit(64*1024, s.withPairRateLimit(s.handlePairDiscover)))
 	mux.HandleFunc("GET /api/v1/pair/requests", s.handleListPairRequests)
 	mux.HandleFunc("GET /api/v1/pair/requests/{requestId}", s.handlePairStatus)
 	mux.HandleFunc("POST /api/v1/pair/requests/{requestId}/accept", s.withPairRateLimit(s.handlePairAccept))

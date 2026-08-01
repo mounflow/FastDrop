@@ -237,9 +237,9 @@ class _NearbyDeviceTile extends ConsumerWidget {
       // 阶段 4：返回此设备，由调用方 switchToDevice 自动重连
       Navigator.of(context).pop(device);
     } else {
-      // 阶段 5 会改为半自动 D-2 配对；当前仍进扫码页
+      // 阶段 5：半自动 D-2 配对（免扫码）
       Navigator.of(context).pop();
-      ref.read(pairingProvider.notifier).resetToScanning();
+      ref.read(pairingProvider.notifier).pairViaMdns(device);
       Navigator.of(context).pushNamed('/pairing');
     }
   }

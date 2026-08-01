@@ -44,6 +44,37 @@ func (s *Server) handlePairRequest(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// pairDiscoverPayload is the body for POST /pair/discover (mDNS-initiated).
+type pairDiscoverPayload struct {
+	Device pairing.ClientDevice `json:"device"`
+}
+
+// handlePairDiscover is called by the phone when it discovers the PC via
+// mDNS and wants to pair without scanning a QR code. No pair token is
+// required — the PC user still sees the request in the Vue UI and must
+// explicitly accept. Rate-limited via withPairRateLimit.
+func (s *Server) handlePairDiscover(w http.ResponseWriter, r *http.Request) {
+	var body pairDiscoverPayload
+	if err := readJSON(r, &body); err != nil {
+		writeError(w, http.StatusBadRequest, "INVALID_REQUEST", "malformed discover request", requestID(r))
+		return
+	}
+	if body.Device.DeviceID == "" || body.Device.DeviceName == "" {
+		writeError(w, http.StatusBadRequest, "INVALID_REQUEST", "device.deviceId and device.deviceName required", requestID(r))
+		return
+	}
+	req, err := s.Pairing.CreateDirectRequest(body.Device)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL_ERROR", err.Error(), requestID(r))
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"requestId": req.RequestID,
+		"status":    string(req.Status),
+		"expiresIn": int(timeUntil(req.ExpiresAt).Seconds()),
+	})
+}
+
 // handlePairStatus returns the current status (§6.2).
 func (s *Server) handlePairStatus(w http.ResponseWriter, r *http.Request) {
 	requestID := r.PathValue("requestId")

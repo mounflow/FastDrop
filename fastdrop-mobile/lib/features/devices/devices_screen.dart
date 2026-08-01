@@ -672,7 +672,7 @@ class _DevicesScreenState extends ConsumerState<DevicesScreen>
 
   /// "+" 按钮入口：根据 mDNS 开关状态走不同流程。
   ///
-  /// mDNS 关闭 → 弹窗确认"开启局域网发现？" → 开启 + 扫码
+  /// mDNS 关闭 → 弹窗确认"开启局域网发现？" → 开启 + 附近设备 / 仅扫码
   /// mDNS 开启 → 弹出附近设备列表 + 扫码入口
   Future<void> _onAddDevice() async {
     final mdnsEnabled = ref.read(mdnsEnabledProvider);
@@ -695,25 +695,67 @@ class _DevicesScreenState extends ConsumerState<DevicesScreen>
             ),
             ElevatedButton(
               onPressed: () => Navigator.of(ctx).pop(true),
-              child: const Text('开启并扫码'),
+              child: const Text('开启并发现'),
             ),
           ],
         ),
       );
 
-      if (enable == true) {
-        // 用户选择开启 mDNS
+      if (enable == true && mounted) {
+        // 用户选择开启 mDNS → 开启后弹出附近设备列表
         await ref.read(mdnsEnabledProvider.notifier).setEnabled(true);
+        if (!mounted) return;
+        ref.invalidate(pairedDevicesProvider);
+        final discovered = await NearbyDevicesSheet.show(context);
+        if (discovered == null || !mounted) return;
+        await _onNearbyDeviceSelected(discovered);
+      } else if (mounted) {
+        // 仅扫码
+        _goToPairing();
       }
-      // 无论是否开启 mDNS，都进扫码页
-      _goToPairing();
     } else {
-      // mDNS 已开启：弹出附近设备列表（刷新配对缓存）
-      ref.invalidate(pairedDevicesProvider);
-      final discovered = await NearbyDevicesSheet.show(context);
-      if (discovered == null || !mounted) return;
-      await _onNearbyDeviceSelected(discovered);
+      // mDNS 已开启：先尝试一键连接已配对设备
+      await _quickConnectOrShowSheet();
     }
+  }
+
+  /// 一键连接：检查后台 mDNS 已发现的设备，如果找到已配对设备则
+  /// 直接连接（无 UI），否则弹出附近设备列表让用户选择。
+  Future<void> _quickConnectOrShowSheet() async {
+    final nearby = ref.read(nearbyDevicesProvider);
+    if (nearby.isNotEmpty) {
+      final store = ref.read(deviceStoreProvider);
+      for (final d in nearby) {
+        final matched =
+            await store.findMatch(d.baseUrl, d.deviceName);
+        if (matched != null && mounted) {
+          // 找到已配对设备 → 直接连接，不弹任何列表
+          ref
+              .read(deviceConnectionProvider.notifier)
+              .switchToDevice(matched);
+          // 切到对应 tab
+          final idx = _devices.indexWhere((dev) => dev.id == matched.id);
+          if (idx >= 0 && _tabController != null) {
+            _tabController!.animateTo(idx);
+          }
+          if (mounted) {
+            ScaffoldMessenger.of(context).showSnackBar(
+              SnackBar(
+                content: Text('已连接到 ${matched.name}'),
+                duration: const Duration(seconds: 2),
+              ),
+            );
+          }
+          return;
+        }
+      }
+    }
+
+    // 没有已配对设备（或 mDNS 还没扫到）→ 弹出附近设备列表
+    ref.invalidate(pairedDevicesProvider);
+    final discovered = await NearbyDevicesSheet.show(context);
+    if (discovered == null || !mounted) return;
+    await _onNearbyDeviceSelected(discovered);
   }
 
   /// 用户在附近设备列表中选择了某台设备。
@@ -724,8 +766,9 @@ class _DevicesScreenState extends ConsumerState<DevicesScreen>
         discovered.baseUrl, discovered.deviceName);
 
     if (matched == null) {
-      // 未配对 → 进扫码页
-      _goToPairing();
+      // 未配对 → 半自动 D-2 配对（免扫码）
+      ref.read(pairingProvider.notifier).pairViaMdns(discovered);
+      await _goToMdnsPairing();
       return;
     }
 
@@ -796,6 +839,15 @@ class _DevicesScreenState extends ConsumerState<DevicesScreen>
     }
     _lastAutoReconnect = DateTime.now();
     ref.read(deviceConnectionProvider.notifier).reconnect();
+  }
+
+  /// 半自动配对：pairViaMdns 已设置 polling 状态，直接导航到 PairingScreen。
+  /// 不调用 resetToScanning（会覆盖 polling 状态）。
+  Future<void> _goToMdnsPairing() async {
+    await Navigator.of(context).pushNamed('/pairing');
+    if (mounted) {
+      _loadDevices(preferredIndex: _devices.length);
+    }
   }
 
   /// Session 过期后重新扫码配对：删除旧设备 → 进扫码页。

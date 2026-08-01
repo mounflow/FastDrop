@@ -205,6 +205,30 @@ func (m *Manager) CreateRequest(pairID string, dev ClientDevice) (*PairRequest, 
 	return req, nil
 }
 
+// CreateDirectRequest creates a pair request without a QR token.
+// Used by mDNS discovery (POST /pair/discover). The PC user still
+// must explicitly accept via the UI — the security model is identical
+// to QR pairing, minus the token step.
+func (m *Manager) CreateDirectRequest(dev ClientDevice) (*PairRequest, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	reqID, err := security.NewUUID()
+	if err != nil {
+		return nil, err
+	}
+	now := m.now()
+	req := &PairRequest{
+		RequestID: reqID,
+		PairID:    "", // no QR token for direct/discover requests
+		Status:    StatusWaitingConfirmation,
+		Device:    dev,
+		CreatedAt: now,
+		ExpiresAt: now.Add(m.requestTTL),
+	}
+	m.requests[reqID] = req
+	return req, nil
+}
+
 // GetRequest looks up a request by ID.
 func (m *Manager) GetRequest(requestID string) (*PairRequest, bool) {
 	m.mu.Lock()

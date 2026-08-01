@@ -5,6 +5,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:mobile_scanner/mobile_scanner.dart';
 
+import 'package:fastdrop_mobile/core/discovery/device_discovery.dart';
 import 'package:fastdrop_mobile/core/discovery/discovery_providers.dart';
 import 'package:fastdrop_mobile/core/providers.dart';
 import 'package:fastdrop_mobile/core/storage/session_store.dart';
@@ -304,6 +305,70 @@ class PairingNotifier extends StateNotifier<PairingState> {
         phase: PairingPhase.error,
         errorMessage: 'Could not reach PC at $ip:$port. '
             'Make sure FastDrop is running on your PC. Error: $e',
+      );
+    }
+  }
+
+  /// Start pairing via mDNS discovery (D-2 半自动配对, no QR scan).
+  ///
+  /// POSTs to `/api/v1/pair/discover`, then polls for acceptance using
+  /// the same flow as QR pairing. The PC user sees the request in the
+  /// Vue UI and must explicitly accept.
+  Future<void> pairViaMdns(DiscoveredDevice device) async {
+    // Build a synthetic QrPayload so the existing polling/save logic
+    // works unchanged. pairId/token are unused in the mDNS flow.
+    final uri = Uri.parse(device.baseUrl);
+    final syntheticPayload = QrPayload(
+      version: 1,
+      protocol: 'fastdrop',
+      host: uri.host,
+      port: uri.hasPort ? uri.port : 9527,
+      pairId: '',
+      token: '',
+      expiresAt: 0,
+      serverName: device.deviceName,
+    );
+
+    // Show "connecting" UI immediately (detected and polling render
+    // the same view).
+    state = PairingState(
+      phase: PairingPhase.detected,
+      qrPayload: syntheticPayload,
+    );
+
+    final httpClient = _ref.read(httpClientProvider);
+    httpClient.baseUrl = device.baseUrl;
+
+    try {
+      final deviceId = await DeviceIdManager.getDeviceId();
+
+      final response = await httpClient.post(
+        '/api/v1/pair/discover',
+        body: {
+          'device': DeviceInfo(
+            deviceId: deviceId,
+            deviceName: 'My Phone',
+            platform: 'android',
+            appVersion: '1.0.0',
+          ).toJson(),
+        },
+      );
+
+      final decoded = jsonDecode(response.body) as Map<String, dynamic>;
+      final pairResponse = PairRequestResponse.fromJson(decoded);
+
+      state = PairingState(
+        phase: PairingPhase.polling,
+        qrPayload: syntheticPayload,
+        requestId: pairResponse.requestId,
+      );
+
+      _startPolling(pairResponse.requestId, syntheticPayload);
+    } catch (e) {
+      state = PairingState(
+        phase: PairingPhase.error,
+        errorMessage: '无法连接到 ${device.deviceName}。'
+            '确保 PC 端 FastDrop 正在运行。\n$e',
       );
     }
   }
