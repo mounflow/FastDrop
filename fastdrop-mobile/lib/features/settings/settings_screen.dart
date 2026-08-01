@@ -3,9 +3,12 @@ import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import 'package:fastdrop_mobile/core/discovery/device_discovery.dart';
 import 'package:fastdrop_mobile/core/discovery/discovery_providers.dart';
 import 'package:fastdrop_mobile/core/storage/session_store.dart';
 import 'package:fastdrop_mobile/core/providers.dart';
+import 'package:fastdrop_mobile/features/devices/devices_screen.dart';
+import 'package:fastdrop_mobile/features/pairing/pairing_screen.dart';
 import 'package:fastdrop_mobile/core/utils/file_utils.dart';
 
 // ---------------------------------------------------------------------------
@@ -159,8 +162,8 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
 
           const Divider(),
 
-          // -- Manual IP (Phase 2 placeholder) ---------------------------------
-          const _SectionHeader(title: 'Manual Connection (Phase 2)'),
+          // -- Manual IP -------------------------------------------------------
+          const _SectionHeader(title: '手动连接'),
           Padding(
             padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
             child: Row(
@@ -188,8 +191,7 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
           const Padding(
             padding: EdgeInsets.symmetric(horizontal: 16, vertical: 4),
             child: Text(
-              'Enter a server IP address and port to connect manually. '
-              'This option will be fully implemented in Phase 2.',
+              '输入 PC 的 IP 地址和端口直接连接，无需扫码或 mDNS。',
               style: TextStyle(color: Colors.grey, fontSize: 12),
             ),
           ),
@@ -330,20 +332,53 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
     }
   }
 
-  void _onManualConnect() {
+  /// 手动 IP 连接：解析地址 → 查已配对 → 直连 / 半自动配对。
+  Future<void> _onManualConnect() async {
     final input = _manualIpController.text.trim();
     if (input.isEmpty) {
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Please enter a server address.')),
+        const SnackBar(content: Text('请输入服务器地址')),
       );
       return;
     }
 
-    ScaffoldMessenger.of(context).showSnackBar(
-      const SnackBar(
-        content: Text('Manual connection will be available in Phase 2.'),
-      ),
+    // 解析输入 → baseUrl
+    String baseUrl;
+    if (input.startsWith('http://') || input.startsWith('https://')) {
+      baseUrl = input;
+    } else if (input.contains(':')) {
+      baseUrl = 'http://$input';
+    } else {
+      baseUrl = 'http://$input:9527';
+    }
+
+    final discovered = DiscoveredDevice(
+      deviceId: baseUrl,
+      deviceName: baseUrl,
+      baseUrl: baseUrl,
+      protocolVersion: 1,
+      platform: 'unknown',
+      pairingRequired: true,
+      tls: false,
     );
+
+    // 查已配对设备
+    final matched = await ref
+        .read(deviceStoreProvider)
+        .findMatch(discovered.baseUrl, discovered.deviceName);
+
+    if (!mounted) return;
+
+    if (matched != null) {
+      // 已配对 → 直连
+      ref.read(deviceConnectionProvider.notifier).switchToDevice(matched);
+      Navigator.of(context)
+          .pushNamedAndRemoveUntil('/devices', (_) => false);
+    } else {
+      // 未配对 → D-2 半自动配对
+      ref.read(pairingProvider.notifier).pairViaMdns(discovered);
+      Navigator.of(context).pushNamed('/pairing');
+    }
   }
 }
 
