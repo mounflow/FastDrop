@@ -76,8 +76,8 @@ Five tables defined in §22: `devices`, `sessions`, `transfers`, `transfer_files
 
 ## Phase Boundaries
 
-- **Phase 1 = QR only.** mDNS code may be scaffolded but must not be wired into the active discovery flow.
-- **Phase 2 = mDNS discovery + manual IP fallback.** Discovery layer must remain behind an interface (`DiscoveryPublisher` in Go, `DeviceDiscovery` in Flutter) with `QrDiscovery` / `MdnsDiscovery` / `ManualDiscovery` implementations.
+- **Phase 1 = QR only.** ✅ 已完成。
+- **Phase 2 = mDNS discovery + manual IP fallback.** ✅ 已完成。Discovery 层在接口后面（Go: `DiscoveryPublisher`, Flutter: `DeviceDiscovery`），实现：`QrDiscovery` / `MdnsDiscovery` / `ManualDiscovery`。新增端点 `POST /api/v1/pair/discover`（免 QR token 半自动配对，PC 端仍需用户确认）。
 - Explicitly **out of scope** (both phases): iOS, macOS, Linux, public-internet transit, WebRTC, cloud storage, user accounts, folder incremental sync.
 
 ## Before Implementing
