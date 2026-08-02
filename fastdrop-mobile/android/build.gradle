@@ -20,7 +20,7 @@ subprojects {
 // installed NDK. Some plugins (mobile_scanner / jni) pin their own ndkVersion;
 // without this override Gradle tries to auto-download those versions, which
 // is painfully slow through proxied networks. Only NDK 30 is installed.
-subprojects { project ->
+allprojects { project ->
     project.plugins.withId('com.android.library') {
         project.android { ndkVersion "30.0.15729638" }
     }

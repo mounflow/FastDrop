@@ -25,6 +25,10 @@ dependencies:
   # natively, working around Android's WiFi multicast lock that breaks
   # pure-Dart implementations like multicast_dns.
   bonsoir: ^5.1.0
+  # Phase 3: Embedded HTTP/WS server so the phone can also receive files.
+  shelf: ^1.4.0
+  shelf_router: ^1.1.0
+  shelf_web_socket: ^2.0.0
 
 dev_dependencies:
   flutter_test:

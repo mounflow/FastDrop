@@ -19,10 +19,14 @@ class MdnsDiscovery implements DeviceDiscovery {
   static const String _serviceType = '_fastdrop._tcp';
 
   BonsoirDiscovery? _bonsoir;
+  BonsoirBroadcast? _broadcast;
   StreamSubscription<BonsoirDiscoveryEvent>? _sub;
   StreamController<List<DiscoveredDevice>>? _controller;
 
   final Map<String, DiscoveredDevice> _byDeviceId = {};
+
+  /// Whether this device is also broadcasting itself via mDNS (Phase 3).
+  bool _broadcasting = false;
 
   @override
   bool get isRunning => _bonsoir != null;
@@ -257,9 +261,62 @@ class MdnsDiscovery implements DeviceDiscovery {
 
   @override
   Future<void> stop() async {
+    await stopBroadcast();
     await _stopScan();
     await _controller?.close();
     _controller = null;
     _byDeviceId.clear();
   }
+
+  // ---------------------------------------------------------------------------
+  // Phase 3: mDNS broadcast (advertise this device as a FastDrop server)
+  // ---------------------------------------------------------------------------
+
+  /// Start broadcasting this device via mDNS so other devices can discover it.
+  ///
+  /// TXT records match the Go backend: id, name, version, protocol, platform,
+  /// pairing, tls.
+  Future<void> startBroadcast({
+    required String deviceId,
+    required String deviceName,
+    required String platform,
+    int port = 9527,
+  }) async {
+    if (_broadcasting) return;
+
+    debugPrint('[mDNS] Starting broadcast: $deviceName on port $port');
+
+    _broadcast = BonsoirBroadcast(
+      service: BonsoirService(
+        name: deviceName,
+        type: _serviceType,
+        port: port,
+        attributes: {
+          'id': deviceId,
+          'name': deviceName,
+          'version': '1',
+          'protocol': '1',
+          'platform': platform,
+          'pairing': 'required',
+          'tls': '0',
+        },
+      ),
+    );
+
+    await _broadcast!.ready;
+    await _broadcast!.start();
+    _broadcasting = true;
+    debugPrint('[mDNS] Broadcast started');
+  }
+
+  /// Stop broadcasting this device.
+  Future<void> stopBroadcast() async {
+    if (!_broadcasting) return;
+    await _broadcast?.stop();
+    _broadcast = null;
+    _broadcasting = false;
+    debugPrint('[mDNS] Broadcast stopped');
+  }
+
+  bool get isBroadcasting => _broadcasting;
 }

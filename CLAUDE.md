@@ -78,7 +78,8 @@ Five tables defined in §22: `devices`, `sessions`, `transfers`, `transfer_files
 
 - **Phase 1 = QR only.** ✅ 已完成。
 - **Phase 2 = mDNS discovery + manual IP fallback.** ✅ 已完成。Discovery 层在接口后面（Go: `DiscoveryPublisher`, Flutter: `DeviceDiscovery`），实现：`QrDiscovery` / `MdnsDiscovery` / `ManualDiscovery`。新增端点 `POST /api/v1/pair/discover`（免 QR token 半自动配对，PC 端仍需用户确认）。
-- Explicitly **out of scope** (both phases): iOS, macOS, Linux, public-internet transit, WebRTC, cloud storage, user accounts, folder incremental sync.
+- **Phase 3 = 多设备 P2P 互传。** ✅ 已完成。Flutter 端新增 embedded server（`lib/core/server/`），使用 `shelf` + `shelf_router` + `shelf_web_socket`。每台设备同时运行 server + client，支持双向传输。Server 端内存态（无 SQLite），复用所有协议常量。mDNS 同时 broadcast + discovery。Settings 页新增"允许接收文件"开关。Dialog watcher 使用 `navigatorKey` 获取 Navigator 内部 context 以正确弹出配对/接收确认对话框。E2E 测试 7/7 通过（单 chunk、多 chunk、多文件、文件名冲突、SHA-256 校验、传输拒绝、配对拒绝）。iOS/macOS 平台目录已生成，Info.plist 配置 NSLocalNetworkUsageDescription + NSBonjourServices + NSCameraUsageDescription + UIBackgroundModes，macOS entitlements 配置 network.server + network.client。
+- Explicitly **out of scope**: public-internet transit, WebRTC, cloud storage, user accounts, folder incremental sync.
 
 ## Before Implementing
 

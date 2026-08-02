@@ -5,6 +5,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import 'package:fastdrop_mobile/core/discovery/device_discovery.dart';
 import 'package:fastdrop_mobile/core/discovery/discovery_providers.dart';
+import 'package:fastdrop_mobile/core/server/server_providers.dart';
 import 'package:fastdrop_mobile/core/storage/session_store.dart';
 import 'package:fastdrop_mobile/core/providers.dart';
 import 'package:fastdrop_mobile/features/devices/devices_screen.dart';
@@ -128,6 +129,42 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
             child: Text(
               'Files received from the PC are saved here. '
               'Leave empty to use the default location.',
+              style: TextStyle(color: Colors.grey, fontSize: 12),
+            ),
+          ),
+
+          const Divider(),
+
+          // -- 接收文件 (Embedded Server) -----------------------------------------
+          const _SectionHeader(title: '接收文件'),
+          Consumer(
+            builder: (context, ref, child) {
+              final serverState = ref.watch(fastdropServerProvider);
+              final notifier = ref.read(fastdropServerProvider.notifier);
+              return SwitchListTile(
+                secondary: const Icon(Icons.cloud_download),
+                title: const Text('允许其他设备向我发送文件'),
+                subtitle: Text(
+                  serverState.isRunning
+                      ? '服务运行中 (端口 ${serverState.port})'
+                      : serverState.status == ServerStatus.starting
+                          ? '正在启动...'
+                          : serverState.status == ServerStatus.error
+                              ? '启动失败: ${serverState.errorMessage}'
+                              : '已关闭',
+                ),
+                value: notifier.isEnabled,
+                onChanged: (value) {
+                  notifier.setEnabled(value);
+                },
+              );
+            },
+          ),
+          const Padding(
+            padding: EdgeInsets.symmetric(horizontal: 16, vertical: 4),
+            child: Text(
+              '开启后，本机将作为 FastDrop 服务器运行，'
+              '其他设备（PC/手机）可以发现并向本机发送文件。',
               style: TextStyle(color: Colors.grey, fontSize: 12),
             ),
           ),
