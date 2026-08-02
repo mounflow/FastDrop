@@ -376,121 +376,125 @@ class TransferService {
 
     try {
       final file = File(fi.path);
-      final raf = await file.open(mode: FileMode.read);
+      int chunkIndex = 0;
 
-      try {
-        int chunkIndex = 0;
+      while (chunkIndex < totalChunks) {
+        if (cancelToken.isCancelled) break;
 
-        while (chunkIndex < totalChunks) {
-          if (cancelToken.isCancelled) break;
+        // Determine how many chunks we can launch this round.
+        final remaining = totalChunks - chunkIndex;
+        final batchSize = min(remaining, _maxChunksPerFile - state.inFlight);
 
-          // Determine how many chunks we can launch this round.
-          final remaining = totalChunks - chunkIndex;
-          final batchSize =
-              min(remaining, _maxChunksPerFile - state.inFlight);
-
-          if (batchSize <= 0) {
-            // All slot full; wait for one to complete.
-            await state.onSlotFree();
-            continue;
-          }
-
-          // Launch a batch of chunk uploads.
-          final futures = <Future<void>>[];
-          for (int j = 0; j < batchSize; j++) {
-            final idx = chunkIndex + j;
-            final start = idx * chunkSize;
-            final end = min(start + chunkSize, fi.size);
-            final data = await raf.read(end - start);
-
-            state.inFlight++;
-            final f = ChunkUploader.upload(
-              client: httpClient,
-              transferId: transferId,
-              fileId: fr.fileId,
-              chunkIndex: idx,
-              data: data,
-            ).then((_) {
-              debugPrint('[TransferService] chunk $idx uploaded OK '
-                  '(${data.length} bytes)');
-              state.bytesUploaded += data.length;
-              state.inFlight--;
-              state._slotCompleter?.complete();
-              state._slotCompleter = null;
-
-              // Emit progress at reasonable intervals.
-              final now = DateTime.now();
-              if (state.lastProgressUpdate == null ||
-                  now.difference(state.lastProgressUpdate!).inMilliseconds >=
-                      200) {
-                state.lastProgressUpdate = now;
-                onProgress?.call(
-                  transferId,
-                  fr.fileId,
-                  TransferProgress(
-                    transferId: transferId,
-                    fileId: fr.fileId,
-                    bytesTransferred: state.bytesUploaded,
-                    totalBytes: fi.size,
-                    fileName: fi.name,
-                    speed: state.currentSpeed,
-                  ),
-                );
-              }
-            }).catchError((Object e) {
-              debugPrint('[TransferService] chunk $idx FAILED: $e');
-              state.inFlight--;
-              throw e;
-            });
-
-            futures.add(f);
-            chunkIndex++;
-          }
-
-          await Future.wait(futures);
-          debugPrint('[TransferService] chunk batch done, '
-              'chunkIndex=$chunkIndex/$totalChunks');
+        if (batchSize <= 0) {
+          // All slot full; wait for one to complete.
+          await state.onSlotFree();
+          continue;
         }
 
-        if (cancelToken.isCancelled) return;
+        // Launch a batch of chunk uploads.
+        final futures = <Future<void>>[];
+        for (int j = 0; j < batchSize; j++) {
+          // chunkIndex is advanced at the end of each iteration, so it is
+          // already the next unscheduled chunk. Adding j here would skip
+          // chunk 1 and eventually try to read one chunk past EOF.
+          final idx = chunkIndex;
+          final start = idx * chunkSize;
+          final end = min(start + chunkSize, fi.size);
 
-        // All chunks uploaded — call complete.
-        debugPrint('[TransferService] all chunks done for ${fi.name}, '
-            'calling complete (size=${fi.size}, sha256=${fi.sha256})');
-        final completeResponse = await httpClient.post(
-          '/api/v1/transfers/$transferId/files/${fr.fileId}/complete',
-          body: {'size': fi.size, 'sha256': fi.sha256},
-        );
-        debugPrint('[TransferService] complete response: '
-            '${completeResponse.statusCode} ${completeResponse.body}');
+          // Open-seek-read-close per chunk. Keeping a single
+          // RandomAccessFile open for the whole upload (~30 s on a
+          // 200 MB file) triggers FileSystemException errno=0 on
+          // some Android devices (Xiaomi / MIUI FUSE storage).
+          final raf = await file.open(mode: FileMode.read);
+          await raf.setPosition(start);
+          final data = await raf.read(end - start);
+          await raf.close();
 
-        final completeResult = ChunkCompleteResult.fromJson(
-          jsonDecode(completeResponse.body) as Map<String, dynamic>,
-        );
-
-        if (completeResult.sha256.toLowerCase() != fi.sha256.toLowerCase()) {
-          throw Exception(
-            'Server SHA-256 mismatch for ${fi.name}: '
-            'expected ${fi.sha256}, got ${completeResult.sha256}',
-          );
-        }
-
-        // Final progress update.
-        onProgress?.call(
-          transferId,
-          fr.fileId,
-          TransferProgress(
+          state.inFlight++;
+          final f = ChunkUploader.upload(
+            client: httpClient,
             transferId: transferId,
             fileId: fr.fileId,
-            bytesTransferred: fi.size,
-            totalBytes: fi.size,
-            fileName: fi.name,
-            status: 'completed',
-          ),
-        );
-      } finally {
-        await raf.close();
+            chunkIndex: idx,
+            data: data,
+          ).then((_) {
+            debugPrint('[TransferService] chunk $idx uploaded OK '
+                '(${data.length} bytes)');
+            state.bytesUploaded += data.length;
+            state.inFlight--;
+            state._slotCompleter?.complete();
+            state._slotCompleter = null;
+
+            // Emit progress at reasonable intervals.
+            final now = DateTime.now();
+            if (state.lastProgressUpdate == null ||
+                now.difference(state.lastProgressUpdate!).inMilliseconds >=
+                    200) {
+              state.lastProgressUpdate = now;
+              onProgress?.call(
+                transferId,
+                fr.fileId,
+                TransferProgress(
+                  transferId: transferId,
+                  fileId: fr.fileId,
+                  bytesTransferred: state.bytesUploaded,
+                  totalBytes: fi.size,
+                  fileName: fi.name,
+                  speed: state.currentSpeed,
+                ),
+              );
+            }
+          }).catchError((Object e) {
+            debugPrint('[TransferService] chunk $idx FAILED: $e');
+            state.inFlight--;
+            throw e;
+          });
+
+          futures.add(f);
+          chunkIndex++;
+        }
+
+        await Future.wait(futures);
+        debugPrint('[TransferService] chunk batch done, '
+            'chunkIndex=$chunkIndex/$totalChunks');
       }
+
+      if (cancelToken.isCancelled) return;
+
+      // All chunks uploaded — call complete.
+      debugPrint('[TransferService] all chunks done for ${fi.name}, '
+          'calling complete (size=${fi.size}, sha256=${fi.sha256})');
+      final completeResponse = await httpClient.post(
+        '/api/v1/transfers/$transferId/files/${fr.fileId}/complete',
+        body: {'size': fi.size, 'sha256': fi.sha256},
+      );
+      debugPrint('[TransferService] complete response: '
+          '${completeResponse.statusCode} ${completeResponse.body}');
+
+      final completeResult = ChunkCompleteResult.fromJson(
+        jsonDecode(completeResponse.body) as Map<String, dynamic>,
+      );
+
+      if (completeResult.sha256.toLowerCase() != fi.sha256.toLowerCase()) {
+        throw Exception(
+          'Server SHA-256 mismatch for ${fi.name}: '
+          'expected ${fi.sha256}, got ${completeResult.sha256}',
+        );
+      }
+
+      // Final progress update.
+      onProgress?.call(
+        transferId,
+        fr.fileId,
+        TransferProgress(
+          transferId: transferId,
+          fileId: fr.fileId,
+          bytesTransferred: fi.size,
+          totalBytes: fi.size,
+          fileName: fi.name,
+          status: 'completed',
+        ),
+      );
     } finally {
       _uploadStates.remove(fr.fileId);
     }

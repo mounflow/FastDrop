@@ -266,7 +266,10 @@ class _FilePickerScreenState extends State<FilePickerScreen>
   /// Returns a new list of [PlatformFile] pointing at the private copies.
   Future<List<PlatformFile>> _relocateToPrivateCache(
       List<PlatformFile> files) async {
-    final tempBase = await getTemporaryDirectory();
+    // Use application support (files) dir, NOT cache. Android can delete
+    // cache files at any time — a 200 MB upload takes ~30 s and the cache
+    // copy gets yanked mid-read (FileSystemException errno 0).
+    final tempBase = await getApplicationSupportDirectory();
     final uploadDir = Directory('${tempBase.path}${Platform.pathSeparator}fastdrop_upload');
     if (!uploadDir.existsSync()) {
       uploadDir.createSync(recursive: true);
