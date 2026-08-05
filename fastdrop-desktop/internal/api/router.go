@@ -82,8 +82,8 @@ func New(s *Server) http.Handler {
 	mux.HandleFunc("HEAD /api/v1/transfers/{transferId}/files/{fileId}/content", s.withAuth(s.handleDownloadFile))
 
 	// --- settings (local PC only, no auth) ---
-	mux.HandleFunc("GET /api/v1/settings", s.handleGetSettings)
-	mux.HandleFunc("PUT /api/v1/settings", s.withSizeLimit(64*1024, s.handleUpdateSettings))
+	mux.HandleFunc("GET /api/v1/settings", withLocalDesktop(s.handleGetSettings))
+	mux.HandleFunc("PUT /api/v1/settings", withLocalDesktop(s.withSizeLimit(64*1024, s.handleUpdateSettings)))
 
 	// --- current pair token (for the QR code) ---
 	mux.HandleFunc("GET /api/v1/pair/qr", s.handleCurrentQRPayload)
@@ -98,9 +98,12 @@ func withLANPeerCORS(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		origin := r.Header.Get("Origin")
 		if origin != "" {
-			if parsed, err := url.Parse(origin); err == nil &&
+			parsed, err := url.Parse(origin)
+			isWebOrigin := err == nil &&
 				(parsed.Scheme == "http" || parsed.Scheme == "https") &&
-				parsed.Host != "" {
+				parsed.Host != ""
+			isDesktopOrigin := origin == "wails://wails" || origin == "null"
+			if isWebOrigin || isDesktopOrigin {
 				w.Header().Set("Access-Control-Allow-Origin", origin)
 				w.Header().Set("Vary", "Origin")
 				w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, HEAD, OPTIONS")

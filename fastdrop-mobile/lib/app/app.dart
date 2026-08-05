@@ -58,7 +58,7 @@ class _FastDropAppState extends ConsumerState<FastDropApp>
       debugShowCheckedModeBanner: false,
       theme: AppTheme.light,
       darkTheme: AppTheme.dark,
-      themeMode: ThemeMode.system,
+      themeMode: ThemeMode.light,
       navigatorKey: _navigatorKey,
       initialRoute: AppRoutes.home,
       onGenerateRoute: AppRoutes.generateRoute,

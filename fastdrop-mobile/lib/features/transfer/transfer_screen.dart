@@ -9,6 +9,7 @@ import 'package:fastdrop_mobile/core/storage/session_store.dart';
 import 'package:fastdrop_mobile/features/devices/multi_device_connection.dart';
 import 'package:fastdrop_mobile/features/transfer/transfer_service.dart';
 import 'package:fastdrop_mobile/shared/models/transfer.dart';
+import 'package:fastdrop_mobile/shared/widgets/app_navigation_bar.dart';
 
 // ---------------------------------------------------------------------------
 // State
@@ -686,7 +687,7 @@ class _TransferScreenState extends ConsumerState<TransferScreen> {
 
     return Scaffold(
       appBar: AppBar(
-        title: const Text('Transfers'),
+        title: const Text('传输'),
         actions: [
           if (currentEntries.any((e) => e.value.status == 'transferring'))
             IconButton(
@@ -697,7 +698,7 @@ class _TransferScreenState extends ConsumerState<TransferScreen> {
         ],
       ),
       body: ListView(
-        padding: const EdgeInsets.symmetric(vertical: 8),
+        padding: const EdgeInsets.fromLTRB(0, 8, 0, 24),
         children: [
           if (currentEntries.isEmpty)
             _buildEmptyState(theme)
@@ -711,6 +712,7 @@ class _TransferScreenState extends ConsumerState<TransferScreen> {
           ],
         ],
       ),
+      bottomNavigationBar: const FastDropNavigationBar(currentIndex: 1),
     );
   }
 
@@ -730,7 +732,7 @@ class _TransferScreenState extends ConsumerState<TransferScreen> {
             ),
             const SizedBox(height: 16),
             Text(
-              'No active transfers.',
+              '暂无正在进行的传输',
               style: TextStyle(
                 color: theme.colorScheme.onSurface.withOpacity(0.6),
               ),
@@ -956,18 +958,18 @@ class _TransferScreenState extends ConsumerState<TransferScreen> {
                       TextButton.icon(
                         onPressed: () => notifier.pauseTransfer(key),
                         icon: const Icon(Icons.pause, size: 18),
-                        label: const Text('Pause'),
+                        label: const Text('暂停'),
                       ),
                     if (item.status == 'paused')
                       TextButton.icon(
                         onPressed: () => notifier.resumeTransfer(key),
                         icon: const Icon(Icons.play_arrow, size: 18),
-                        label: const Text('Resume'),
+                        label: const Text('继续'),
                       ),
                     TextButton.icon(
                       onPressed: () => notifier.cancelTransfer(key),
                       icon: const Icon(Icons.cancel, size: 18),
-                      label: const Text('Cancel'),
+                      label: const Text('取消'),
                       style: TextButton.styleFrom(foregroundColor: Colors.red),
                     ),
                   ],
@@ -1001,7 +1003,7 @@ class _TransferScreenState extends ConsumerState<TransferScreen> {
                         );
                       },
                       icon: const Icon(Icons.refresh, size: 18),
-                      label: const Text('Retry'),
+                      label: const Text('重试'),
                     ),
                   ],
                 ),

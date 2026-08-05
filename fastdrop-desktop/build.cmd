@@ -22,13 +22,15 @@ if exist "cmd\fastdrop\webdist" (
 xcopy /e /i "web\dist" "cmd\fastdrop\webdist"
 echo OK: webdist prepared
 
-echo === Building Go binary ===
+echo === Building Windows desktop app ===
 cd /d "%~dp0"
 set GOFLAGS=
-go build -o fastdrop.exe ./cmd/fastdrop/
+set GOCACHE=%~dp0.gocache
+if not exist "build\bin" mkdir "build\bin"
+go build -tags desktop,production -ldflags "-w -s -H windowsgui" -o "build\bin\FastDrop.exe" ./cmd/fastdrop/
 if %ERRORLEVEL% neq 0 (
     echo ERROR: Go build failed
     exit /b 1
 )
 
-echo === Build complete: fastdrop.exe ===
+echo === Build complete: build\bin\FastDrop.exe ===

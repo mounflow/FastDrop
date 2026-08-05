@@ -6,6 +6,7 @@ fastdrop-desktop/fastdrop.exe~
 *.test
 *.out
 vendor/
+**/.gocache/
 
 # Node / Vue
 fastdrop-desktop/web/node_modules/

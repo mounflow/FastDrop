@@ -106,6 +106,61 @@ func TestLANPeerCORSUsesConcreteOrigin(t *testing.T) {
 	}
 }
 
+func TestWailsDesktopCORSUsesConcreteOrigin(t *testing.T) {
+	srv, _ := newTestServer(t)
+	ts := httptest.NewServer(New(srv))
+	defer ts.Close()
+
+	req, err := http.NewRequest(http.MethodOptions, ts.URL+"/api/v1/settings", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Origin", "wails://wails")
+	req.Header.Set("Access-Control-Request-Method", "GET")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusNoContent {
+		t.Fatalf("preflight status=%d", resp.StatusCode)
+	}
+	if got := resp.Header.Get("Access-Control-Allow-Origin"); got != "wails://wails" {
+		t.Fatalf("allow-origin=%q", got)
+	}
+}
+
+func TestSettingsAreDesktopOnly(t *testing.T) {
+	srv, cfg := newTestServer(t)
+	h := New(srv)
+
+	localReq := httptest.NewRequest(http.MethodGet, "/api/v1/settings", nil)
+	localReq.RemoteAddr = "127.0.0.1:49152"
+	localRes := httptest.NewRecorder()
+	h.ServeHTTP(localRes, localReq)
+	if localRes.Code != http.StatusOK {
+		t.Fatalf("local settings status=%d body=%s", localRes.Code, localRes.Body.String())
+	}
+	var got settingsResponse
+	if err := json.Unmarshal(localRes.Body.Bytes(), &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.DeviceName != cfg.Server.DeviceName || !got.RequirePairConfirmation || got.RequireReceiveConfirmation {
+		t.Fatalf("unexpected settings response: %+v", got)
+	}
+
+	lanReq := httptest.NewRequest(http.MethodGet, "/api/v1/settings", nil)
+	lanReq.RemoteAddr = "192.168.137.50:49152"
+	lanRes := httptest.NewRecorder()
+	h.ServeHTTP(lanRes, lanReq)
+	if lanRes.Code != http.StatusForbidden {
+		t.Fatalf("LAN settings status=%d body=%s", lanRes.Code, lanRes.Body.String())
+	}
+	if !strings.Contains(lanRes.Body.String(), "SESSION_INVALID") {
+		t.Fatalf("LAN settings error shape=%s", lanRes.Body.String())
+	}
+}
+
 func TestServerToClientStagingCanBeOffered(t *testing.T) {
 	srv, _ := newTestServer(t)
 	ts := httptest.NewServer(New(srv))

@@ -1,8 +1,10 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import 'package:fastdrop_mobile/app/theme.dart';
 import 'package:fastdrop_mobile/core/discovery/device_discovery.dart';
 import 'package:fastdrop_mobile/core/discovery/discovery_providers.dart';
+import 'package:fastdrop_mobile/core/server/server_providers.dart';
 import 'package:fastdrop_mobile/core/storage/session_store.dart';
 import 'package:fastdrop_mobile/core/providers.dart';
 import 'package:fastdrop_mobile/features/devices/nearby_devices_sheet.dart';
@@ -10,7 +12,7 @@ import 'package:fastdrop_mobile/features/devices/multi_device_connection.dart';
 import 'package:fastdrop_mobile/features/pairing/pairing_screen.dart';
 import 'package:fastdrop_mobile/features/transfer/transfer_service.dart';
 import 'package:fastdrop_mobile/shared/models/transfer.dart';
-import 'package:fastdrop_mobile/shared/widgets/status_badge.dart';
+import 'package:fastdrop_mobile/shared/widgets/app_navigation_bar.dart';
 
 // ---------------------------------------------------------------------------
 // Models
@@ -895,50 +897,36 @@ class _DevicesScreenState extends ConsumerState<DevicesScreen>
 
     return Scaffold(
       appBar: AppBar(
-        title: const Text('FastDrop'),
+        title: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Container(
+              width: 34,
+              height: 34,
+              decoration: BoxDecoration(
+                color: AppTheme.primary,
+                borderRadius: BorderRadius.circular(11),
+              ),
+              child: const Icon(
+                Icons.swap_horiz_rounded,
+                color: Colors.white,
+                size: 22,
+              ),
+            ),
+            const SizedBox(width: 10),
+            const Text('FastDrop'),
+          ],
+        ),
         actions: [
           IconButton(
-            icon: const Icon(Icons.history),
-            tooltip: 'History',
-            onPressed: () => Navigator.of(context).pushNamed('/history'),
-          ),
-          IconButton(
-            icon: const Icon(Icons.settings),
-            tooltip: 'Settings',
-            onPressed: () => Navigator.of(context).pushNamed('/settings'),
-          ),
-          IconButton(
-            icon: const Icon(Icons.add),
+            icon: const Icon(Icons.add_rounded),
             tooltip: '添加设备',
             onPressed: _onAddDevice,
           ),
         ],
-        bottom: (_devices.isEmpty || _tabController == null)
-            ? null
-            : PreferredSize(
-                preferredSize: const Size.fromHeight(48),
-                child: TabBar(
-                  controller: _tabController,
-                  isScrollable: true,
-                  tabs: _devices
-                      .map((d) => Tab(
-                            child: Row(
-                              mainAxisSize: MainAxisSize.min,
-                              children: [
-                                const Icon(Icons.computer, size: 16),
-                                const SizedBox(width: 6),
-                                Text(
-                                  d.name,
-                                  style: const TextStyle(fontSize: 13),
-                                ),
-                              ],
-                            ),
-                          ))
-                      .toList(),
-                ),
-              ),
       ),
       body: _buildBody(connState),
+      bottomNavigationBar: const FastDropNavigationBar(currentIndex: 0),
     );
   }
 
@@ -946,178 +934,352 @@ class _DevicesScreenState extends ConsumerState<DevicesScreen>
     if (_loading) {
       return const Center(child: CircularProgressIndicator());
     }
-    if (_devices.isEmpty) {
-      return _buildEmptyState();
-    }
-    return TabBarView(
-      controller: _tabController,
-      children: _devices
-          .asMap()
-          .entries
-          .map((entry) => _buildDeviceTab(entry.key, entry.value, connState))
-          .toList(),
-    );
-  }
+    final serverState = ref.watch(fastdropServerProvider);
+    final nearby = ref.watch(nearbyDevicesProvider);
+    final connected = connState.connectedDevices;
+    final selectedPeer = connState.selectedPeer;
 
-  // -- Empty state ------------------------------------------------------------
-
-  Widget _buildEmptyState() {
-    final mdnsEnabled = ref.watch(mdnsEnabledProvider);
-    return Center(
-      child: Padding(
-        padding: const EdgeInsets.all(32),
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            const Icon(Icons.devices_other, size: 72, color: Colors.grey),
-            const SizedBox(height: 16),
-            const Text(
-              '还没有配对的设备',
-              style: TextStyle(fontSize: 16, color: Colors.grey),
-            ),
-            const SizedBox(height: 8),
-            const Text(
-              '点击右上角的 + 添加一台 PC',
-              style: TextStyle(color: Colors.grey),
-            ),
-            const SizedBox(height: 24),
-            ElevatedButton.icon(
-              onPressed: _onAddDevice,
-              icon: const Icon(Icons.qr_code_scanner),
-              label: const Text('扫码添加设备'),
-            ),
-            if (mdnsEnabled) ...[
-              const SizedBox(height: 12),
-              OutlinedButton.icon(
-                onPressed: () async {
-                  ref.invalidate(pairedDevicesProvider);
-                  final discovered = await NearbyDevicesSheet.show(context);
-                  if (discovered != null && mounted) {
-                    await _onNearbyDeviceSelected(discovered);
-                  }
-                },
-                icon: const Icon(Icons.radar),
-                label: const Text('查看附近设备'),
-              ),
-            ],
-          ],
-        ),
-      ),
-    );
-  }
-
-  // -- Per-device tab content -------------------------------------------------
-
-  Widget _buildDeviceTab(
-      int index, Device device, MultiDeviceConnectionState connState) {
-    final isActive = connState.activeDeviceId == device.id;
-    final peer = connState.peer(device.id);
-    final status = peer?.status ?? MultiConnectionStatus.idle;
-    final errorMessage = peer?.errorMessage;
-    final sessionExpired = peer?.sessionExpired ?? false;
-
-    return SingleChildScrollView(
-      padding: const EdgeInsets.all(16),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.stretch,
+    return RefreshIndicator(
+      onRefresh: _loadDevices,
+      child: ListView(
+        physics: const AlwaysScrollableScrollPhysics(),
+        padding: const EdgeInsets.fromLTRB(16, 8, 16, 28),
         children: [
-          _DeviceCard(
-            device: device,
-            status: status,
-            errorMessage: errorMessage,
-            sessionExpired: sessionExpired,
-          ),
-          const SizedBox(height: 16),
-          // Primary actions depend on connection state.
-          if (status == MultiConnectionStatus.connected) ...[
-            ElevatedButton.icon(
-              onPressed: () => _onSendFiles(device),
-              icon: const Icon(Icons.file_upload),
-              label: const Text('发送文件'),
-              style: ElevatedButton.styleFrom(
-                padding: const EdgeInsets.symmetric(vertical: 14),
-              ),
+          Text('我的设备', style: Theme.of(context).textTheme.titleSmall),
+          const SizedBox(height: 10),
+          Container(
+            padding: const EdgeInsets.all(18),
+            decoration: BoxDecoration(
+              color: AppTheme.primary,
+              borderRadius: BorderRadius.circular(18),
             ),
-          ] else if (status == MultiConnectionStatus.connecting) ...[
-            const _InfoRow(
-              icon: Icons.hourglass_top,
-              text: '正在连接…',
-            ),
-          ] else ...[
-            // Session 过期时提供重新扫码入口（阶段 4: D-3 降级）
-            if (sessionExpired) ...[
-              ElevatedButton.icon(
-                onPressed: () => _reScanPair(device),
-                icon: const Icon(Icons.qr_code_scanner),
-                label: const Text('重新扫码配对'),
-                style: ElevatedButton.styleFrom(
-                  padding: const EdgeInsets.symmetric(vertical: 14),
-                ),
-              ),
-              const SizedBox(height: 12),
-            ],
-            Row(
+            child: Row(
               children: [
-                Expanded(
-                  child: OutlinedButton.icon(
-                    onPressed: isActive
-                        ? () => ref
-                            .read(multiDeviceConnectionProvider.notifier)
-                            .reconnect(device.id)
-                        : () => ref
-                            .read(multiDeviceConnectionProvider.notifier)
-                            .switchToDevice(device),
-                    icon: const Icon(Icons.refresh),
-                    label: const Text('重新连接'),
-                    style: OutlinedButton.styleFrom(
-                      padding: const EdgeInsets.symmetric(vertical: 14),
-                    ),
+                Container(
+                  width: 52,
+                  height: 52,
+                  decoration: BoxDecoration(
+                    color: Colors.white.withValues(alpha: 0.16),
+                    borderRadius: BorderRadius.circular(16),
+                  ),
+                  child: const Icon(
+                    Icons.phone_android_rounded,
+                    color: Colors.white,
+                    size: 28,
                   ),
                 ),
-                const SizedBox(width: 12),
+                const SizedBox(width: 14),
                 Expanded(
-                  child: OutlinedButton.icon(
-                    onPressed: () => _onDeleteDevice(device),
-                    icon: const Icon(Icons.delete_outline, color: Colors.red),
-                    label:
-                        const Text('删除设备', style: TextStyle(color: Colors.red)),
-                    style: OutlinedButton.styleFrom(
-                      padding: const EdgeInsets.symmetric(vertical: 14),
-                      side: const BorderSide(color: Colors.red),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        serverState.deviceName.isEmpty
+                            ? 'FastDrop 手机'
+                            : serverState.deviceName,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: const TextStyle(
+                          color: Colors.white,
+                          fontSize: 16,
+                          fontWeight: FontWeight.w700,
+                        ),
+                      ),
+                      const SizedBox(height: 5),
+                      Text(
+                        serverState.isRunning
+                            ? '可被发现 · 端口 ${serverState.port}'
+                            : '接收服务未运行',
+                        style: const TextStyle(
+                          color: Color(0xFFDCE2FF),
+                          fontSize: 12,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+                Container(
+                  padding:
+                      const EdgeInsets.symmetric(horizontal: 9, vertical: 5),
+                  decoration: BoxDecoration(
+                    color: serverState.isRunning
+                        ? const Color(0xFFD6F2E3)
+                        : const Color(0xFFFFF0F1),
+                    borderRadius: BorderRadius.circular(999),
+                  ),
+                  child: Text(
+                    serverState.isRunning ? '在线' : '离线',
+                    style: TextStyle(
+                      color: serverState.isRunning
+                          ? const Color(0xFF176F4A)
+                          : const Color(0xFFB72E35),
+                      fontSize: 11,
+                      fontWeight: FontWeight.w600,
                     ),
                   ),
                 ),
               ],
             ),
-          ],
-
-          // Active-device-only sections.
-          if (isActive) ...[
-            if ((peer?.incomingOffers ?? const []).isNotEmpty) ...[
-              const SizedBox(height: 24),
-              _buildIncomingOffers(connState),
+          ),
+          const SizedBox(height: 28),
+          Row(
+            children: [
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      '附近设备',
+                      style: Theme.of(context).textTheme.titleSmall,
+                    ),
+                    const SizedBox(height: 3),
+                    Text(
+                      '${connected.length} 台在线 · ${nearby.length} 台可发现',
+                      style: Theme.of(context).textTheme.bodySmall,
+                    ),
+                  ],
+                ),
+              ),
+              TextButton.icon(
+                onPressed: _showAddDeviceSheet,
+                icon: const Icon(Icons.radar_rounded, size: 18),
+                label: const Text('扫描'),
+              ),
             ],
-            if ((peer?.activeDownloads ?? const []).isNotEmpty) ...[
-              const SizedBox(height: 24),
-              _buildActiveDownloads(connState),
-            ],
+          ),
+          const SizedBox(height: 10),
+          if (_devices.isEmpty)
+            _buildOverviewEmptyState()
+          else
+            ..._devices.map((device) {
+              final peer = connState.peer(device.id);
+              final status = peer?.status ?? MultiConnectionStatus.idle;
+              final selected = connState.selectedDeviceId == device.id;
+              return Padding(
+                padding: const EdgeInsets.only(bottom: 10),
+                child: _buildOverviewDeviceCard(
+                  device,
+                  status,
+                  selected: selected,
+                  errorMessage: peer?.errorMessage,
+                ),
+              );
+            }),
+          if (connected.isNotEmpty) ...[
+            const SizedBox(height: 8),
+            SizedBox(
+              width: double.infinity,
+              child: ElevatedButton.icon(
+                onPressed: () => _onSendToConnected(connected),
+                icon: const Icon(Icons.send_rounded),
+                label: Text(
+                  connected.length == 1
+                      ? '发送文件'
+                      : '发送到 ${connected.length} 台在线设备',
+                ),
+              ),
+            ),
           ],
-
-          const SizedBox(height: 24),
+          if (selectedPeer != null &&
+              selectedPeer.incomingOffers.isNotEmpty) ...[
+            const SizedBox(height: 28),
+            _buildIncomingOffers(connState),
+          ],
+          if (selectedPeer != null &&
+              selectedPeer.activeDownloads.isNotEmpty) ...[
+            const SizedBox(height: 28),
+            _buildActiveDownloads(connState),
+          ],
+          const SizedBox(height: 20),
           Center(
             child: Text(
-              isActive
-                  ? '在局域网内向 ${device.name} 发送文件。\n无云、无账号、无限制。'
-                  : '此设备非当前活跃连接。\n切换到此 Tab 即可连接。',
+              '文件仅在当前局域网内传输，不登录，不上云。',
+              style: Theme.of(context).textTheme.bodySmall,
               textAlign: TextAlign.center,
-              style: TextStyle(
-                color: Theme.of(context).colorScheme.onSurface.withOpacity(0.5),
-                fontSize: 12,
-              ),
             ),
           ),
         ],
       ),
+    );
+  }
+
+  Widget _buildOverviewEmptyState() {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 28),
+      decoration: BoxDecoration(
+        color: Colors.white,
+        borderRadius: BorderRadius.circular(16),
+        border: Border.all(color: AppTheme.border),
+      ),
+      child: Column(
+        children: [
+          Container(
+            width: 54,
+            height: 54,
+            decoration: BoxDecoration(
+              color: AppTheme.primaryLight,
+              borderRadius: BorderRadius.circular(16),
+            ),
+            child: const Icon(
+              Icons.devices_other_rounded,
+              color: AppTheme.primaryDark,
+            ),
+          ),
+          const SizedBox(height: 14),
+          Text('还没有已配对设备', style: Theme.of(context).textTheme.titleSmall),
+          const SizedBox(height: 6),
+          Text(
+            '扫描附近设备，或使用电脑端二维码进行连接。',
+            style: Theme.of(context).textTheme.bodySmall,
+            textAlign: TextAlign.center,
+          ),
+          const SizedBox(height: 18),
+          ElevatedButton.icon(
+            onPressed: _onAddDevice,
+            icon: const Icon(Icons.add_rounded),
+            label: const Text('添加设备'),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildOverviewDeviceCard(
+    Device device,
+    MultiConnectionStatus status, {
+    required bool selected,
+    String? errorMessage,
+  }) {
+    final connected = status == MultiConnectionStatus.connected;
+    final connecting = status == MultiConnectionStatus.connecting;
+    return Material(
+      color: selected ? AppTheme.primaryLight : Colors.white,
+      shape: RoundedRectangleBorder(
+        borderRadius: BorderRadius.circular(16),
+        side: BorderSide(
+          color: selected ? const Color(0xFFBEC9FF) : AppTheme.border,
+        ),
+      ),
+      child: InkWell(
+        borderRadius: BorderRadius.circular(16),
+        onTap: () => ref
+            .read(multiDeviceConnectionProvider.notifier)
+            .switchToDevice(device),
+        child: Padding(
+          padding: const EdgeInsets.all(16),
+          child: Row(
+            children: [
+              Container(
+                width: 48,
+                height: 48,
+                decoration: BoxDecoration(
+                  color: AppTheme.primaryLight,
+                  borderRadius: BorderRadius.circular(15),
+                ),
+                child: const Icon(
+                  Icons.computer_rounded,
+                  color: AppTheme.primaryDark,
+                ),
+              ),
+              const SizedBox(width: 14),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      device.name,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: Theme.of(context).textTheme.titleSmall,
+                    ),
+                    const SizedBox(height: 4),
+                    Text(
+                      errorMessage ?? device.serverBaseUrl,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                            color: errorMessage == null
+                                ? AppTheme.textSecondary
+                                : AppTheme.danger,
+                          ),
+                    ),
+                  ],
+                ),
+              ),
+              Container(
+                padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 5),
+                decoration: BoxDecoration(
+                  color: connected
+                      ? const Color(0xFFD6F2E3)
+                      : connecting
+                          ? const Color(0xFFFFF7E8)
+                          : const Color(0xFFF1F3F8),
+                  borderRadius: BorderRadius.circular(999),
+                ),
+                child: Text(
+                  connected
+                      ? '已连接'
+                      : connecting
+                          ? '连接中'
+                          : '离线',
+                  style: TextStyle(
+                    color: connected
+                        ? const Color(0xFF176F4A)
+                        : connecting
+                            ? const Color(0xFF9B5C00)
+                            : AppTheme.textSecondary,
+                    fontSize: 11,
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
+              ),
+              const SizedBox(width: 2),
+              PopupMenuButton<String>(
+                tooltip: '设备操作',
+                onSelected: (action) {
+                  if (action == 'reconnect') {
+                    ref
+                        .read(multiDeviceConnectionProvider.notifier)
+                        .reconnect(device.id);
+                  } else if (action == 'repair') {
+                    _reScanPair(device);
+                  } else if (action == 'delete') {
+                    _onDeleteDevice(device);
+                  }
+                },
+                itemBuilder: (context) => [
+                  const PopupMenuItem(
+                    value: 'reconnect',
+                    child: Text('重新连接'),
+                  ),
+                  if (!connected)
+                    const PopupMenuItem(
+                      value: 'repair',
+                      child: Text('重新配对'),
+                    ),
+                  const PopupMenuItem(
+                    value: 'delete',
+                    child: Text(
+                      '删除设备',
+                      style: TextStyle(color: AppTheme.danger),
+                    ),
+                  ),
+                ],
+                icon: const Icon(Icons.more_vert_rounded, size: 20),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  void _onSendToConnected(List<Device> devices) {
+    Navigator.of(context).pushNamed(
+      '/file-picker',
+      arguments: {
+        'initialDeviceIds': devices.map((device) => device.id).toList(),
+      },
     );
   }
 
@@ -1320,15 +1482,6 @@ class _DevicesScreenState extends ConsumerState<DevicesScreen>
     );
   }
 
-  void _onSendFiles(Device device) {
-    Navigator.of(context).pushNamed(
-      '/file-picker',
-      arguments: {
-        'initialDeviceIds': [device.id],
-      },
-    );
-  }
-
   static String _formatBytes(int bytes) {
     if (bytes < 1024) return '$bytes B';
     if (bytes < 1024 * 1024) return '${(bytes / 1024).toStringAsFixed(1)} KB';
@@ -1336,108 +1489,5 @@ class _DevicesScreenState extends ConsumerState<DevicesScreen>
       return '${(bytes / (1024 * 1024)).toStringAsFixed(1)} MB';
     }
     return '${(bytes / (1024 * 1024 * 1024)).toStringAsFixed(1)} GB';
-  }
-}
-
-// ---------------------------------------------------------------------------
-// Small private widgets
-// ---------------------------------------------------------------------------
-
-class _DeviceCard extends StatelessWidget {
-  const _DeviceCard({
-    required this.device,
-    required this.status,
-    required this.errorMessage,
-    required this.sessionExpired,
-  });
-
-  final Device device;
-  final MultiConnectionStatus status;
-  final String? errorMessage;
-  final bool sessionExpired;
-
-  @override
-  Widget build(BuildContext context) {
-    return Card(
-      child: Padding(
-        padding: const EdgeInsets.all(16),
-        child: Row(
-          children: [
-            const Icon(Icons.computer, size: 48),
-            const SizedBox(width: 16),
-            Expanded(
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text(
-                    device.name,
-                    style: Theme.of(context).textTheme.titleMedium,
-                  ),
-                  const SizedBox(height: 4),
-                  Text(
-                    device.serverBaseUrl,
-                    style: const TextStyle(
-                      color: Colors.grey,
-                      fontSize: 12,
-                    ),
-                  ),
-                  if (errorMessage != null) ...[
-                    const SizedBox(height: 6),
-                    Text(
-                      errorMessage!,
-                      style: const TextStyle(color: Colors.red, fontSize: 12),
-                    ),
-                  ] else if (sessionExpired) ...[
-                    const SizedBox(height: 6),
-                    const Text(
-                      'Session 已过期，请删除设备后重新扫码。',
-                      style: TextStyle(color: Colors.red, fontSize: 12),
-                    ),
-                  ],
-                ],
-              ),
-            ),
-            _connectionBadge(status),
-          ],
-        ),
-      ),
-    );
-  }
-
-  Widget _connectionBadge(MultiConnectionStatus status) {
-    switch (status) {
-      case MultiConnectionStatus.connected:
-        return const StatusBadge(label: 'Connected', color: Colors.green);
-      case MultiConnectionStatus.connecting:
-        return const StatusBadge(label: 'Connecting...', color: Colors.orange);
-      case MultiConnectionStatus.disconnected:
-        return const StatusBadge(label: 'Disconnected', color: Colors.red);
-      case MultiConnectionStatus.error:
-        return const StatusBadge(label: 'Error', color: Colors.red);
-      case MultiConnectionStatus.idle:
-        return const StatusBadge(label: 'Offline', color: Colors.grey);
-    }
-  }
-}
-
-class _InfoRow extends StatelessWidget {
-  const _InfoRow({required this.icon, required this.text});
-
-  final IconData icon;
-  final String text;
-
-  @override
-  Widget build(BuildContext context) {
-    return Padding(
-      padding: const EdgeInsets.symmetric(vertical: 12),
-      child: Row(
-        mainAxisAlignment: MainAxisAlignment.center,
-        children: [
-          Icon(icon, size: 18, color: Colors.grey),
-          const SizedBox(width: 8),
-          Text(text, style: const TextStyle(color: Colors.grey)),
-        ],
-      ),
-    );
   }
 }

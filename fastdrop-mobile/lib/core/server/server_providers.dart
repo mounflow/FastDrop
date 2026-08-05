@@ -19,6 +19,7 @@ class ServerState {
     this.port = 9527,
     this.deviceName = '',
     this.requirePairConfirmation = false,
+    this.requireReceiveConfirmation = false,
     this.errorMessage,
   });
 
@@ -26,6 +27,7 @@ class ServerState {
   final int port;
   final String deviceName;
   final bool requirePairConfirmation;
+  final bool requireReceiveConfirmation;
   final String? errorMessage;
 
   bool get isRunning => status == ServerStatus.running;
@@ -35,6 +37,7 @@ class ServerState {
     int? port,
     String? deviceName,
     bool? requirePairConfirmation,
+    bool? requireReceiveConfirmation,
     String? errorMessage,
   }) {
     return ServerState(
@@ -43,6 +46,8 @@ class ServerState {
       deviceName: deviceName ?? this.deviceName,
       requirePairConfirmation:
           requirePairConfirmation ?? this.requirePairConfirmation,
+      requireReceiveConfirmation:
+          requireReceiveConfirmation ?? this.requireReceiveConfirmation,
       errorMessage: errorMessage,
     );
   }
@@ -64,8 +69,11 @@ class FastDropServerNotifier extends StateNotifier<ServerState> {
   static const _enabledKey = 'fastdrop.server_enabled';
   static const _requirePairConfirmationKey =
       'fastdrop.require_pair_confirmation';
+  static const _requireReceiveConfirmationKey =
+      'fastdrop.require_receive_confirmation';
   bool _enabled = true;
   bool _requirePairConfirmation = false;
+  bool _requireReceiveConfirmation = false;
 
   bool get isEnabled => _enabled;
 
@@ -74,8 +82,11 @@ class FastDropServerNotifier extends StateNotifier<ServerState> {
     _enabled = prefs.getBool(_enabledKey) ?? true;
     _requirePairConfirmation =
         prefs.getBool(_requirePairConfirmationKey) ?? false;
+    _requireReceiveConfirmation =
+        prefs.getBool(_requireReceiveConfirmationKey) ?? false;
     state = state.copyWith(
       requirePairConfirmation: _requirePairConfirmation,
+      requireReceiveConfirmation: _requireReceiveConfirmation,
     );
     if (_enabled) {
       await start();
@@ -107,6 +118,21 @@ class FastDropServerNotifier extends StateNotifier<ServerState> {
     state = state.copyWith(requirePairConfirmation: value);
   }
 
+  /// Toggle whether transfers from paired peers need a local dialog.
+  Future<void> setRequireReceiveConfirmation(bool value) async {
+    _requireReceiveConfirmation = value;
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setBool(_requireReceiveConfirmationKey, value);
+    state = state.copyWith(requireReceiveConfirmation: value);
+
+    if (!value) {
+      final pending = List.of(ref.read(incomingTransfersProvider));
+      for (final transfer in pending) {
+        await acceptTransfer(transfer.transferId);
+      }
+    }
+  }
+
   /// Start the embedded server.
   Future<void> start() async {
     if (state.isRunning || state.status == ServerStatus.starting) return;
@@ -134,7 +160,11 @@ class FastDropServerNotifier extends StateNotifier<ServerState> {
         },
         onTransferRequest: (transfer) {
           debugPrint('[Server] Transfer offer: ${transfer.transferId}');
-          ref.read(incomingTransfersProvider.notifier).addTransfer(transfer);
+          if (_requireReceiveConfirmation) {
+            ref.read(incomingTransfersProvider.notifier).addTransfer(transfer);
+          } else {
+            Future.microtask(() => acceptTransfer(transfer.transferId));
+          }
         },
       );
 
@@ -158,6 +188,7 @@ class FastDropServerNotifier extends StateNotifier<ServerState> {
         deviceName: deviceName,
         port: server.port,
         requirePairConfirmation: _requirePairConfirmation,
+        requireReceiveConfirmation: _requireReceiveConfirmation,
       );
 
       debugPrint('[Server] Running on port ${server.port}');
@@ -191,6 +222,7 @@ class FastDropServerNotifier extends StateNotifier<ServerState> {
 
     state = ServerState(
       requirePairConfirmation: _requirePairConfirmation,
+      requireReceiveConfirmation: _requireReceiveConfirmation,
     );
   }
 

@@ -16,7 +16,7 @@ import (
 // and starts the new one in its place.
 type Controller struct {
 	mu      sync.Mutex
-	enabled bool          // current state
+	enabled bool // current state
 	mdns    *MdnsPublisher
 	noop    NoopPublisher
 	info    ServiceInfo
@@ -90,6 +90,31 @@ func (c *Controller) SetEnabled(enabled bool) error {
 	}
 	log.Printf("[discovery] disabling mDNS (hot-toggle)")
 	return c.noop.Start(ctx, info)
+}
+
+// SetDeviceName refreshes the published service identity without restarting
+// the FastDrop HTTP service. When discovery is disabled it only updates the
+// cached announcement used by the next SetEnabled(true).
+func (c *Controller) SetDeviceName(name string) error {
+	c.mu.Lock()
+	if c.info.DeviceName == name {
+		c.mu.Unlock()
+		return nil
+	}
+	c.info.DeviceName = name
+	enabled := c.enabled
+	info := c.info
+	ctx := c.ctx
+	c.mu.Unlock()
+
+	if !enabled || ctx == nil {
+		return nil
+	}
+	if err := c.mdns.Stop(); err != nil {
+		return err
+	}
+	log.Printf("[discovery] refreshing mDNS device name")
+	return c.mdns.Start(ctx, info)
 }
 
 // IsEnabled reports whether mDNS broadcasting is currently active.

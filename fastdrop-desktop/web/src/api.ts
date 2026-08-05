@@ -12,6 +12,11 @@ import type {
 
 const SESSION_KEY = 'fastdrop_session'
 
+function localUrl(path: string): string {
+  if (location.protocol === 'http:' || location.protocol === 'https:') return path
+  return `http://127.0.0.1:9527${path}`
+}
+
 export interface ApiTarget {
   baseUrl?: string
   sessionId: string
@@ -53,7 +58,7 @@ function authHeaders(target?: ApiTarget): HeadersInit {
 }
 
 function targetUrl(path: string, target?: { baseUrl?: string }): string {
-  if (!target?.baseUrl) return path
+  if (!target?.baseUrl) return localUrl(path)
   return `${target.baseUrl.replace(/\/$/, '')}${path}`
 }
 
@@ -66,11 +71,11 @@ async function asJson<T>(resp: Response): Promise<T> {
 }
 
 export async function fetchQR(): Promise<QRPayload> {
-  return asJson(await fetch('/api/v1/pair/qr'))
+  return asJson(await fetch(localUrl('/api/v1/pair/qr')))
 }
 
 export async function refreshPairToken(pairId: string): Promise<QRPayload> {
-  return asJson(await fetch('/api/v1/pair/token/refresh', {
+  return asJson(await fetch(localUrl('/api/v1/pair/token/refresh'), {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', ...authHeaders() },
     body: JSON.stringify({ pairId }),
@@ -82,13 +87,13 @@ export async function pollPairStatus(requestId: string, baseUrl?: string): Promi
 }
 
 export async function acceptPair(requestId: string): Promise<PairAccepted> {
-  return asJson<PairAccepted>(await fetch(`/api/v1/pair/requests/${requestId}/accept`, {
+  return asJson<PairAccepted>(await fetch(localUrl(`/api/v1/pair/requests/${requestId}/accept`), {
     method: 'POST',
   }))
 }
 
 export async function rejectPair(requestId: string): Promise<void> {
-  await fetch(`/api/v1/pair/requests/${requestId}/reject`, {
+  await fetch(localUrl(`/api/v1/pair/requests/${requestId}/reject`), {
     method: 'POST',
     ...{ headers: authHeaders() } as RequestInit,
   })
@@ -105,7 +110,7 @@ export interface PendingPairRequest {
 
 export async function listPairRequests(): Promise<{ requests: PendingPairRequest[] }> {
   const data = await asJson<{ requests: Array<PendingPairRequest & { device?: DeviceInfo }> }>(
-    await fetch('/api/v1/pair/requests'),
+    await fetch(localUrl('/api/v1/pair/requests')),
   )
   return {
     requests: (data.requests || []).map((request) => ({
@@ -130,7 +135,7 @@ export async function listTransfers(target?: ApiTarget): Promise<TransferRow[]> 
 /// the "重新配对" button when the user wants to pair a different
 /// phone or recovery from a stale session.
 export async function revokeSession(): Promise<void> {
-  await fetch('/api/v1/session', {
+  await fetch(localUrl('/api/v1/session'), {
     method: 'DELETE',
     headers: authHeaders(),
   })
@@ -188,19 +193,22 @@ export interface Settings {
   deviceName: string
   mdnsEnabled: boolean
   requirePairConfirmation: boolean
+  requireReceiveConfirmation: boolean
 }
 
 export async function getSettings(): Promise<Settings> {
-  return asJson(await fetch('/api/v1/settings'))
+  return asJson(await fetch(localUrl('/api/v1/settings')))
 }
 
 export async function updateSettings(body: {
   downloadDirectory?: string
   conflictPolicy?: string
+  deviceName?: string
   mdnsEnabled?: boolean
   requirePairConfirmation?: boolean
+  requireReceiveConfirmation?: boolean
 }): Promise<Settings> {
-  return asJson(await fetch('/api/v1/settings', {
+  return asJson(await fetch(localUrl('/api/v1/settings'), {
     method: 'PUT',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(body),

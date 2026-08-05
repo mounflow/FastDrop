@@ -1,84 +1,185 @@
 import 'package:flutter/material.dart';
 
-/// FastDrop brand theme.
-///
-/// Uses a blue primary palette with clean Material 3 styling.
+/// Shared FastDrop visual system used by the Stitch-aligned mobile screens.
 class AppTheme {
   AppTheme._();
 
-  // -- Brand colours ----------------------------------------------------------
-  static const Color _primary = Color(0xFF1565C0); // Blue 800
-  static const Color _onPrimary = Color(0xFFFFFFFF);
-  static const Color _surface = Color(0xFFFFFBFE);
-  static const Color _darkSurface = Color(0xFF1C1B1F);
+  static const primary = Color(0xFF4F6EF7);
+  static const primaryDark = Color(0xFF3F5EE8);
+  static const primaryLight = Color(0xFFEEF1FF);
+  static const success = Color(0xFF22A06B);
+  static const warning = Color(0xFFF59E0B);
+  static const danger = Color(0xFFE5484D);
+  static const pageBackground = Color(0xFFF6F7FB);
+  static const textPrimary = Color(0xFF171A23);
+  static const textSecondary = Color(0xFF667085);
+  static const border = Color(0xFFE4E7EF);
 
-  // -- Light theme ------------------------------------------------------------
   static ThemeData get light {
-    final colorScheme = ColorScheme.fromSeed(
-      seedColor: _primary,
-      brightness: Brightness.light,
+    const scheme = ColorScheme.light(
+      primary: primary,
+      onPrimary: Colors.white,
+      primaryContainer: primaryLight,
+      onPrimaryContainer: Color(0xFF2F42A2),
+      secondary: primaryDark,
+      onSecondary: Colors.white,
+      surface: Colors.white,
+      onSurface: textPrimary,
+      error: danger,
+      onError: Colors.white,
+      outline: border,
     );
 
     return ThemeData(
       useMaterial3: true,
-      colorScheme: colorScheme,
-      appBarTheme: AppBarTheme(
-        backgroundColor: colorScheme.primary,
-        foregroundColor: colorScheme.onPrimary,
+      colorScheme: scheme,
+      scaffoldBackgroundColor: pageBackground,
+      fontFamily: 'Roboto',
+      textTheme: const TextTheme(
+        headlineSmall: TextStyle(
+          fontSize: 24,
+          height: 1.25,
+          fontWeight: FontWeight.w700,
+          color: textPrimary,
+        ),
+        titleLarge: TextStyle(
+          fontSize: 20,
+          height: 1.3,
+          fontWeight: FontWeight.w700,
+          color: textPrimary,
+        ),
+        titleMedium: TextStyle(
+          fontSize: 16,
+          height: 1.4,
+          fontWeight: FontWeight.w600,
+          color: textPrimary,
+        ),
+        titleSmall: TextStyle(
+          fontSize: 14,
+          height: 1.45,
+          fontWeight: FontWeight.w600,
+          color: textPrimary,
+        ),
+        bodyLarge: TextStyle(
+          fontSize: 16,
+          height: 1.5,
+          fontWeight: FontWeight.w400,
+          color: textPrimary,
+        ),
+        bodyMedium: TextStyle(
+          fontSize: 14,
+          height: 1.55,
+          fontWeight: FontWeight.w400,
+          color: textPrimary,
+        ),
+        bodySmall: TextStyle(
+          fontSize: 12,
+          height: 1.55,
+          fontWeight: FontWeight.w400,
+          color: textSecondary,
+        ),
+      ),
+      appBarTheme: const AppBarTheme(
+        backgroundColor: pageBackground,
+        foregroundColor: textPrimary,
+        surfaceTintColor: Colors.transparent,
         elevation: 0,
-        centerTitle: true,
+        scrolledUnderElevation: 0,
+        centerTitle: false,
+        titleTextStyle: TextStyle(
+          color: textPrimary,
+          fontSize: 20,
+          fontWeight: FontWeight.w700,
+        ),
       ),
       cardTheme: CardThemeData(
-        elevation: 1,
+        elevation: 0,
+        color: Colors.white,
+        surfaceTintColor: Colors.transparent,
+        margin: EdgeInsets.zero,
         shape: RoundedRectangleBorder(
-          borderRadius: BorderRadius.circular(12),
+          borderRadius: BorderRadius.circular(16),
+          side: const BorderSide(color: border),
         ),
       ),
       elevatedButtonTheme: ElevatedButtonThemeData(
         style: ElevatedButton.styleFrom(
-          backgroundColor: colorScheme.primary,
-          foregroundColor: colorScheme.onPrimary,
+          elevation: 0,
+          backgroundColor: primaryDark,
+          foregroundColor: Colors.white,
+          disabledBackgroundColor: const Color(0xFFD2D7E2),
+          disabledForegroundColor: textSecondary,
+          padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 14),
           shape: RoundedRectangleBorder(
-            borderRadius: BorderRadius.circular(8),
+            borderRadius: BorderRadius.circular(12),
           ),
-          padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 12),
+          textStyle: const TextStyle(fontSize: 14, fontWeight: FontWeight.w600),
         ),
       ),
-    );
-  }
-
-  // -- Dark theme -------------------------------------------------------------
-  static ThemeData get dark {
-    final colorScheme = ColorScheme.fromSeed(
-      seedColor: _primary,
-      brightness: Brightness.dark,
-    );
-
-    return ThemeData(
-      useMaterial3: true,
-      colorScheme: colorScheme,
-      appBarTheme: AppBarTheme(
-        backgroundColor: colorScheme.surface,
-        foregroundColor: colorScheme.onSurface,
-        elevation: 0,
-        centerTitle: true,
+      outlinedButtonTheme: OutlinedButtonThemeData(
+        style: OutlinedButton.styleFrom(
+          foregroundColor: primaryDark,
+          side: const BorderSide(color: Color(0xFFBEC9FF)),
+          padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 14),
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(12),
+          ),
+          textStyle: const TextStyle(fontSize: 14, fontWeight: FontWeight.w600),
+        ),
       ),
-      cardTheme: CardThemeData(
-        elevation: 1,
-        shape: RoundedRectangleBorder(
+      inputDecorationTheme: InputDecorationTheme(
+        filled: true,
+        fillColor: Colors.white,
+        contentPadding:
+            const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
+        border: OutlineInputBorder(
           borderRadius: BorderRadius.circular(12),
+          borderSide: const BorderSide(color: border),
+        ),
+        enabledBorder: OutlineInputBorder(
+          borderRadius: BorderRadius.circular(12),
+          borderSide: const BorderSide(color: border),
+        ),
+        focusedBorder: OutlineInputBorder(
+          borderRadius: BorderRadius.circular(12),
+          borderSide: const BorderSide(color: primary, width: 1.5),
         ),
       ),
-      elevatedButtonTheme: ElevatedButtonThemeData(
-        style: ElevatedButton.styleFrom(
-          backgroundColor: colorScheme.primary,
-          foregroundColor: colorScheme.onPrimary,
-          shape: RoundedRectangleBorder(
-            borderRadius: BorderRadius.circular(8),
-          ),
-          padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 12),
-        ),
+      navigationBarTheme: NavigationBarThemeData(
+        height: 72,
+        elevation: 0,
+        backgroundColor: Colors.white,
+        indicatorColor: primaryLight,
+        surfaceTintColor: Colors.transparent,
+        labelTextStyle: WidgetStateProperty.resolveWith((states) => TextStyle(
+              fontSize: 12,
+              fontWeight: states.contains(WidgetState.selected)
+                  ? FontWeight.w600
+                  : FontWeight.w500,
+              color: states.contains(WidgetState.selected)
+                  ? primaryDark
+                  : textSecondary,
+            )),
+        iconTheme: WidgetStateProperty.resolveWith((states) => IconThemeData(
+              size: 22,
+              color: states.contains(WidgetState.selected)
+                  ? primaryDark
+                  : textSecondary,
+            )),
+      ),
+      dividerColor: border,
+      snackBarTheme: SnackBarThemeData(
+        behavior: SnackBarBehavior.floating,
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
       ),
     );
   }
+
+  static ThemeData get dark => ThemeData(
+        useMaterial3: true,
+        colorScheme: ColorScheme.fromSeed(
+          seedColor: primary,
+          brightness: Brightness.dark,
+        ),
+      );
 }

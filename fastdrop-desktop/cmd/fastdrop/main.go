@@ -13,11 +13,8 @@ import (
 	"log"
 	"net"
 	"net/http"
-	"os"
-	"os/signal"
 	"strings"
 	"sync"
-	"syscall"
 	"time"
 
 	"fastdrop-desktop/internal/api"
@@ -30,6 +27,9 @@ import (
 	"fastdrop-desktop/internal/websocket"
 
 	gws "github.com/gorilla/websocket"
+	"github.com/wailsapp/wails/v2"
+	"github.com/wailsapp/wails/v2/pkg/options"
+	"github.com/wailsapp/wails/v2/pkg/options/assetserver"
 )
 
 //go:embed all:webdist
@@ -240,11 +240,29 @@ func main() {
 		}
 	}()
 
-	// Wait for interrupt.
-	sig := make(chan os.Signal, 1)
-	signal.Notify(sig, syscall.SIGINT, syscall.SIGTERM)
-	<-sig
-	log.Println("[shutdown] interrupt received, draining...")
+	// The Windows desktop window and the LAN service intentionally live in
+	// the same process. Closing the window stops the service gracefully;
+	// phones continue to use the regular HTTP/WS listener on port 9527.
+	desktopAssets, err := fs.Sub(webAssets, "webdist")
+	if err != nil {
+		log.Printf("[desktop] assets: %v", err)
+		return
+	}
+	if err := wails.Run(&options.App{
+		Title:            "FastDrop - 局域网文件快传",
+		Width:            1080,
+		Height:           700,
+		MinWidth:         960,
+		MinHeight:        640,
+		BackgroundColour: options.NewRGB(246, 247, 251),
+		AssetServer: &assetserver.Options{
+			Assets: desktopAssets,
+		},
+	}); err != nil {
+		log.Printf("[desktop] window failed: %v", err)
+	}
+
+	log.Println("[shutdown] desktop window closed, draining...")
 	discoveryCtl.Stop()
 
 	shutCtx, shutCancel := context.WithTimeout(context.Background(), 10*time.Second)

@@ -11,6 +11,7 @@ import 'package:fastdrop_mobile/core/providers.dart';
 import 'package:fastdrop_mobile/features/devices/multi_device_connection.dart';
 import 'package:fastdrop_mobile/features/pairing/pairing_screen.dart';
 import 'package:fastdrop_mobile/core/utils/file_utils.dart';
+import 'package:fastdrop_mobile/shared/widgets/app_navigation_bar.dart';
 
 // ---------------------------------------------------------------------------
 // Screen
@@ -63,7 +64,7 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(
-        title: const Text('Settings'),
+        title: const Text('设置'),
       ),
       body: ListView(
         children: [
@@ -132,7 +133,6 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
               style: TextStyle(color: Colors.grey, fontSize: 12),
             ),
           ),
-
           const Divider(),
 
           // -- 接收文件 (Embedded Server) -----------------------------------------
@@ -167,6 +167,21 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
               '其他设备（PC/手机）可以发现并向本机发送文件。',
               style: TextStyle(color: Colors.grey, fontSize: 12),
             ),
+          ),
+          Consumer(
+            builder: (context, ref, child) {
+              final serverState = ref.watch(fastdropServerProvider);
+              final notifier = ref.read(fastdropServerProvider.notifier);
+              return SwitchListTile(
+                secondary: const Icon(Icons.fact_check_outlined),
+                title: const Text('接收文件前需要确认'),
+                subtitle: const Text(
+                  '默认关闭：来自已配对设备的文件会直接接收。',
+                ),
+                value: serverState.requireReceiveConfirmation,
+                onChanged: notifier.setRequireReceiveConfirmation,
+              );
+            },
           ),
 
           const Divider(),
@@ -280,6 +295,7 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
           ),
         ],
       ),
+      bottomNavigationBar: const FastDropNavigationBar(currentIndex: 2),
     );
   }
 

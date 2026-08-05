@@ -1,4 +1,9 @@
 const SESSION_KEY = 'fastdrop_session';
+function localUrl(path) {
+    if (location.protocol === 'http:' || location.protocol === 'https:')
+        return path;
+    return `http://127.0.0.1:9527${path}`;
+}
 let cachedSession = null;
 export function setSession(s) {
     cachedSession = s;
@@ -35,7 +40,7 @@ function authHeaders(target) {
 }
 function targetUrl(path, target) {
     if (!target?.baseUrl)
-        return path;
+        return localUrl(path);
     return `${target.baseUrl.replace(/\/$/, '')}${path}`;
 }
 async function asJson(resp) {
@@ -46,10 +51,10 @@ async function asJson(resp) {
     return resp.json();
 }
 export async function fetchQR() {
-    return asJson(await fetch('/api/v1/pair/qr'));
+    return asJson(await fetch(localUrl('/api/v1/pair/qr')));
 }
 export async function refreshPairToken(pairId) {
-    return asJson(await fetch('/api/v1/pair/token/refresh', {
+    return asJson(await fetch(localUrl('/api/v1/pair/token/refresh'), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', ...authHeaders() },
         body: JSON.stringify({ pairId }),
@@ -59,18 +64,18 @@ export async function pollPairStatus(requestId, baseUrl) {
     return asJson(await fetch(`${baseUrl?.replace(/\/$/, '') ?? ''}/api/v1/pair/requests/${requestId}`));
 }
 export async function acceptPair(requestId) {
-    return asJson(await fetch(`/api/v1/pair/requests/${requestId}/accept`, {
+    return asJson(await fetch(localUrl(`/api/v1/pair/requests/${requestId}/accept`), {
         method: 'POST',
     }));
 }
 export async function rejectPair(requestId) {
-    await fetch(`/api/v1/pair/requests/${requestId}/reject`, {
+    await fetch(localUrl(`/api/v1/pair/requests/${requestId}/reject`), {
         method: 'POST',
         ...{ headers: authHeaders() },
     });
 }
 export async function listPairRequests() {
-    const data = await asJson(await fetch('/api/v1/pair/requests'));
+    const data = await asJson(await fetch(localUrl('/api/v1/pair/requests')));
     return {
         requests: (data.requests || []).map((request) => ({
             requestId: request.requestId,
@@ -92,7 +97,7 @@ export async function listTransfers(target) {
 /// the "重新配对" button when the user wants to pair a different
 /// phone or recovery from a stale session.
 export async function revokeSession() {
-    await fetch('/api/v1/session', {
+    await fetch(localUrl('/api/v1/session'), {
         method: 'DELETE',
         headers: authHeaders(),
     });
@@ -138,10 +143,10 @@ export async function announceTransfer(transferId, target) {
         throw new Error(`offer failed: ${response.status}`);
 }
 export async function getSettings() {
-    return asJson(await fetch('/api/v1/settings'));
+    return asJson(await fetch(localUrl('/api/v1/settings')));
 }
 export async function updateSettings(body) {
-    return asJson(await fetch('/api/v1/settings', {
+    return asJson(await fetch(localUrl('/api/v1/settings'), {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(body),

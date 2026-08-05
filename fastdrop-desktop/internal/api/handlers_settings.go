@@ -5,6 +5,8 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
+	"unicode"
 
 	"fastdrop-desktop/internal/config"
 )
@@ -16,19 +18,22 @@ func saveCfg(cfg *config.Config) error {
 
 // settingsResponse is the JSON shape returned by GET /api/v1/settings.
 type settingsResponse struct {
-	DownloadDirectory       string `json:"downloadDirectory"`
-	ConflictPolicy          string `json:"conflictPolicy"`
-	DeviceName              string `json:"deviceName"`
-	MdnsEnabled             bool   `json:"mdnsEnabled"`
-	RequirePairConfirmation bool   `json:"requirePairConfirmation"`
+	DownloadDirectory          string `json:"downloadDirectory"`
+	ConflictPolicy             string `json:"conflictPolicy"`
+	DeviceName                 string `json:"deviceName"`
+	MdnsEnabled                bool   `json:"mdnsEnabled"`
+	RequirePairConfirmation    bool   `json:"requirePairConfirmation"`
+	RequireReceiveConfirmation bool   `json:"requireReceiveConfirmation"`
 }
 
 // updateSettingsRequest is the JSON body for PUT /api/v1/settings.
 type updateSettingsRequest struct {
-	DownloadDirectory       *string `json:"downloadDirectory,omitempty"`
-	ConflictPolicy          *string `json:"conflictPolicy,omitempty"`
-	MdnsEnabled             *bool   `json:"mdnsEnabled,omitempty"`
-	RequirePairConfirmation *bool   `json:"requirePairConfirmation,omitempty"`
+	DownloadDirectory          *string `json:"downloadDirectory,omitempty"`
+	ConflictPolicy             *string `json:"conflictPolicy,omitempty"`
+	DeviceName                 *string `json:"deviceName,omitempty"`
+	MdnsEnabled                *bool   `json:"mdnsEnabled,omitempty"`
+	RequirePairConfirmation    *bool   `json:"requirePairConfirmation,omitempty"`
+	RequireReceiveConfirmation *bool   `json:"requireReceiveConfirmation,omitempty"`
 }
 
 // handleGetSettings returns the current configurable settings.
@@ -43,11 +48,12 @@ func (s *Server) handleGetSettings(w http.ResponseWriter, r *http.Request) {
 		mdnsEnabled = s.Discovery.IsEnabled()
 	}
 	writeJSON(w, http.StatusOK, settingsResponse{
-		DownloadDirectory:       s.Storage.DownloadDir(),
-		ConflictPolicy:          s.Cfg.Storage.ConflictPolicy,
-		DeviceName:              s.Cfg.Server.DeviceName,
-		MdnsEnabled:             mdnsEnabled,
-		RequirePairConfirmation: s.Cfg.Security.RequirePairConfirmation,
+		DownloadDirectory:          s.Storage.DownloadDir(),
+		ConflictPolicy:             s.Cfg.Storage.ConflictPolicy,
+		DeviceName:                 s.Cfg.Server.DeviceName,
+		MdnsEnabled:                mdnsEnabled,
+		RequirePairConfirmation:    s.Cfg.Security.RequirePairConfirmation,
+		RequireReceiveConfirmation: s.Cfg.Security.RequireReceiveConfirmation,
 	})
 }
 
@@ -62,6 +68,24 @@ func (s *Server) handleUpdateSettings(w http.ResponseWriter, r *http.Request) {
 	}
 
 	changed := false
+
+	if req.DeviceName != nil {
+		name := strings.TrimSpace(*req.DeviceName)
+		if name == "" || len([]rune(name)) > 40 || strings.ContainsFunc(name, unicode.IsControl) {
+			writeError(w, http.StatusBadRequest, "INVALID_REQUEST", "deviceName must be 1-40 visible characters", reqID)
+			return
+		}
+		if name != s.Cfg.Server.DeviceName {
+			s.Cfg.Server.DeviceName = name
+			if s.Discovery != nil {
+				if err := s.Discovery.SetDeviceName(name); err != nil {
+					writeError(w, http.StatusInternalServerError, "INTERNAL_ERROR", "failed to refresh mDNS name: "+err.Error(), reqID)
+					return
+				}
+			}
+			changed = true
+		}
+	}
 
 	// Update download directory.
 	if req.DownloadDirectory != nil {
@@ -118,6 +142,11 @@ func (s *Server) handleUpdateSettings(w http.ResponseWriter, r *http.Request) {
 		changed = true
 	}
 
+	if req.RequireReceiveConfirmation != nil {
+		s.Cfg.Security.RequireReceiveConfirmation = *req.RequireReceiveConfirmation
+		changed = true
+	}
+
 	if changed {
 		if err := saveCfg(s.Cfg); err != nil {
 			writeError(w, http.StatusInternalServerError, "INTERNAL_ERROR", "failed to save config: "+err.Error(), reqID)
@@ -131,10 +160,11 @@ func (s *Server) handleUpdateSettings(w http.ResponseWriter, r *http.Request) {
 		mdnsEnabled = s.Discovery.IsEnabled()
 	}
 	writeJSON(w, http.StatusOK, settingsResponse{
-		DownloadDirectory:       s.Storage.DownloadDir(),
-		ConflictPolicy:          s.Cfg.Storage.ConflictPolicy,
-		DeviceName:              s.Cfg.Server.DeviceName,
-		MdnsEnabled:             mdnsEnabled,
-		RequirePairConfirmation: s.Cfg.Security.RequirePairConfirmation,
+		DownloadDirectory:          s.Storage.DownloadDir(),
+		ConflictPolicy:             s.Cfg.Storage.ConflictPolicy,
+		DeviceName:                 s.Cfg.Server.DeviceName,
+		MdnsEnabled:                mdnsEnabled,
+		RequirePairConfirmation:    s.Cfg.Security.RequirePairConfirmation,
+		RequireReceiveConfirmation: s.Cfg.Security.RequireReceiveConfirmation,
 	})
 }

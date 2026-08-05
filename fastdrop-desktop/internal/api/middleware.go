@@ -68,6 +68,25 @@ func (s *Server) withPairRateLimit(next http.HandlerFunc) http.HandlerFunc {
 	}
 }
 
+// withLocalDesktop keeps desktop-only controls off the LAN-facing API.
+// The Wails webview and a browser opened on localhost both connect through a
+// loopback address; phones and other LAN peers must never be able to change
+// the PC download directory or confirmation policy.
+func withLocalDesktop(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		host, _, err := net.SplitHostPort(r.RemoteAddr)
+		if err != nil {
+			host = strings.Trim(r.RemoteAddr, "[]")
+		}
+		ip := net.ParseIP(host)
+		if ip == nil || !ip.IsLoopback() {
+			writeError(w, http.StatusForbidden, "SESSION_INVALID", "desktop settings are only available on this PC", requestID(r))
+			return
+		}
+		next(w, r)
+	}
+}
+
 // readJSON decodes the body into out using encoding/json with the upstream
 // MaxBytesReader enforcing size limits. Unknown fields are tolerated for
 // forward-compatibility with newer clients.

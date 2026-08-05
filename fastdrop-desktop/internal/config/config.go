@@ -89,7 +89,7 @@ func Default() *Config {
 			PairTokenTTLSeconds:        DefaultPairTokenTTL,
 			SessionTTLSeconds:          DefaultSessionTTL,
 			RequirePairConfirmation:    false,
-			RequireReceiveConfirmation: true,
+			RequireReceiveConfirmation: false,
 		},
 		Discovery: DiscoveryConfig{
 			MdnsEnabled: false,
