@@ -6,6 +6,7 @@ import 'package:fastdrop_mobile/core/discovery/discovery_providers.dart';
 import 'package:fastdrop_mobile/core/storage/session_store.dart';
 import 'package:fastdrop_mobile/core/providers.dart';
 import 'package:fastdrop_mobile/features/devices/nearby_devices_sheet.dart';
+import 'package:fastdrop_mobile/features/devices/multi_device_connection.dart';
 import 'package:fastdrop_mobile/features/pairing/pairing_screen.dart';
 import 'package:fastdrop_mobile/features/transfer/transfer_service.dart';
 import 'package:fastdrop_mobile/shared/models/transfer.dart';
@@ -68,8 +69,7 @@ class ActiveDownload {
   String status; // downloading | completed | failed
   String? error;
 
-  double get progress =>
-      totalBytes > 0 ? transferredBytes / totalBytes : 0.0;
+  double get progress => totalBytes > 0 ? transferredBytes / totalBytes : 0.0;
 }
 
 // ---------------------------------------------------------------------------
@@ -485,7 +485,8 @@ class DeviceConnectionNotifier extends StateNotifier<DeviceConnectionState> {
     final transferId = payload['transferId'] as String? ?? '';
     final fileId = payload['fileId'] as String? ?? '';
     final transferred = payload['transferredBytes'] as int? ??
-        payload['bytesTransferred'] as int? ?? 0;
+        payload['bytesTransferred'] as int? ??
+        0;
     _updateDownload(transferId, fileId, transferredBytes: transferred);
   }
 
@@ -535,9 +536,8 @@ class DeviceConnectionNotifier extends StateNotifier<DeviceConnectionState> {
 
   void _handleTransferCancelled(Map<String, dynamic> payload) {
     final transferId = payload['transferId'] as String? ?? '';
-    final downloads = state.activeDownloads
-        .where((d) => d.transferId != transferId)
-        .toList();
+    final downloads =
+        state.activeDownloads.where((d) => d.transferId != transferId).toList();
     state = state.copyWith(activeDownloads: downloads);
   }
 
@@ -626,9 +626,14 @@ class _DevicesScreenState extends ConsumerState<DevicesScreen>
 
     if (devices.isEmpty) {
       // Make sure the notifier is idle.
-      ref.read(deviceConnectionProvider.notifier).disconnect();
+      ref.read(multiDeviceConnectionProvider.notifier).disconnect();
       return;
     }
+
+    // Keep every paired peer online. Tab selection is now presentation-only
+    // and no longer owns connection lifecycle.
+    await ref.read(multiDeviceConnectionProvider.notifier).connectAll(devices);
+    if (!mounted) return;
 
     // Pick the initial tab: honour the caller's preference, otherwise fall
     // back to the most-recently-used device.
@@ -644,7 +649,7 @@ class _DevicesScreenState extends ConsumerState<DevicesScreen>
       if (!mounted || _tabController == null) return;
       _tabController!.index = initIdx.clamp(0, devices.length - 1);
       ref
-          .read(deviceConnectionProvider.notifier)
+          .read(multiDeviceConnectionProvider.notifier)
           .switchToDevice(devices[_tabController!.index]);
     });
   }
@@ -667,7 +672,9 @@ class _DevicesScreenState extends ConsumerState<DevicesScreen>
     if (!mounted) return;
     final idx = controller.index;
     if (idx < 0 || idx >= _devices.length) return;
-    ref.read(deviceConnectionProvider.notifier).switchToDevice(_devices[idx]);
+    ref
+        .read(multiDeviceConnectionProvider.notifier)
+        .switchToDevice(_devices[idx]);
   }
 
   /// "+" 按钮入口：根据 mDNS 开关状态走不同流程。
@@ -714,44 +721,11 @@ class _DevicesScreenState extends ConsumerState<DevicesScreen>
         _goToPairing();
       }
     } else {
-      // mDNS 已开启：先尝试一键连接已配对设备
-      await _quickConnectOrShowSheet();
+      await _showAddDeviceSheet();
     }
   }
 
-  /// 一键连接：检查后台 mDNS 已发现的设备，如果找到已配对设备则
-  /// 直接连接（无 UI），否则弹出附近设备列表让用户选择。
-  Future<void> _quickConnectOrShowSheet() async {
-    final nearby = ref.read(nearbyDevicesProvider);
-    if (nearby.isNotEmpty) {
-      final store = ref.read(deviceStoreProvider);
-      for (final d in nearby) {
-        final matched =
-            await store.findMatch(d.baseUrl, d.deviceName);
-        if (matched != null && mounted) {
-          // 找到已配对设备 → 直接连接，不弹任何列表
-          ref
-              .read(deviceConnectionProvider.notifier)
-              .switchToDevice(matched);
-          // 切到对应 tab
-          final idx = _devices.indexWhere((dev) => dev.id == matched.id);
-          if (idx >= 0 && _tabController != null) {
-            _tabController!.animateTo(idx);
-          }
-          if (mounted) {
-            ScaffoldMessenger.of(context).showSnackBar(
-              SnackBar(
-                content: Text('已连接到 ${matched.name}'),
-                duration: const Duration(seconds: 2),
-              ),
-            );
-          }
-          return;
-        }
-      }
-    }
-
-    // 没有已配对设备（或 mDNS 还没扫到）→ 弹出附近设备列表
+  Future<void> _showAddDeviceSheet() async {
     ref.invalidate(pairedDevicesProvider);
     final discovered = await NearbyDevicesSheet.show(context);
     if (discovered == null || !mounted) return;
@@ -762,8 +736,8 @@ class _DevicesScreenState extends ConsumerState<DevicesScreen>
   /// 已配对 → 直接 switchToDevice（跳过扫码）；未配对 → 进扫码页。
   Future<void> _onNearbyDeviceSelected(DiscoveredDevice discovered) async {
     final store = ref.read(deviceStoreProvider);
-    final matched = await store.findMatch(
-        discovered.baseUrl, discovered.deviceName);
+    final matched =
+        await store.findMatch(discovered.baseUrl, discovered.deviceName);
 
     if (matched == null) {
       // 未配对 → 半自动 D-2 配对（免扫码）
@@ -798,7 +772,7 @@ class _DevicesScreenState extends ConsumerState<DevicesScreen>
     if (idx >= 0 && _tabController != null) {
       _tabController!.animateTo(idx);
     }
-    ref.read(deviceConnectionProvider.notifier).switchToDevice(device);
+    ref.read(multiDeviceConnectionProvider.notifier).switchToDevice(device);
   }
 
   /// 导航到扫码配对页。
@@ -813,11 +787,11 @@ class _DevicesScreenState extends ConsumerState<DevicesScreen>
   /// mDNS 设备列表变化回调：如果当前活跃设备处于 error/disconnected
   /// 状态且被 mDNS 重新发现，自动尝试重连（阶段 4 核心逻辑）。
   void _onNearbyDevicesChanged(
-      List<DiscoveredDevice> devices, DeviceConnectionState connState) {
+      List<DiscoveredDevice> devices, MultiDeviceConnectionState connState) {
     if (devices.isEmpty) return;
     final status = connState.connectionStatus;
-    if (status != ConnectionStatus.error &&
-        status != ConnectionStatus.disconnected) {
+    if (status != MultiConnectionStatus.error &&
+        status != MultiConnectionStatus.disconnected) {
       return;
     }
     // Session 过期不自动重连——需要用户重新配对
@@ -838,7 +812,7 @@ class _DevicesScreenState extends ConsumerState<DevicesScreen>
       return;
     }
     _lastAutoReconnect = DateTime.now();
-    ref.read(deviceConnectionProvider.notifier).reconnect();
+    ref.read(multiDeviceConnectionProvider.notifier).reconnect();
   }
 
   /// 半自动配对：pairViaMdns 已设置 polling 状态，直接导航到 PairingScreen。
@@ -852,7 +826,9 @@ class _DevicesScreenState extends ConsumerState<DevicesScreen>
 
   /// Session 过期后重新扫码配对：删除旧设备 → 进扫码页。
   Future<void> _reScanPair(Device device) async {
-    ref.read(deviceConnectionProvider.notifier).disconnect();
+    ref
+        .read(multiDeviceConnectionProvider.notifier)
+        .disconnectDevice(device.id);
     await ref.read(deviceStoreProvider).removeDevice(device.id);
     ref.invalidate(pairedDevicesProvider);
     _goToPairing();
@@ -882,10 +858,8 @@ class _DevicesScreenState extends ConsumerState<DevicesScreen>
     );
     if (confirmed != true) return;
 
-    final notifier = ref.read(deviceConnectionProvider.notifier);
-    if (ref.read(deviceConnectionProvider).activeDeviceId == device.id) {
-      notifier.disconnect();
-    }
+    final notifier = ref.read(multiDeviceConnectionProvider.notifier);
+    notifier.disconnectDevice(device.id);
     await ref.read(deviceStoreProvider).removeDevice(device.id);
     ref.invalidate(pairedDevicesProvider);
 
@@ -905,14 +879,14 @@ class _DevicesScreenState extends ConsumerState<DevicesScreen>
       if (!mounted || _tabController == null) return;
       _tabController!.index = 0;
       ref
-          .read(deviceConnectionProvider.notifier)
+          .read(multiDeviceConnectionProvider.notifier)
           .switchToDevice(remaining.first);
     });
   }
 
   @override
   Widget build(BuildContext context) {
-    final connState = ref.watch(deviceConnectionProvider);
+    final connState = ref.watch(multiDeviceConnectionProvider);
 
     // 阶段4: mDNS 发现已配对设备 → 自动重连
     ref.listen<List<DiscoveredDevice>>(nearbyDevicesProvider, (_, devices) {
@@ -968,7 +942,7 @@ class _DevicesScreenState extends ConsumerState<DevicesScreen>
     );
   }
 
-  Widget _buildBody(DeviceConnectionState connState) {
+  Widget _buildBody(MultiDeviceConnectionState connState) {
     if (_loading) {
       return const Center(child: CircularProgressIndicator());
     }
@@ -980,8 +954,7 @@ class _DevicesScreenState extends ConsumerState<DevicesScreen>
       children: _devices
           .asMap()
           .entries
-          .map((entry) =>
-              _buildDeviceTab(entry.key, entry.value, connState))
+          .map((entry) => _buildDeviceTab(entry.key, entry.value, connState))
           .toList(),
     );
   }
@@ -1036,12 +1009,12 @@ class _DevicesScreenState extends ConsumerState<DevicesScreen>
   // -- Per-device tab content -------------------------------------------------
 
   Widget _buildDeviceTab(
-      int index, Device device, DeviceConnectionState connState) {
+      int index, Device device, MultiDeviceConnectionState connState) {
     final isActive = connState.activeDeviceId == device.id;
-    final status =
-        isActive ? connState.connectionStatus : ConnectionStatus.idle;
-    final errorMessage = isActive ? connState.errorMessage : null;
-    final sessionExpired = isActive && connState.sessionExpired;
+    final peer = connState.peer(device.id);
+    final status = peer?.status ?? MultiConnectionStatus.idle;
+    final errorMessage = peer?.errorMessage;
+    final sessionExpired = peer?.sessionExpired ?? false;
 
     return SingleChildScrollView(
       padding: const EdgeInsets.all(16),
@@ -1056,16 +1029,16 @@ class _DevicesScreenState extends ConsumerState<DevicesScreen>
           ),
           const SizedBox(height: 16),
           // Primary actions depend on connection state.
-          if (status == ConnectionStatus.connected) ...[
+          if (status == MultiConnectionStatus.connected) ...[
             ElevatedButton.icon(
-              onPressed: _onSendFiles,
+              onPressed: () => _onSendFiles(device),
               icon: const Icon(Icons.file_upload),
               label: const Text('发送文件'),
               style: ElevatedButton.styleFrom(
                 padding: const EdgeInsets.symmetric(vertical: 14),
               ),
             ),
-          ] else if (status == ConnectionStatus.connecting) ...[
+          ] else if (status == MultiConnectionStatus.connecting) ...[
             const _InfoRow(
               icon: Icons.hourglass_top,
               text: '正在连接…',
@@ -1089,10 +1062,10 @@ class _DevicesScreenState extends ConsumerState<DevicesScreen>
                   child: OutlinedButton.icon(
                     onPressed: isActive
                         ? () => ref
-                            .read(deviceConnectionProvider.notifier)
-                            .reconnect()
+                            .read(multiDeviceConnectionProvider.notifier)
+                            .reconnect(device.id)
                         : () => ref
-                            .read(deviceConnectionProvider.notifier)
+                            .read(multiDeviceConnectionProvider.notifier)
                             .switchToDevice(device),
                     icon: const Icon(Icons.refresh),
                     label: const Text('重新连接'),
@@ -1105,10 +1078,9 @@ class _DevicesScreenState extends ConsumerState<DevicesScreen>
                 Expanded(
                   child: OutlinedButton.icon(
                     onPressed: () => _onDeleteDevice(device),
-                    icon: const Icon(Icons.delete_outline,
-                        color: Colors.red),
-                    label: const Text('删除设备',
-                        style: TextStyle(color: Colors.red)),
+                    icon: const Icon(Icons.delete_outline, color: Colors.red),
+                    label:
+                        const Text('删除设备', style: TextStyle(color: Colors.red)),
                     style: OutlinedButton.styleFrom(
                       padding: const EdgeInsets.symmetric(vertical: 14),
                       side: const BorderSide(color: Colors.red),
@@ -1121,11 +1093,11 @@ class _DevicesScreenState extends ConsumerState<DevicesScreen>
 
           // Active-device-only sections.
           if (isActive) ...[
-            if (connState.incomingOffers.isNotEmpty) ...[
+            if ((peer?.incomingOffers ?? const []).isNotEmpty) ...[
               const SizedBox(height: 24),
               _buildIncomingOffers(connState),
             ],
-            if (connState.activeDownloads.isNotEmpty) ...[
+            if ((peer?.activeDownloads ?? const []).isNotEmpty) ...[
               const SizedBox(height: 24),
               _buildActiveDownloads(connState),
             ],
@@ -1139,10 +1111,7 @@ class _DevicesScreenState extends ConsumerState<DevicesScreen>
                   : '此设备非当前活跃连接。\n切换到此 Tab 即可连接。',
               textAlign: TextAlign.center,
               style: TextStyle(
-                color: Theme.of(context)
-                    .colorScheme
-                    .onSurface
-                    .withOpacity(0.5),
+                color: Theme.of(context).colorScheme.onSurface.withOpacity(0.5),
                 fontSize: 12,
               ),
             ),
@@ -1154,8 +1123,8 @@ class _DevicesScreenState extends ConsumerState<DevicesScreen>
 
   // -- Incoming offers UI -----------------------------------------------------
 
-  Widget _buildIncomingOffers(DeviceConnectionState state) {
-    final notifier = ref.read(deviceConnectionProvider.notifier);
+  Widget _buildIncomingOffers(MultiDeviceConnectionState state) {
+    final notifier = ref.read(multiDeviceConnectionProvider.notifier);
     final theme = Theme.of(context);
 
     return Column(
@@ -1220,8 +1189,8 @@ class _DevicesScreenState extends ConsumerState<DevicesScreen>
 
   // -- Active downloads UI ----------------------------------------------------
 
-  Widget _buildActiveDownloads(DeviceConnectionState state) {
-    final notifier = ref.read(deviceConnectionProvider.notifier);
+  Widget _buildActiveDownloads(MultiDeviceConnectionState state) {
+    final notifier = ref.read(multiDeviceConnectionProvider.notifier);
     final theme = Theme.of(context);
     final hasFinished =
         state.activeDownloads.any((d) => d.status != 'downloading');
@@ -1303,8 +1272,8 @@ class _DevicesScreenState extends ConsumerState<DevicesScreen>
                           mainAxisAlignment: MainAxisAlignment.end,
                           children: [
                             TextButton.icon(
-                              onPressed: () =>
-                                  notifier.cancelDownload(d.transferId),
+                              onPressed: () => notifier.cancelDownload(
+                                  d.deviceId, d.transferId),
                               icon: const Icon(Icons.cancel, size: 16),
                               label: const Text('Cancel'),
                               style: TextButton.styleFrom(
@@ -1321,7 +1290,7 @@ class _DevicesScreenState extends ConsumerState<DevicesScreen>
     );
   }
 
-  Widget _downloadStatusChip(ActiveDownload d) {
+  Widget _downloadStatusChip(MultiActiveDownload d) {
     Color color;
     String label;
     switch (d.status) {
@@ -1345,13 +1314,19 @@ class _DevicesScreenState extends ConsumerState<DevicesScreen>
       ),
       child: Text(
         label,
-        style: TextStyle(fontSize: 11, fontWeight: FontWeight.w600, color: color),
+        style:
+            TextStyle(fontSize: 11, fontWeight: FontWeight.w600, color: color),
       ),
     );
   }
 
-  void _onSendFiles() {
-    Navigator.of(context).pushNamed('/file-picker');
+  void _onSendFiles(Device device) {
+    Navigator.of(context).pushNamed(
+      '/file-picker',
+      arguments: {
+        'initialDeviceIds': [device.id],
+      },
+    );
   }
 
   static String _formatBytes(int bytes) {
@@ -1377,7 +1352,7 @@ class _DeviceCard extends StatelessWidget {
   });
 
   final Device device;
-  final ConnectionStatus status;
+  final MultiConnectionStatus status;
   final String? errorMessage;
   final bool sessionExpired;
 
@@ -1429,17 +1404,17 @@ class _DeviceCard extends StatelessWidget {
     );
   }
 
-  Widget _connectionBadge(ConnectionStatus status) {
+  Widget _connectionBadge(MultiConnectionStatus status) {
     switch (status) {
-      case ConnectionStatus.connected:
+      case MultiConnectionStatus.connected:
         return const StatusBadge(label: 'Connected', color: Colors.green);
-      case ConnectionStatus.connecting:
+      case MultiConnectionStatus.connecting:
         return const StatusBadge(label: 'Connecting...', color: Colors.orange);
-      case ConnectionStatus.disconnected:
+      case MultiConnectionStatus.disconnected:
         return const StatusBadge(label: 'Disconnected', color: Colors.red);
-      case ConnectionStatus.error:
+      case MultiConnectionStatus.error:
         return const StatusBadge(label: 'Error', color: Colors.red);
-      case ConnectionStatus.idle:
+      case MultiConnectionStatus.idle:
         return const StatusBadge(label: 'Offline', color: Colors.grey);
     }
   }

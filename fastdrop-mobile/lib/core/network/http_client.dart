@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 import 'dart:typed_data';
@@ -6,6 +7,39 @@ import 'package:http/http.dart' as http;
 
 import 'package:fastdrop_mobile/core/errors/app_error.dart';
 
+/// Fair asynchronous limiter shared by all peer clients.
+class HttpRequestLimiter {
+  HttpRequestLimiter(this.maxConcurrent) : assert(maxConcurrent > 0);
+
+  final int maxConcurrent;
+  int _active = 0;
+  final List<Completer<void>> _waiters = [];
+
+  int get active => _active;
+
+  Future<T> run<T>(Future<T> Function() action) async {
+    if (_active < maxConcurrent) {
+      _active++;
+    } else {
+      final waiter = Completer<void>();
+      _waiters.add(waiter);
+      await waiter.future;
+    }
+    try {
+      return await action();
+    } finally {
+      if (_waiters.isNotEmpty) {
+        // Hand the occupied slot directly to the oldest waiter. Keeping
+        // _active unchanged prevents a newly arriving request from barging
+        // into the hand-off window and exceeding the hard ceiling.
+        _waiters.removeAt(0).complete();
+      } else {
+        _active--;
+      }
+    }
+  }
+}
+
 /// Wraps [http.Client] with FastDrop session-header injection and error
 /// handling that understands the FastDrop error envelope.
 class FastDropHttpClient {
@@ -13,6 +47,7 @@ class FastDropHttpClient {
     http.Client? client,
     this.baseUrl,
     this.timeout = const Duration(seconds: 30),
+    this.requestLimiter,
   }) : _client = client ?? http.Client();
 
   final http.Client _client;
@@ -22,6 +57,12 @@ class FastDropHttpClient {
 
   /// Default timeout for all HTTP requests.
   final Duration timeout;
+  final HttpRequestLimiter? requestLimiter;
+
+  Future<T> _limited<T>(Future<T> Function() action) {
+    final limiter = requestLimiter;
+    return limiter == null ? action() : limiter.run(action);
+  }
 
   // ---------------------------------------------------------------------------
   // Session management
@@ -127,7 +168,9 @@ class FastDropHttpClient {
     if (queryParams != null && queryParams.isNotEmpty) {
       uri = uri.replace(queryParameters: queryParams);
     }
-    final response = await _client.get(uri, headers: _headers(headers)).timeout(timeout);
+    final response = await _limited(
+      () => _client.get(uri, headers: _headers(headers)).timeout(timeout),
+    );
     return _handle(response);
   }
 
@@ -137,11 +180,13 @@ class FastDropHttpClient {
     Map<String, String>? headers,
   }) async {
     final uri = _resolve(path);
-    final response = await _client.post(
-      uri,
-      headers: _headers(headers),
-      body: body != null ? jsonEncode(body) : null,
-    ).timeout(timeout);
+    final response = await _limited(() => _client
+        .post(
+          uri,
+          headers: _headers(headers),
+          body: body != null ? jsonEncode(body) : null,
+        )
+        .timeout(timeout));
     return _handle(response);
   }
 
@@ -151,11 +196,13 @@ class FastDropHttpClient {
     Map<String, String>? headers,
   }) async {
     final uri = _resolve(path);
-    final response = await _client.put(
-      uri,
-      headers: _headers(headers),
-      body: body != null ? jsonEncode(body) : null,
-    ).timeout(timeout);
+    final response = await _limited(() => _client
+        .put(
+          uri,
+          headers: _headers(headers),
+          body: body != null ? jsonEncode(body) : null,
+        )
+        .timeout(timeout));
     return _handle(response);
   }
 
@@ -164,7 +211,9 @@ class FastDropHttpClient {
     Map<String, String>? headers,
   }) async {
     final uri = _resolve(path);
-    final response = await _client.delete(uri, headers: _headers(headers)).timeout(timeout);
+    final response = await _limited(
+      () => _client.delete(uri, headers: _headers(headers)).timeout(timeout),
+    );
     return _handle(response);
   }
 
@@ -173,7 +222,9 @@ class FastDropHttpClient {
     Map<String, String>? headers,
   }) async {
     final uri = _resolve(path);
-    final response = await _client.head(uri, headers: _headers(headers)).timeout(timeout);
+    final response = await _limited(
+      () => _client.head(uri, headers: _headers(headers)).timeout(timeout),
+    );
     return _handle(response);
   }
 
@@ -187,7 +238,9 @@ class FastDropHttpClient {
     final uri = _resolve(path);
     final allHeaders = _headers(headers);
     allHeaders[HttpHeaders.contentTypeHeader] = contentType;
-    final response = await _client.put(uri, headers: allHeaders, body: bytes).timeout(timeout);
+    final response = await _limited(
+      () => _client.put(uri, headers: allHeaders, body: bytes).timeout(timeout),
+    );
     return _handle(response);
   }
 

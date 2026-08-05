@@ -4,6 +4,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:fastdrop_mobile/core/discovery/device_discovery.dart';
 import 'package:fastdrop_mobile/core/discovery/discovery_providers.dart';
 import 'package:fastdrop_mobile/core/storage/session_store.dart';
+import 'package:fastdrop_mobile/features/devices/multi_device_connection.dart';
 import 'package:fastdrop_mobile/features/pairing/pairing_screen.dart';
 
 // ---------------------------------------------------------------------------
@@ -174,18 +175,26 @@ class _NearbyDeviceTile extends ConsumerWidget {
       data: (devices) => _findMatch(devices),
     );
     final isPaired = pairedDevice != null;
+    final connectionState = ref.watch(multiDeviceConnectionProvider);
+    PeerConnectionView? activePeer;
+    for (final peer in connectionState.peers.values) {
+      if (_matches(peer.device)) {
+        activePeer = peer;
+        break;
+      }
+    }
+    final isConnected = activePeer?.status == MultiConnectionStatus.connected;
+    final isConnecting = activePeer?.status == MultiConnectionStatus.connecting;
 
     // 从 baseUrl 提取 IP 显示
-    final displayUrl = device.baseUrl
-        .replaceFirst('http://', '')
-        .replaceFirst('https://', '');
+    final displayUrl =
+        device.baseUrl.replaceFirst('http://', '').replaceFirst('https://', '');
 
     return ListTile(
       leading: CircleAvatar(
-        backgroundColor:
-            isPaired ? Colors.green.shade50 : Colors.grey.shade100,
+        backgroundColor: isPaired ? Colors.green.shade50 : Colors.grey.shade100,
         child: Icon(
-          Icons.computer,
+          _iconForPlatform(device.platform),
           color: isPaired ? Colors.green : Colors.grey,
         ),
       ),
@@ -199,37 +208,62 @@ class _NearbyDeviceTile extends ConsumerWidget {
         '$displayUrl · protocol v${device.protocolVersion}',
         style: theme.textTheme.bodySmall?.copyWith(color: Colors.grey),
       ),
-      trailing: isPaired
-          ? const Chip(
-              label: Text('已配对', style: TextStyle(fontSize: 11)),
-              backgroundColor: Colors.green,
-              labelStyle: TextStyle(color: Colors.white),
-              padding: EdgeInsets.zero,
-              materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
-              visualDensity: VisualDensity.compact,
-            )
-          : const Chip(
-              label: Text('待配对', style: TextStyle(fontSize: 11)),
-              backgroundColor: Colors.orange,
-              labelStyle: TextStyle(color: Colors.white),
-              padding: EdgeInsets.zero,
-              materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
-              visualDensity: VisualDensity.compact,
-            ),
-      onTap: () => _onTap(context, ref, isPaired),
+      trailing: Chip(
+        label: Text(
+          isConnected
+              ? '已连接'
+              : isConnecting
+                  ? '连接中'
+                  : isPaired
+                      ? '已配对'
+                      : '待配对',
+          style: const TextStyle(fontSize: 11),
+        ),
+        backgroundColor: isConnected
+            ? Colors.green
+            : isConnecting
+                ? Colors.blue
+                : isPaired
+                    ? Colors.teal
+                    : Colors.orange,
+        labelStyle: const TextStyle(color: Colors.white),
+        padding: EdgeInsets.zero,
+        materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
+        visualDensity: VisualDensity.compact,
+      ),
+      onTap: isConnected || isConnecting
+          ? null
+          : () => _onTap(context, ref, isPaired),
     );
   }
 
   /// 在已配对设备列表中查找匹配项。
   /// 先按 baseUrl 精确匹配，再按 deviceName 匹配（IP 可能变了）。
+  static IconData _iconForPlatform(String platform) {
+    switch (platform.toLowerCase()) {
+      case 'android':
+        return Icons.phone_android;
+      case 'ios':
+        return Icons.phone_iphone;
+      case 'macos':
+        return Icons.laptop_mac;
+      case 'windows':
+        return Icons.computer;
+      default:
+        return Icons.devices;
+    }
+  }
+
   Device? _findMatch(List<Device> devices) {
     for (final d in devices) {
-      if (d.serverBaseUrl == device.baseUrl) return d;
-    }
-    for (final d in devices) {
-      if (d.name == device.deviceName) return d;
+      if (_matches(d)) return d;
     }
     return null;
+  }
+
+  bool _matches(Device candidate) {
+    return candidate.serverBaseUrl == device.baseUrl ||
+        candidate.name == device.deviceName;
   }
 
   void _onTap(BuildContext context, WidgetRef ref, bool isPaired) {

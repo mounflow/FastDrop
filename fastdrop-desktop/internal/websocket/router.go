@@ -36,15 +36,74 @@ func (r *Router) OnMessage(c *Client, env *Envelope) {
 		r.handleTransferPause(c, env)
 	case MsgTransferResume:
 		r.handleTransferResume(c, env)
+	case MsgTransferCompleted:
+		r.handleTransferCompleted(c, env)
+	case MsgTransferFailed:
+		r.handleTransferFailed(c, env)
 	default:
 		// Unknown message types are silently ignored per spec.
 	}
 }
 
+func (r *Router) handleTransferCompleted(c *Client, env *Envelope) {
+	var p struct {
+		TransferID string `json:"transferId"`
+	}
+	if err := json.Unmarshal(env.Payload, &p); err != nil || p.TransferID == "" {
+		return
+	}
+	t, err := r.DB.GetTransfer(context.Background(), p.TransferID)
+	if err != nil || t.SessionID != c.sessionID || t.Direction != string(transfer.DirServerToClient) {
+		r.sendError(c, "TRANSFER_NOT_FOUND", "no outbound transfer for this session")
+		return
+	}
+	files, err := r.DB.ListTransferFiles(context.Background(), p.TransferID)
+	if err != nil {
+		r.sendError(c, "INTERNAL_ERROR", err.Error())
+		return
+	}
+	for _, f := range files {
+		_ = r.DB.UpdateTransferFileProgress(
+			context.Background(), f.ID, f.TotalBytes, f.TotalChunks, string(transfer.StatusCompleted),
+		)
+	}
+	if err := r.DB.MarkTransferCompleted(context.Background(), p.TransferID, t.TotalBytes, database.Now()); err != nil {
+		r.sendError(c, "INTERNAL_ERROR", err.Error())
+		return
+	}
+	_ = r.Storage.CleanupTransfer(p.TransferID)
+	r.pushTransferEvent(c.sessionID, MsgTransferCompleted, map[string]any{
+		"transferId": p.TransferID,
+	})
+}
+
+func (r *Router) handleTransferFailed(c *Client, env *Envelope) {
+	var p struct {
+		TransferID string `json:"transferId"`
+		Reason     string `json:"reason"`
+	}
+	if err := json.Unmarshal(env.Payload, &p); err != nil || p.TransferID == "" {
+		return
+	}
+	t, err := r.DB.GetTransfer(context.Background(), p.TransferID)
+	if err != nil || t.SessionID != c.sessionID || t.Direction != string(transfer.DirServerToClient) {
+		r.sendError(c, "TRANSFER_NOT_FOUND", "no outbound transfer for this session")
+		return
+	}
+	_ = r.DB.UpdateTransferStatus(
+		context.Background(), p.TransferID, string(transfer.StatusFailed), t.TransferredBytes, "INTERNAL_ERROR", p.Reason,
+	)
+	_ = r.Storage.CleanupTransfer(p.TransferID)
+	r.pushTransferEvent(c.sessionID, MsgTransferFailed, map[string]any{
+		"transferId": p.TransferID,
+		"error":      p.Reason,
+	})
+}
+
 // FileOfferPayload mirrors §8.3.
 type FileOfferPayload struct {
-	OfferID string              `json:"offerId"`
-	Files   []FileOfferFile     `json:"files"`
+	OfferID string          `json:"offerId"`
+	Files   []FileOfferFile `json:"files"`
 }
 
 type FileOfferFile struct {

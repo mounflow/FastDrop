@@ -66,10 +66,10 @@ func main() {
 
 	// WS message router ties the control channel to business logic.
 	wsRouter := &websocket.Router{
-		Hub:      wsHub,
-		Session:  sessMgr,
-		DB:       db,
-		Storage:  store,
+		Hub:     wsHub,
+		Session: sessMgr,
+		DB:      db,
+		Storage: store,
 	}
 	// transferMgr needs the router for progress callbacks, so create it after.
 	transferMgr := transfer.NewManager(db, cfg.Transfer.ChunkSize, wsRouter.TransferEventCallback())
@@ -199,7 +199,7 @@ func main() {
 	// Publish on mDNS (Phase 2).
 	host, port := resolveBindAddress(cfg)
 	if err := discoveryCtl.Start(rootCtx, discovery.ServiceInfo{
-		DeviceID: "windows-local", DeviceName: cfg.Server.DeviceName,
+		DeviceID: cfg.Server.DeviceID, DeviceName: cfg.Server.DeviceName,
 		Host: host, Port: port, ProtocolVersion: 1, Platform: "windows",
 	}); err != nil {
 		log.Printf("[discovery] start failed: %v (continuing without mDNS)", err)

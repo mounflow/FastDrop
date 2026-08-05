@@ -37,9 +37,8 @@ class SessionData {
 
 /// A paired PC persisted on the phone.
 ///
-/// Multiple devices can be stored at once (see [DeviceStore]). Only one
-/// device is "active" (connected via WebSocket) at a time — the others are
-/// kept on disk so the user can switch between PCs without re-pairing.
+/// Multiple devices can be stored and connected at once (see [DeviceStore]).
+/// UI selection is independent from connection lifecycle.
 @immutable
 class Device {
   const Device({
@@ -49,6 +48,7 @@ class Device {
     required this.sessionId,
     required this.accessToken,
     required this.lastSeen,
+    this.platform = 'unknown',
     this.expiresAt,
   });
 
@@ -60,6 +60,7 @@ class Device {
   final String sessionId;
   final String accessToken;
   final DateTime lastSeen;
+  final String platform;
   final DateTime? expiresAt;
 
   bool get isExpired {
@@ -83,6 +84,7 @@ class Device {
         'sessionId': sessionId,
         'accessToken': accessToken,
         'lastSeen': lastSeen.toIso8601String(),
+        'platform': platform,
         if (expiresAt != null) 'expiresAt': expiresAt!.toIso8601String(),
       };
 
@@ -93,9 +95,9 @@ class Device {
       serverBaseUrl: json['serverBaseUrl'] as String,
       sessionId: json['sessionId'] as String,
       accessToken: json['accessToken'] as String,
-      lastSeen:
-          DateTime.tryParse(json['lastSeen'] as String? ?? '') ??
-              DateTime.now(),
+      lastSeen: DateTime.tryParse(json['lastSeen'] as String? ?? '') ??
+          DateTime.now(),
+      platform: json['platform'] as String? ?? 'unknown',
       expiresAt: (json['expiresAt'] as String?) == null
           ? null
           : DateTime.tryParse(json['expiresAt'] as String),
@@ -108,6 +110,7 @@ class Device {
     DateTime? expiresAt,
     String? sessionId,
     String? accessToken,
+    String? platform,
   }) {
     return Device(
       id: id,
@@ -116,6 +119,7 @@ class Device {
       sessionId: sessionId ?? this.sessionId,
       accessToken: accessToken ?? this.accessToken,
       lastSeen: lastSeen ?? this.lastSeen,
+      platform: platform ?? this.platform,
       expiresAt: expiresAt ?? this.expiresAt,
     );
   }
@@ -192,8 +196,7 @@ class DeviceStore {
 }
 
 /// Deprecated thin wrapper around [DeviceStore] that exposes the legacy
-/// single-session API. Screens still using `SessionStore()` (transfer,
-/// history) keep working — they transparently operate on the active device.
+/// single-session API for migration-only callers.
 @Deprecated('Use DeviceStore directly.')
 class SessionStore {
   SessionStore();

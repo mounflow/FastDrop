@@ -305,6 +305,71 @@ func TestRouterFileOfferReject(t *testing.T) {
 	}
 }
 
+func TestRouterReceiverCompletionClosesOutboundTransfer(t *testing.T) {
+	r, _, db := newTestRouter(t)
+	ctx := context.Background()
+
+	res, err := r.Transfer.Create(ctx, "s1", "d1", transfer.DirServerToClient, "offer-out", []transfer.FileSpec{
+		{ClientFileID: "c1", Name: "f.txt", Size: 10},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	c := fakeClient("s1", "d1")
+	payload, _ := json.Marshal(map[string]string{"transferId": res.TransferID})
+	r.OnMessage(c, &Envelope{Type: MsgTransferCompleted, Payload: payload})
+
+	tr, err := db.GetTransfer(ctx, res.TransferID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if tr.Status != string(transfer.StatusCompleted) || tr.TransferredBytes != 10 {
+		t.Fatalf("transfer status=%s bytes=%d, want completed/10", tr.Status, tr.TransferredBytes)
+	}
+	file, err := db.GetTransferFile(ctx, res.Files[0].FileID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if file.Status != string(transfer.StatusCompleted) || file.TransferredBytes != 10 {
+		t.Fatalf("file status=%s bytes=%d, want completed/10", file.Status, file.TransferredBytes)
+	}
+}
+
+func TestRouterReceiverCannotCompleteInboundTransfer(t *testing.T) {
+	r, _, db := newTestRouter(t)
+	ctx := context.Background()
+
+	res, err := r.Transfer.Create(ctx, "s1", "d1", transfer.DirClientToServer, "offer-in", []transfer.FileSpec{
+		{ClientFileID: "c1", Name: "f.txt", Size: 10},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	c := fakeClient("s1", "d1")
+	payload, _ := json.Marshal(map[string]string{"transferId": res.TransferID})
+	r.OnMessage(c, &Envelope{Type: MsgTransferCompleted, Payload: payload})
+
+	tr, err := db.GetTransfer(ctx, res.TransferID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if tr.Status == string(transfer.StatusCompleted) {
+		t.Fatal("client_to_server transfer must not be completed by a WS receiver acknowledgement")
+	}
+	select {
+	case msg := <-c.send:
+		var reply Envelope
+		if err := json.Unmarshal(msg, &reply); err != nil {
+			t.Fatal(err)
+		}
+		if reply.Type != MsgError {
+			t.Fatalf("reply type=%s, want error", reply.Type)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("no error reply for invalid completion acknowledgement")
+	}
+}
+
 func TestFileSizeByID(t *testing.T) {
 	specs := []transfer.FileSpec{
 		{ClientFileID: "a", Size: 100},

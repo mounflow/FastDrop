@@ -157,6 +157,18 @@ class FastDropWsClient {
           return;
         }
 
+        if (type == 'heartbeat.ping') {
+          // Mobile peers use application-level heartbeat frames. Replying
+          // here prevents their watchdog from replacing a healthy M:N
+          // connection every three missed intervals.
+          send({
+            'version': 1,
+            'type': 'heartbeat.pong',
+            'timestamp': DateTime.now().millisecondsSinceEpoch,
+          });
+          return;
+        }
+
         // Intercept auth.result — confirm or reject the connection.
         if (type == 'auth.result') {
           _authPending = false;

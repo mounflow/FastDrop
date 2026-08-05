@@ -74,7 +74,8 @@ class PairingNotifier extends StateNotifier<PairingState> {
     if (payload == null) {
       state = PairingState(
         phase: PairingPhase.error,
-        errorMessage: 'Invalid QR code. Make sure you are scanning a FastDrop QR code from your PC.',
+        errorMessage:
+            'Invalid QR code. Make sure you are scanning a FastDrop QR code from your PC.',
       );
       return;
     }
@@ -83,7 +84,8 @@ class PairingNotifier extends StateNotifier<PairingState> {
     if (payload.protocol != 'fastdrop') {
       state = PairingState(
         phase: PairingPhase.error,
-        errorMessage: 'Not a FastDrop QR code. Detected protocol: "${payload.protocol}".',
+        errorMessage:
+            'Not a FastDrop QR code. Detected protocol: "${payload.protocol}".',
       );
       return;
     }
@@ -141,13 +143,14 @@ class PairingNotifier extends StateNotifier<PairingState> {
 
     try {
       final deviceId = await DeviceIdManager.getDeviceId();
+      final deviceName = DeviceIdManager.anonymousDeviceName(deviceId);
 
       final requestBody = PairRequestBody(
         pairId: payload.pairId,
         token: payload.token,
         device: DeviceInfo(
           deviceId: deviceId,
-          deviceName: 'My Phone',
+          deviceName: deviceName,
           platform: 'android',
           appVersion: '1.0.0',
         ),
@@ -198,7 +201,8 @@ class PairingNotifier extends StateNotifier<PairingState> {
       _stopPolling();
       state = PairingState(
         phase: PairingPhase.error,
-        errorMessage: 'Pairing timed out. Please try scanning the QR code again.',
+        errorMessage:
+            'Pairing timed out. Please try scanning the QR code again.',
       );
       return;
     }
@@ -233,6 +237,7 @@ class PairingNotifier extends StateNotifier<PairingState> {
           sessionId: sessionInfo.sessionId,
           accessToken: sessionInfo.accessToken,
           lastSeen: now,
+          platform: serverInfo.platform,
           expiresAt: expiresAt,
         );
         await _ref.read(deviceStoreProvider).saveDevice(device);
@@ -256,7 +261,8 @@ class PairingNotifier extends StateNotifier<PairingState> {
         _stopPolling();
         state = PairingState(
           phase: PairingPhase.error,
-          errorMessage: 'Pair request expired. Generate a new QR code on your PC and try again.',
+          errorMessage:
+              'Pair request expired. Generate a new QR code on your PC and try again.',
         );
       } else {
         // Still waiting — update attempt count.
@@ -341,13 +347,14 @@ class PairingNotifier extends StateNotifier<PairingState> {
 
     try {
       final deviceId = await DeviceIdManager.getDeviceId();
+      final deviceName = DeviceIdManager.anonymousDeviceName(deviceId);
 
       final response = await httpClient.post(
         '/api/v1/pair/discover',
         body: {
           'device': DeviceInfo(
             deviceId: deviceId,
-            deviceName: 'My Phone',
+            deviceName: deviceName,
             platform: 'android',
             appVersion: '1.0.0',
           ).toJson(),
@@ -468,7 +475,8 @@ class _PairingScreenState extends ConsumerState<PairingScreen> {
               child: Column(
                 mainAxisSize: MainAxisSize.min,
                 children: [
-                  const Icon(Icons.qr_code_scanner, size: 48, color: Colors.white),
+                  const Icon(Icons.qr_code_scanner,
+                      size: 48, color: Colors.white),
                   const SizedBox(height: 12),
                   const Text(
                     'Point your camera at the QR code\non your PC screen',
@@ -619,7 +627,8 @@ class _PairingScreenState extends ConsumerState<PairingScreen> {
 
   // -- Error ------------------------------------------------------------------
 
-  Widget _buildErrorView(BuildContext context, WidgetRef ref, PairingState state) {
+  Widget _buildErrorView(
+      BuildContext context, WidgetRef ref, PairingState state) {
     final notifier = ref.read(pairingProvider.notifier);
 
     return Center(

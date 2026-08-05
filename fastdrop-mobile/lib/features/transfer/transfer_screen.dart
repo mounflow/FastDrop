@@ -4,10 +4,9 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
-import 'package:fastdrop_mobile/core/network/http_client.dart';
-import 'package:fastdrop_mobile/core/network/ws_client.dart';
 import 'package:fastdrop_mobile/core/providers.dart';
 import 'package:fastdrop_mobile/core/storage/session_store.dart';
+import 'package:fastdrop_mobile/features/devices/multi_device_connection.dart';
 import 'package:fastdrop_mobile/features/transfer/transfer_service.dart';
 import 'package:fastdrop_mobile/shared/models/transfer.dart';
 
@@ -18,6 +17,9 @@ import 'package:fastdrop_mobile/shared/models/transfer.dart';
 /// Immutable state for one transfer item in the list.
 class TransferItemState {
   const TransferItemState({
+    required this.deviceId,
+    required this.transferId,
+    required this.peerName,
     required this.fileName,
     required this.bytesTransferred,
     required this.totalBytes,
@@ -26,6 +28,9 @@ class TransferItemState {
     this.errorMessage,
   });
 
+  final String deviceId;
+  final String transferId;
+  final String peerName;
   final String fileName;
   final int bytesTransferred;
   final int totalBytes;
@@ -34,6 +39,9 @@ class TransferItemState {
   final String? errorMessage;
 
   TransferItemState copyWith({
+    String? deviceId,
+    String? transferId,
+    String? peerName,
     String? fileName,
     int? bytesTransferred,
     int? totalBytes,
@@ -42,6 +50,9 @@ class TransferItemState {
     String? errorMessage,
   }) {
     return TransferItemState(
+      deviceId: deviceId ?? this.deviceId,
+      transferId: transferId ?? this.transferId,
+      peerName: peerName ?? this.peerName,
       fileName: fileName ?? this.fileName,
       bytesTransferred: bytesTransferred ?? this.bytesTransferred,
       totalBytes: totalBytes ?? this.totalBytes,
@@ -217,6 +228,9 @@ class TransferScreenNotifier extends StateNotifier<TransferScreenState> {
       final names = paths.map((p) => p.split('/').last.split('\\').last);
       final updated = Map<String, TransferItemState>.from(state.transfers);
       updated[key] = TransferItemState(
+        deviceId: '',
+        transferId: key,
+        peerName: state.currentPeerName ?? 'PC',
         fileName: names.length == 1 ? names.first : '${names.length} files',
         bytesTransferred: 0,
         totalBytes: 0,
@@ -231,12 +245,16 @@ class TransferScreenNotifier extends StateNotifier<TransferScreenState> {
     });
   }
 
-  void _onProgress(String transferId, String fileId, TransferProgress progress) {
+  void _onProgress(
+      String transferId, String fileId, TransferProgress progress) {
     if (!mounted) return;
     final key = '$transferId::$fileId';
     final existing = state.transfers[key];
     final updated = Map<String, TransferItemState>.from(state.transfers);
     updated[key] = TransferItemState(
+      deviceId: '',
+      transferId: transferId,
+      peerName: state.currentPeerName ?? 'PC',
       fileName: progress.fileName ?? existing?.fileName ?? fileId,
       bytesTransferred: progress.bytesTransferred,
       totalBytes: progress.totalBytes,
@@ -342,13 +360,250 @@ class TransferScreenNotifier extends StateNotifier<TransferScreenState> {
   }
 }
 
+/// M:N transfer presenter. Connection and transfer lifecycles belong to the
+/// multi-device pool, while this notifier only projects tagged progress into
+/// the screen.
+class MultiTransferScreenNotifier extends StateNotifier<TransferScreenState> {
+  MultiTransferScreenNotifier(this._ref) : super(const TransferScreenState());
+
+  final Ref _ref;
+  List<String>? _pendingFilePaths;
+  List<String>? _pendingDeviceIds;
+
+  Future<void> init() async {
+    if (state.serviceReady) return;
+    state = state.copyWith(serviceReady: true);
+    _tryStartUpload();
+  }
+
+  void setPendingFiles(List<String> paths, List<String> deviceIds) {
+    if (paths.isEmpty || deviceIds.isEmpty) return;
+    archiveCurrentToHistory();
+    _pendingFilePaths = List<String>.from(paths);
+    _pendingDeviceIds = List<String>.from(deviceIds);
+    final pool = _ref.read(multiDeviceConnectionProvider);
+    final names = deviceIds
+        .map((id) => pool.peer(id)?.device.name)
+        .whereType<String>()
+        .toList();
+    state = state.copyWith(
+      currentPeerName: names.isEmpty ? '多个设备' : names.join('、'),
+    );
+    _tryStartUpload();
+  }
+
+  void archiveCurrentToHistory() {
+    if (state.currentBatchKeys.isEmpty) return;
+    state = state.copyWith(
+      currentBatchKeys: <String>{},
+      history: [
+        ...state.history,
+        TransferHistoryBatch(
+          peerName: state.currentPeerName ?? '多个设备',
+          direction: '→',
+          archivedAt: DateTime.now(),
+          itemKeys: Set<String>.from(state.currentBatchKeys),
+        ),
+      ],
+    );
+  }
+
+  void _tryStartUpload() {
+    if (!state.serviceReady ||
+        _pendingFilePaths == null ||
+        _pendingDeviceIds == null) {
+      return;
+    }
+    final paths = _pendingFilePaths!;
+    final deviceIds = _pendingDeviceIds!;
+    _pendingFilePaths = null;
+    _pendingDeviceIds = null;
+
+    _ref
+        .read(multiDeviceConnectionProvider.notifier)
+        .uploadFilesToDevices(
+          deviceIds: deviceIds,
+          filePaths: paths,
+          onProgress: _onProgress,
+          onStateChange: _onStateChange,
+        )
+        .catchError((Object error) {
+      debugPrint('[MultiTransferScreen] fan-out error: $error');
+      if (!mounted) return;
+      // Per-peer state callbacks normally surface the exact failure. This
+      // fallback covers errors that happen before a transfer ID is allocated.
+      final hasFailure = state.currentBatchKeys.any(
+        (key) => state.transfers[key]?.status == 'failed',
+      );
+      if (hasFailure) return;
+      final key = 'fanout-failed::${DateTime.now().microsecondsSinceEpoch}';
+      final updated = Map<String, TransferItemState>.from(state.transfers)
+        ..[key] = TransferItemState(
+          deviceId: '',
+          transferId: key,
+          peerName: state.currentPeerName ?? '多个设备',
+          fileName: paths.length == 1
+              ? paths.first.split('/').last.split('\\').last
+              : '${paths.length} files',
+          bytesTransferred: 0,
+          totalBytes: 0,
+          speed: 0,
+          status: 'failed',
+          errorMessage: error.toString(),
+        );
+      state = state.copyWith(
+        transfers: updated,
+        currentBatchKeys: {...state.currentBatchKeys, key},
+      );
+    });
+  }
+
+  void _onProgress(String deviceId, String transferId, String fileId,
+      TransferProgress progress) {
+    if (!mounted) return;
+    final key = '$deviceId::$transferId::$fileId';
+    final existing = state.transfers[key];
+    final peerName =
+        _ref.read(multiDeviceConnectionProvider).peer(deviceId)?.device.name ??
+            deviceId;
+    final updated = Map<String, TransferItemState>.from(state.transfers)
+      ..[key] = TransferItemState(
+        deviceId: deviceId,
+        transferId: transferId,
+        peerName: peerName,
+        fileName: progress.fileName ?? existing?.fileName ?? fileId,
+        bytesTransferred: progress.bytesTransferred,
+        totalBytes: progress.totalBytes,
+        speed: progress.speed ?? 0,
+        status: progress.status ?? 'transferring',
+      );
+    state = state.copyWith(
+      transfers: updated,
+      currentBatchKeys: {...state.currentBatchKeys, key},
+    );
+  }
+
+  void _onStateChange(
+    String deviceId,
+    String transferId,
+    String status, {
+    String? errorCode,
+    String? errorMessage,
+  }) {
+    if (!mounted) return;
+    final updated = Map<String, TransferItemState>.from(state.transfers);
+    var matched = false;
+    for (final entry in updated.entries.toList()) {
+      if (entry.value.deviceId == deviceId &&
+          entry.value.transferId == transferId) {
+        matched = true;
+        updated[entry.key] = entry.value.copyWith(
+          status: status,
+          errorMessage: errorMessage,
+        );
+      }
+    }
+    if (!matched && status == 'failed') {
+      final peerName = _ref
+              .read(multiDeviceConnectionProvider)
+              .peer(deviceId)
+              ?.device
+              .name ??
+          deviceId;
+      final key = '$deviceId::$transferId::failed';
+      updated[key] = TransferItemState(
+        deviceId: deviceId,
+        transferId: transferId,
+        peerName: peerName,
+        fileName: '发送失败',
+        bytesTransferred: 0,
+        totalBytes: 0,
+        speed: 0,
+        status: 'failed',
+        errorMessage: errorMessage ?? errorCode,
+      );
+      state = state.copyWith(
+        transfers: updated,
+        currentBatchKeys: {...state.currentBatchKeys, key},
+      );
+      return;
+    }
+    state = state.copyWith(transfers: updated);
+  }
+
+  Future<void> cancelTransfer(String itemKey) async {
+    final item = state.transfers[itemKey];
+    if (item == null || item.deviceId.isEmpty) return;
+    await _ref
+        .read(multiDeviceConnectionProvider.notifier)
+        .cancelTransfer(item.deviceId, item.transferId);
+  }
+
+  void pauseTransfer(String itemKey) {
+    final item = state.transfers[itemKey];
+    if (item == null || item.deviceId.isEmpty) return;
+    _ref
+        .read(multiDeviceConnectionProvider.notifier)
+        .pauseTransfer(item.deviceId, item.transferId);
+    _setBatchStatus(item.deviceId, item.transferId, 'paused');
+  }
+
+  void resumeTransfer(String itemKey) {
+    final item = state.transfers[itemKey];
+    if (item == null || item.deviceId.isEmpty) return;
+    _ref
+        .read(multiDeviceConnectionProvider.notifier)
+        .resumeTransfer(item.deviceId, item.transferId);
+    _setBatchStatus(item.deviceId, item.transferId, 'transferring');
+  }
+
+  Future<void> cancelAllActive() async {
+    final batches = <String, TransferItemState>{};
+    for (final key in state.currentBatchKeys) {
+      final item = state.transfers[key];
+      if (item != null && item.deviceId.isNotEmpty) {
+        batches['${item.deviceId}::${item.transferId}'] = item;
+      }
+    }
+    for (final item in batches.values) {
+      await _ref
+          .read(multiDeviceConnectionProvider.notifier)
+          .cancelTransfer(item.deviceId, item.transferId);
+    }
+  }
+
+  void retryTransfer(String itemKey) {
+    final item = state.transfers[itemKey];
+    if (item == null) return;
+    final updated = Map<String, TransferItemState>.from(state.transfers)
+      ..removeWhere((_, value) =>
+          value.deviceId == item.deviceId &&
+          value.transferId == item.transferId);
+    final keys =
+        state.currentBatchKeys.where((key) => updated.containsKey(key)).toSet();
+    state = state.copyWith(transfers: updated, currentBatchKeys: keys);
+  }
+
+  void _setBatchStatus(String deviceId, String transferId, String status) {
+    final updated = Map<String, TransferItemState>.from(state.transfers);
+    for (final entry in updated.entries.toList()) {
+      if (entry.value.deviceId == deviceId &&
+          entry.value.transferId == transferId) {
+        updated[entry.key] = entry.value.copyWith(status: status);
+      }
+    }
+    state = state.copyWith(transfers: updated);
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Provider
 // ---------------------------------------------------------------------------
 
 final transferScreenProvider =
-    StateNotifierProvider<TransferScreenNotifier, TransferScreenState>((ref) {
-  return TransferScreenNotifier(ref);
+    StateNotifierProvider<MultiTransferScreenNotifier, TransferScreenState>(
+        (ref) {
+  return MultiTransferScreenNotifier(ref);
 });
 
 // ---------------------------------------------------------------------------
@@ -370,12 +625,15 @@ class TransferScreen extends ConsumerStatefulWidget {
 class _TransferScreenState extends ConsumerState<TransferScreen> {
   bool _argsChecked = false;
   bool _archivedOnLeave = false;
+  late final MultiTransferScreenNotifier _notifier;
 
   @override
   void initState() {
     super.initState();
+    _notifier = ref.read(transferScreenProvider.notifier);
     WidgetsBinding.instance.addPostFrameCallback((_) {
-      ref.read(transferScreenProvider.notifier).init();
+      if (!mounted) return;
+      _notifier.init();
     });
   }
 
@@ -388,8 +646,15 @@ class _TransferScreenState extends ConsumerState<TransferScreen> {
       if (args is Map<String, dynamic> && args.containsKey('filePaths')) {
         final paths =
             (args['filePaths'] as List<dynamic>).cast<String>().toList();
-        if (paths.isNotEmpty) {
-          ref.read(transferScreenProvider.notifier).setPendingFiles(paths);
+        final deviceIds =
+            (args['targetDeviceIds'] as List<dynamic>? ?? const [])
+                .map((value) => value.toString())
+                .toList();
+        if (paths.isNotEmpty && deviceIds.isNotEmpty) {
+          WidgetsBinding.instance.addPostFrameCallback((_) {
+            if (!mounted) return;
+            _notifier.setPendingFiles(paths, deviceIds);
+          });
         }
       }
     }
@@ -401,7 +666,9 @@ class _TransferScreenState extends ConsumerState<TransferScreen> {
     // rather than re-appearing as "current" on a fresh navigation.
     if (!_archivedOnLeave) {
       _archivedOnLeave = true;
-      ref.read(transferScreenProvider.notifier).archiveCurrentToHistory();
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        _notifier.archiveCurrentToHistory();
+      });
     }
     super.dispose();
   }
@@ -438,7 +705,6 @@ class _TransferScreenState extends ConsumerState<TransferScreen> {
             ...currentEntries.map(
               (e) => _buildTransferCard(theme, notifier, e.key, e.value),
             ),
-
           if (state.history.isNotEmpty) ...[
             const SizedBox(height: 8),
             _buildHistorySection(theme, historyBatches, state.transfers),
@@ -483,8 +749,8 @@ class _TransferScreenState extends ConsumerState<TransferScreen> {
     return ExpansionTile(
       title: Text(
         '历史 (${batches.length})',
-        style: theme.textTheme.titleSmall
-            ?.copyWith(fontWeight: FontWeight.w600),
+        style:
+            theme.textTheme.titleSmall?.copyWith(fontWeight: FontWeight.w600),
       ),
       initiallyExpanded: false,
       tilePadding: const EdgeInsets.symmetric(horizontal: 16),
@@ -590,7 +856,7 @@ class _TransferScreenState extends ConsumerState<TransferScreen> {
 
   Widget _buildTransferCard(
     ThemeData theme,
-    TransferScreenNotifier notifier,
+    MultiTransferScreenNotifier notifier,
     String key,
     TransferItemState item,
   ) {
@@ -608,11 +874,21 @@ class _TransferScreenState extends ConsumerState<TransferScreen> {
             Row(
               children: [
                 Expanded(
-                  child: Text(
-                    item.fileName,
-                    style: theme.textTheme.titleSmall,
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        item.fileName,
+                        style: theme.textTheme.titleSmall,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                      ),
+                      Text(
+                        '发送到 ${item.peerName}',
+                        style: theme.textTheme.bodySmall
+                            ?.copyWith(color: Colors.grey),
+                      ),
+                    ],
                   ),
                 ),
                 const SizedBox(width: 8),
@@ -692,8 +968,7 @@ class _TransferScreenState extends ConsumerState<TransferScreen> {
                       onPressed: () => notifier.cancelTransfer(key),
                       icon: const Icon(Icons.cancel, size: 18),
                       label: const Text('Cancel'),
-                      style:
-                          TextButton.styleFrom(foregroundColor: Colors.red),
+                      style: TextButton.styleFrom(foregroundColor: Colors.red),
                     ),
                   ],
                 ),
@@ -717,8 +992,7 @@ class _TransferScreenState extends ConsumerState<TransferScreen> {
                       ),
                     TextButton.icon(
                       onPressed: () {
-                        final transferId = key.split('::').first;
-                        notifier.retryTransfer(transferId);
+                        notifier.retryTransfer(key);
                         ScaffoldMessenger.of(context).showSnackBar(
                           const SnackBar(
                             content: Text(

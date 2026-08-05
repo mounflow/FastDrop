@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { onMounted, onUnmounted, ref } from 'vue'
+import { computed, onMounted, onUnmounted, ref } from 'vue'
 import QRCode from 'qrcode'
 import {
   acceptPair,
@@ -7,10 +7,13 @@ import {
   downloadFileBlob,
   fetchQR,
   getSettings,
+  getServerInfo,
   getTransfer,
   listPairRequests,
   listTransfers,
+  pollPairStatus,
   rejectPair,
+  requestDiscoverPair,
   restoreSession,
   revokeSession,
   setSession,
@@ -19,7 +22,12 @@ import {
   uploadChunk,
 } from './api'
 import { useWebSocket } from './composables/useWebSocket'
-import type { CreateTransferResult, QRPayload, TransferRow } from './types'
+import {
+  usePeerPool,
+  type PeerIncomingOffer,
+  type PeerTransferProgress,
+} from './composables/usePeerPool'
+import type { CreateTransferResult, PairAccepted, QRPayload, TransferRow } from './types'
 import type { WSStatus } from './composables/useWebSocket'
 
 // ========== Typed WS message ==========
@@ -30,6 +38,38 @@ interface WSEnvelope {
   timestamp?: number
   payload?: Record<string, unknown>
 }
+
+const peerPool = usePeerPool({
+  onMessage: (peerId, message) => handleWSMessage(message, peerId),
+  onProgress: (progress) => handlePoolProgress(progress),
+  onPeerChanged: () => {
+    isPaired.value = peerPool.peers.value.length > 0
+    const connected = peerPool.peers.value.filter(
+      (peer) => peer.status === 'connected',
+    )
+    phoneConnected.value = connected.length > 0
+    phoneName.value = connected.length === 1
+      ? connected[0].name
+      : `${connected.length} 台设备`
+    wsStatus.value = connected.length > 0
+      ? 'connected'
+      : peerPool.peers.value.some((peer) => peer.status === 'reconnecting')
+        ? 'reconnecting'
+        : peerPool.peers.value.some((peer) => peer.status === 'connecting')
+          ? 'connecting'
+          : 'disconnected'
+  },
+  onAuthFailed: (peerId) => {
+    incomingOffers.value = incomingOffers.value.filter(
+      (offer) => offer.peerId !== peerId,
+    )
+  },
+})
+const peerViews = peerPool.peers
+const selectedRecipientIds = peerPool.selectedIds
+const connectedPeerCount = computed(
+  () => peerViews.value.filter((peer) => peer.status === 'connected').length,
+)
 
 // ========== QR code / server info ==========
 const qrDataUrl = ref<string>('')
@@ -43,7 +83,6 @@ let qrTimer: ReturnType<typeof setInterval> | null = null
 let countdownTimer: ReturnType<typeof setInterval> | null = null
 
 async function refreshQR() {
-  if (isPaired.value) return
   qrLoading.value = true
   qrError.value = null
   try {
@@ -62,7 +101,7 @@ async function refreshQR() {
 
 function tickCountdown() {
   if (countdown.value > 0) countdown.value--
-  if (countdown.value === 0 && !isPaired.value) refreshQR()
+  if (countdown.value === 0) refreshQR()
 }
 
 // ========== Drag-and-drop + file picker upload ==========
@@ -100,17 +139,17 @@ async function handleFilePickerChange(e: Event) {
 }
 
 async function sendFiles(files: File[]) {
-  if (!isPaired.value || !wsClient) {
-    uploadStatus.value = 'Pair a phone first before sending files.'
+  if (selectedRecipientIds.value.length === 0) {
+    uploadStatus.value = '请至少选择一个在线接收设备。'
     return
   }
   uploadStatus.value = `Preparing ${files.length} file(s)...`
-  for (const f of files) {
-    try {
-      await stageAndOfferFile(f)
-    } catch (e) {
-      uploadStatus.value = `Failed: ${(e as Error).message}`
-    }
+  try {
+    await peerPool.sendFiles(files, selectedRecipientIds.value)
+    uploadStatus.value = `已向 ${selectedRecipientIds.value.length} 台设备发起发送`
+    await loadHistory()
+  } catch (e) {
+    uploadStatus.value = `Failed: ${(e as Error).message}`
   }
 }
 
@@ -175,6 +214,7 @@ async function stageAndOfferFile(file: File) {
 // ========== Pair request polling ==========
 interface PendingDevice {
   requestId: string
+  deviceId: string
   deviceName: string
   platform: string
 }
@@ -184,8 +224,76 @@ const isPaired = ref(false)
 
 let pairPollTimer: ReturnType<typeof setInterval> | null = null
 
+const remoteAddress = ref('')
+const remotePairStatus = ref('')
+const remotePairing = ref(false)
+
+async function connectRemotePeer() {
+  if (remotePairing.value) return
+  const input = remoteAddress.value.trim()
+  if (!input) return
+  remotePairing.value = true
+  remotePairStatus.value = '正在请求对方确认…'
+  try {
+    const baseUrl = normalizePeerUrl(input)
+    const remote = await getServerInfo(baseUrl)
+    const localClientId = getLocalClientId()
+    const request = await requestDiscoverPair(baseUrl, {
+      deviceId: localClientId,
+      deviceName: serverName.value || location.hostname,
+      platform: 'windows',
+      appVersion: '0.1.0',
+    })
+    const deadline = Date.now() + 30_000
+    while (Date.now() < deadline) {
+      await new Promise((resolve) => setTimeout(resolve, 1_000))
+      const result = await pollPairStatus(request.requestId, baseUrl)
+      if (result.status === 'accepted' && 'session' in result) {
+        const accepted = result as PairAccepted
+        peerPool.addPeer({
+          id: `${remote.deviceId}@${baseUrl}`,
+          name: accepted.server.deviceName || remote.name,
+          platform: accepted.server.platform || remote.platform,
+          baseUrl,
+          sessionId: accepted.session.sessionId,
+          accessToken: accepted.session.accessToken,
+          websocketUrl: accepted.session.websocketUrl,
+          role: 'remote-server',
+        })
+        remotePairStatus.value = `已连接 ${accepted.server.deviceName}`
+        remoteAddress.value = ''
+        isPaired.value = true
+        return
+      }
+      if (result.status === 'rejected' || result.status === 'expired') {
+        throw new Error(result.status === 'rejected' ? '对方已拒绝' : '配对请求已过期')
+      }
+    }
+    throw new Error('等待确认超时')
+  } catch (error) {
+    remotePairStatus.value = `连接失败：${(error as Error).message}`
+  } finally {
+    remotePairing.value = false
+  }
+}
+
+function normalizePeerUrl(input: string): string {
+  const withScheme = /^https?:\/\//i.test(input) ? input : `http://${input}`
+  const url = new URL(withScheme)
+  if (!url.port) url.port = '9527'
+  return url.origin
+}
+
+function getLocalClientId(): string {
+  const key = 'fastdrop_pc_client_id'
+  const existing = localStorage.getItem(key)
+  if (existing) return existing
+  const id = crypto.randomUUID()
+  localStorage.setItem(key, id)
+  return id
+}
+
 async function pollPairRequests() {
-  if (isPaired.value) return
   try {
     const res = await listPairRequests()
     const waiting = (res.requests || []).filter(
@@ -203,16 +311,22 @@ async function pollPairRequests() {
 async function handleAccept(requestId: string) {
   try {
     const res = await acceptPair(requestId)
-    setSession({
+    const request = pendingRequests.value.find((item) => item.requestId === requestId)
+    peerPool.addPeer({
+      id: `${request?.deviceId ?? requestId}::${res.session.sessionId}`,
+      name: request?.deviceName ?? 'Device',
+      platform: request?.platform ?? 'unknown',
+      baseUrl: location.origin,
       sessionId: res.session.sessionId,
       accessToken: res.session.accessToken,
+      websocketUrl: res.session.websocketUrl,
+      role: 'local-session',
     })
-    showPairDialog.value = false
-    pendingRequests.value = []
+    pendingRequests.value = pendingRequests.value.filter(
+      (item) => item.requestId !== requestId,
+    )
+    showPairDialog.value = pendingRequests.value.length > 0
     isPaired.value = true
-    if (res.session.websocketUrl) {
-      connectWS(res.session.sessionId, res.session.accessToken, res.session.websocketUrl)
-    }
   } catch (e) {
     console.error('Accept failed:', e)
   }
@@ -233,21 +347,13 @@ async function handleReject(requestId: string) {
 /// into the QR pairing view. No local state reset needed here; the
 /// revoked handler does it all.
 async function handleReconnect() {
-  if (!confirm('确定要作废当前配对，回到扫码页吗？')) return
-  try {
-    await revokeSession()
-  } catch (e) {
-    console.error('Revoke failed:', e)
-    // Fall back to manual reset so the user isn't stuck.
-    setSession(null)
-    isPaired.value = false
-    phoneConnected.value = false
-    phoneName.value = ''
-    wsClient?.close()
-    wsClient = null
-    wsStatus.value = 'disconnected'
-    refreshQR()
-  }
+  if (!confirm('确定要移除全部已配对设备吗？')) return
+  for (const peer of [...peerViews.value]) peerPool.removePeer(peer.id)
+  setSession(null)
+  isPaired.value = false
+  activeTransfers.value = []
+  incomingOffers.value = []
+  refreshQR()
 }
 
 // ========== WebSocket ==========
@@ -256,7 +362,9 @@ const phoneConnected = ref(false)
 const phoneName = ref('')
 let wsClient: ReturnType<typeof useWebSocket> | null = null
 
-interface IncomingOffer {
+interface IncomingOffer extends PeerIncomingOffer {
+  peerId: string
+  offerId: string
   transferId: string
   deviceName: string
   files: Array<{ fileId: string; name: string; size: number; mimeType: string }>
@@ -264,21 +372,50 @@ interface IncomingOffer {
 const incomingOffers = ref<IncomingOffer[]>([])
 
 interface ActiveTransfer {
+  peerId: string
+  peerName: string
   transferId: string
   fileId: string
   filename: string
   totalBytes: number
   transferredBytes: number
   speedBps: number
-  status: 'transferring' | 'paused' | 'verifying' | 'completed' | 'failed'
+  status: 'waiting_accept' | 'preparing' | 'transferring' | 'paused' | 'verifying' | 'completed' | 'failed'
   error?: string
 }
 const activeTransfers = ref<ActiveTransfer[]>([])
 
+function handlePoolProgress(progress: PeerTransferProgress) {
+  const existing = activeTransfers.value.find(
+    (item) => item.peerId === progress.peerId
+      && item.transferId === progress.transferId
+      && item.fileId === progress.fileId,
+  )
+  if (existing) {
+    existing.transferredBytes = progress.transferredBytes
+    existing.status = progress.status as ActiveTransfer['status']
+    existing.error = progress.error
+  } else {
+    activeTransfers.value.push({
+      peerId: progress.peerId,
+      peerName: progress.peerName,
+      transferId: progress.transferId,
+      fileId: progress.fileId,
+      filename: progress.fileName,
+      totalBytes: progress.totalBytes,
+      transferredBytes: progress.transferredBytes,
+      speedBps: 0,
+      status: progress.status as ActiveTransfer['status'],
+      error: progress.error,
+    })
+  }
+}
+
 function pauseTransfer(transferId: string) {
   const t = activeTransfers.value.find((t) => t.transferId === transferId)
   if (t) t.status = 'paused'
-  wsClient?.send({
+  if (!t) return
+  peerPool.send(t.peerId, {
     version: 1,
     type: 'transfer.pause',
     messageId: crypto.randomUUID(),
@@ -290,7 +427,8 @@ function pauseTransfer(transferId: string) {
 function resumeTransfer(transferId: string) {
   const t = activeTransfers.value.find((t) => t.transferId === transferId)
   if (t) t.status = 'transferring'
-  wsClient?.send({
+  if (!t) return
+  peerPool.send(t.peerId, {
     version: 1,
     type: 'transfer.resume',
     messageId: crypto.randomUUID(),
@@ -341,16 +479,24 @@ function connectWS(sessionId: string, accessToken: string, wsUrl: string) {
   wsStatus.value = 'connecting'
 }
 
-function handleWSMessage(raw: unknown) {
+function handleWSMessage(raw: unknown, peerId = '') {
   const msg = raw as WSEnvelope
   if (!msg?.type) return
   const p = (msg.payload ?? {}) as Record<string, unknown>
 
   switch (msg.type) {
     case 'file.offer': {
+      // The local Go hub broadcasts session events to both the remote peer
+      // and this browser. Ignore the browser's own outbound announcement.
+      if (activeTransfers.value.some(
+        (transfer) => transfer.peerId === peerId
+          && transfer.transferId === p.transferId,
+      )) break
       incomingOffers.value.push({
+        peerId,
         transferId: p.transferId as string,
-        deviceName: (p.deviceName as string) || 'Phone',
+        offerId: (p.offerId as string) || (p.transferId as string),
+        deviceName: (p.deviceName as string) || peerNameFor(peerId),
         files: (p.files as IncomingOffer['files']) || [],
       })
       break
@@ -360,6 +506,24 @@ function handleWSMessage(raw: unknown) {
         (t) => t.transferId === p.transferId,
       )
       if (t) t.status = 'transferring'
+      break
+    }
+    case 'file.offer.accept':
+    case 'transfer.accepted': {
+      const t = activeTransfers.value.find(
+        (t) => t.peerId === peerId && t.transferId === p.transferId,
+      )
+      if (t) t.status = 'transferring'
+      break
+    }
+    case 'file.offer.reject':
+    case 'transfer.rejected': {
+      for (const t of activeTransfers.value.filter(
+        (t) => t.peerId === peerId && t.transferId === p.transferId,
+      )) {
+        t.status = 'failed'
+        t.error = 'Recipient rejected the transfer'
+      }
       break
     }
     case 'transfer.progress': {
@@ -409,6 +573,8 @@ function handleWSMessage(raw: unknown) {
           incomingOffers.value.splice(offerIdx, 1)
           for (const f of offer.files) {
             activeTransfers.value.push({
+              peerId: offer.peerId,
+              peerName: peerNameFor(offer.peerId),
               transferId: offer.transferId,
               fileId: f.fileId,
               filename: f.name,
@@ -478,16 +644,13 @@ function handleWSMessage(raw: unknown) {
       break
     }
     case 'session.revoked': {
-      // Session was revoked — reset all state.
-      setSession(null) // clear sessionStorage too
-      isPaired.value = false
-      phoneConnected.value = false
-      phoneName.value = ''
-      activeTransfers.value = []
-      incomingOffers.value = []
-      wsClient?.close()
-      wsClient = null
-      wsStatus.value = 'disconnected'
+      peerPool.removePeer(peerId)
+      activeTransfers.value = activeTransfers.value.filter(
+        (transfer) => transfer.peerId !== peerId,
+      )
+      incomingOffers.value = incomingOffers.value.filter(
+        (offer) => offer.peerId !== peerId,
+      )
       refreshQR()
       break
     }
@@ -500,6 +663,8 @@ async function acceptOffer(offer: IncomingOffer) {
   )
   for (const f of offer.files) {
     activeTransfers.value.push({
+      peerId: offer.peerId,
+      peerName: peerNameFor(offer.peerId),
       transferId: offer.transferId,
       fileId: f.fileId,
       filename: f.name,
@@ -509,18 +674,13 @@ async function acceptOffer(offer: IncomingOffer) {
       status: 'transferring',
     })
   }
-  wsClient?.send({
-    version: 1,
-    type: 'file.offer.accept',
-    messageId: crypto.randomUUID(),
-    timestamp: Date.now(),
-    payload: { offerId: offer.transferId },
-  })
+  await peerPool.acceptOffer(offer)
   // The transfer may have already completed before the user clicked
   // Accept (small files upload in <200 ms). Poll the server once to
   // sync the real status so the UI doesn't stick on "transferring".
   try {
-    const row = await getTransfer(offer.transferId)
+    const peer = peerViews.value.find((item) => item.id === offer.peerId)
+    const row = await getTransfer(offer.transferId, peer)
     if (row.status === 'completed' || row.status === 'verifying') {
       for (const t of activeTransfers.value.filter(
         (t) => t.transferId === offer.transferId,
@@ -539,20 +699,16 @@ function rejectOffer(offer: IncomingOffer) {
   incomingOffers.value = incomingOffers.value.filter(
     (o) => o.transferId !== offer.transferId,
   )
-  wsClient?.send({
-    version: 1,
-    type: 'file.offer.reject',
-    messageId: crypto.randomUUID(),
-    timestamp: Date.now(),
-    payload: { offerId: offer.transferId, reason: 'user_rejected' },
-  })
+  peerPool.rejectOffer(offer)
 }
 
 function cancelTransfer(transferId: string) {
+  const transfer = activeTransfers.value.find((item) => item.transferId === transferId)
   activeTransfers.value = activeTransfers.value.filter(
     (t) => t.transferId !== transferId,
   )
-  wsClient?.send({
+  if (!transfer) return
+  peerPool.send(transfer.peerId, {
     version: 1,
     type: 'transfer.cancel',
     messageId: crypto.randomUUID(),
@@ -562,13 +718,13 @@ function cancelTransfer(transferId: string) {
 }
 
 // ========== Transfer history ==========
-const transfers = ref<TransferRow[]>([])
+const transfers = ref<Array<TransferRow & { peerId?: string; peerName?: string }>>([])
 const historyLoading = ref(false)
 
 async function loadHistory() {
   historyLoading.value = true
   try {
-    transfers.value = await listTransfers()
+    transfers.value = await peerPool.loadHistory()
   } catch {
     transfers.value = []
   } finally {
@@ -582,6 +738,10 @@ function formatSize(bytes: number): string {
   if (bytes >= 1_000_000) return `${(bytes / 1_000_000).toFixed(1)} MB`
   if (bytes >= 1_000) return `${(bytes / 1_000).toFixed(0)} KB`
   return `${bytes} B`
+}
+
+function peerNameFor(peerId: string): string {
+  return peerViews.value.find((peer) => peer.id === peerId)?.name || 'Device'
 }
 
 function formatSpeed(bps: number): string {
@@ -598,6 +758,7 @@ function progressPercent(t: ActiveTransfer): number {
 const showSettings = ref(false)
 const settingsDownloadDir = ref('')
 const settingsMdnsEnabled = ref(false)
+const settingsRequirePairConfirmation = ref(false)
 const settingsSaving = ref(false)
 const settingsError = ref<string | null>(null)
 
@@ -606,6 +767,7 @@ async function loadSettings() {
     const s = await getSettings()
     settingsDownloadDir.value = s.downloadDirectory
     settingsMdnsEnabled.value = !!s.mdnsEnabled
+    settingsRequirePairConfirmation.value = !!s.requirePairConfirmation
   } catch { /* ignore */ }
 }
 
@@ -643,12 +805,27 @@ async function toggleMdns() {
   }
 }
 
+async function togglePairConfirmation() {
+  const next = !settingsRequirePairConfirmation.value
+  settingsSaving.value = true
+  settingsError.value = null
+  try {
+    const s = await updateSettings({ requirePairConfirmation: next })
+    settingsRequirePairConfirmation.value = s.requirePairConfirmation
+  } catch (e) {
+    settingsError.value = (e as Error).message || 'Pair confirmation toggle failed'
+  } finally {
+    settingsSaving.value = false
+  }
+}
+
 // ========== Lifecycle ==========
 function cleanup() {
   if (qrTimer) clearInterval(qrTimer)
   if (countdownTimer) clearInterval(countdownTimer)
   if (pairPollTimer) clearInterval(pairPollTimer)
   wsClient?.close()
+  peerPool.close()
 }
 
 /// Build the WS URL from the current page origin.
@@ -675,13 +852,12 @@ async function tryRestoreSession(): Promise<boolean> {
 }
 
 onMounted(async () => {
-  const restored = await tryRestoreSession()
-  if (!restored) {
-    await refreshQR()
-    qrTimer = setInterval(refreshQR, 50_000)
-    countdownTimer = setInterval(tickCountdown, 1000)
-    pairPollTimer = setInterval(pollPairRequests, 2000)
-  }
+  peerPool.restore()
+  isPaired.value = peerViews.value.length > 0
+  await refreshQR()
+  qrTimer = setInterval(refreshQR, 50_000)
+  countdownTimer = setInterval(tickCountdown, 1000)
+  pairPollTimer = setInterval(pollPairRequests, 2000)
   await loadHistory()
   await loadSettings()
 })
@@ -715,10 +891,10 @@ onUnmounted(cleanup)
         v-if="isPaired"
         class="ws-indicator phone"
         :class="phoneConnected ? 'connected' : 'disconnected'"
-        :title="phoneConnected ? `${phoneName} 已连接` : '手机未连接'"
+        :title="phoneConnected ? `${phoneName} 已连接` : '暂无在线设备'"
       >
         <span class="ws-dot"></span>
-        <span class="ws-label">{{ phoneConnected ? (phoneName || '手机') : '手机离线' }}</span>
+        <span class="ws-label">{{ phoneConnected ? (phoneName || '设备') : '设备离线' }}</span>
       </div>
     </header>
 
@@ -762,6 +938,27 @@ onUnmounted(cleanup)
           </label>
         </label>
       </div>
+
+      <div class="settings-field">
+        <label class="settings-toggle-row">
+          <span>
+            <strong>配对时需要确认</strong>
+            <span class="settings-hint" style="display:block; margin-top:2px;">
+              默认关闭：点击配对后直接连接。开启后需要在本机接受配对请求。
+            </span>
+          </span>
+          <label class="switch">
+            <input
+              type="checkbox"
+              :checked="settingsRequirePairConfirmation"
+              :disabled="settingsSaving"
+              @change="togglePairConfirmation"
+            />
+            <span class="slider"></span>
+          </label>
+        </label>
+        <p class="settings-hint">关闭后，同一局域网内的其他 FastDrop 设备可直接完成配对；文件接收确认不受影响。</p>
+      </div>
     </section>
 
     <!-- Pair confirmation dialog -->
@@ -792,7 +989,7 @@ onUnmounted(cleanup)
     </Teleport>
 
     <!-- QR code -->
-    <section v-if="!isPaired" class="qr">
+    <section class="qr">
       <div v-if="qrLoading && !qrDataUrl" class="qr-loading">Loading QR...</div>
       <div v-else-if="qrError" class="qr-error">
         <p>{{ qrError }}</p>
@@ -803,6 +1000,37 @@ onUnmounted(cleanup)
         <p v-if="countdown > 0">QR refreshes in {{ countdown }}s</p>
         <p class="address">{{ qrPayload.host }}:{{ qrPayload.port }}</p>
       </template>
+    </section>
+
+    <section class="peer-panel">
+      <h3>设备连接池（{{ connectedPeerCount }} 在线）</h3>
+      <div class="remote-pair-row">
+        <input
+          v-model="remoteAddress"
+          class="settings-input"
+          placeholder="输入对方 IP，例如 192.168.1.23:9527"
+          @keyup.enter="connectRemotePeer"
+        />
+        <button class="btn btn-accept" :disabled="remotePairing" @click="connectRemotePeer">
+          {{ remotePairing ? '等待确认…' : '连接设备' }}
+        </button>
+      </div>
+      <p v-if="remotePairStatus" class="status">{{ remotePairStatus }}</p>
+      <div v-if="peerViews.length" class="peer-list">
+        <label v-for="peer in peerViews" :key="peer.id" class="peer-choice">
+          <input
+            v-model="selectedRecipientIds"
+            type="checkbox"
+            :value="peer.id"
+            :disabled="peer.status !== 'connected'"
+          />
+          <span class="peer-dot" :class="peer.status"></span>
+          <span>{{ peer.name }}</span>
+          <small>{{ peer.platform }} · {{ peer.status }}</small>
+          <button type="button" class="peer-remove" @click.prevent="peerPool.removePeer(peer.id)">×</button>
+        </label>
+      </div>
+      <p v-else class="settings-hint">扫描二维码，或输入另一台电脑/手机的地址进行配对。</p>
     </section>
 
     <!-- Drop zone + file picker -->
@@ -833,7 +1061,7 @@ onUnmounted(cleanup)
       <h3>Incoming Files</h3>
       <div
         v-for="offer in incomingOffers"
-        :key="offer.transferId"
+        :key="`${offer.peerId}:${offer.transferId}`"
         class="offer-card"
       >
         <div class="offer-header">
@@ -857,11 +1085,11 @@ onUnmounted(cleanup)
       <h3>Active Transfers</h3>
       <div
         v-for="t in activeTransfers"
-        :key="t.transferId"
+        :key="`${t.peerId}:${t.transferId}:${t.fileId}`"
         class="transfer-item"
       >
         <div class="transfer-info">
-          <span class="transfer-name">{{ t.filename }}</span>
+          <span class="transfer-name">{{ t.filename }} → {{ t.peerName }}</span>
           <span class="transfer-status">{{ t.status }}</span>
         </div>
         <div class="progress-bar">
@@ -1209,6 +1437,38 @@ h1 { margin: 0; font-size: 28px; }
   color: #4a90e2;
 }
 .status { color: #4a90e2; margin-top: 8px; font-size: 14px; }
+
+.peer-panel {
+  margin: 20px 0;
+  padding: 16px;
+  border: 1px solid #e5e7eb;
+  border-radius: 12px;
+  background: #fff;
+}
+.peer-panel h3 { margin: 0 0 12px; font-size: 16px; }
+.remote-pair-row { display: flex; gap: 8px; }
+.remote-pair-row .settings-input { flex: 1; }
+.peer-list { display: grid; gap: 8px; margin-top: 12px; }
+.peer-choice {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 9px 10px;
+  border-radius: 8px;
+  background: #f8fafc;
+  cursor: pointer;
+}
+.peer-choice small { color: #64748b; margin-left: auto; }
+.peer-dot { width: 8px; height: 8px; border-radius: 50%; background: #94a3b8; }
+.peer-dot.connected { background: #22c55e; }
+.peer-dot.connecting, .peer-dot.reconnecting { background: #f59e0b; }
+.peer-remove {
+  border: 0;
+  background: transparent;
+  color: #94a3b8;
+  font-size: 18px;
+  cursor: pointer;
+}
 
 /* ---- Offers ---- */
 .offers {

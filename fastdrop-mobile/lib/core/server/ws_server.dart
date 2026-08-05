@@ -42,8 +42,13 @@ class WsServer {
 
   /// Wire up progress events from the transfer receiver to WS broadcast.
   void wireTransferProgress() {
-    _transferReceiver?.onProgress = (event) {
-      broadcast('transfer_progress', event.toJson());
+    final receiver = _transferReceiver;
+    if (receiver == null) return;
+    receiver.onProgress = (event) {
+      final sessionId = receiver.getTransfer(event.transferId)?.sessionId;
+      if (sessionId != null) {
+        sendToSession(sessionId, 'transfer.progress', event.toJson());
+      }
     };
   }
 
@@ -92,7 +97,10 @@ class WsServer {
     try {
       msg = jsonDecode(data as String) as Map<String, dynamic>;
     } catch (_) {
-      _send(conn, {'type': 'error', 'payload': {'message': 'Invalid JSON'}});
+      _send(conn, {
+        'type': 'error',
+        'payload': {'message': 'Invalid JSON'}
+      });
       return;
     }
 
@@ -113,21 +121,21 @@ class WsServer {
 
     // Authenticated message handling.
     switch (type) {
-      case 'ping':
+      case 'heartbeat.ping':
         conn.missedPongs = 0;
-        _send(conn, {'type': 'pong'});
+        _send(conn, {'type': 'heartbeat.pong'});
         break;
 
-      case 'pong':
+      case 'heartbeat.pong':
         conn.missedPongs = 0;
         break;
 
-      case 'transfer_cancel':
+      case 'transfer.cancel':
         final payload = msg['payload'] as Map<String, dynamic>?;
         final transferId = payload?['transferId'] as String?;
         if (transferId != null) {
           _transferReceiver?.cancelTransfer(transferId);
-          broadcast('transfer_cancelled', {'transferId': transferId});
+          broadcast('transfer.cancelled', {'transferId': transferId});
         }
         break;
 
@@ -147,16 +155,16 @@ class WsServer {
 
     if (sessionId == null || accessToken == null) {
       _send(conn, {
-        'type': 'auth_result',
-        'payload': {'success': false, 'message': 'Missing sessionId or accessToken'},
+        'type': 'auth.result',
+        'payload': {'ok': false, 'message': 'Missing sessionId or accessToken'},
       });
       return;
     }
 
     if (!_sessionManager.validate(sessionId, accessToken)) {
       _send(conn, {
-        'type': 'auth_result',
-        'payload': {'success': false, 'message': 'Invalid session'},
+        'type': 'auth.result',
+        'payload': {'ok': false, 'message': 'Invalid session'},
       });
       return;
     }
@@ -170,20 +178,25 @@ class WsServer {
     _connections.remove(oldId);
 
     // Close any existing connection for this session.
-    _connections[sessionId]?.channel.sink.close(4002, 'Replaced by new connection');
+    _connections[sessionId]
+        ?.channel
+        .sink
+        .close(4002, 'Replaced by new connection');
 
-    final newConn = _WsConnection(conn.channel, sessionId)..authenticated = true;
+    final newConn = _WsConnection(conn.channel, sessionId)
+      ..authenticated = true;
     _connections[sessionId] = newConn;
 
     // Start heartbeat for this connection.
     _startHeartbeat(newConn);
 
     _send(newConn, {
-      'type': 'auth_result',
-      'payload': {'success': true},
+      'type': 'auth.result',
+      'payload': {'ok': true},
     });
 
-    debugPrint('[WsServer] Session authenticated: ${sessionId.substring(0, 8)}...');
+    debugPrint(
+        '[WsServer] Session authenticated: ${sessionId.substring(0, 8)}...');
   }
 
   void _startHeartbeat(_WsConnection conn) {
@@ -195,7 +208,7 @@ class WsServer {
         _handleDisconnect(conn);
         return;
       }
-      _send(conn, {'type': 'ping'});
+      _send(conn, {'type': 'heartbeat.ping'});
     });
   }
 
@@ -224,7 +237,8 @@ class WsServer {
   }
 
   /// Send a message to a specific session.
-  void sendToSession(String sessionId, String type, Map<String, dynamic> payload) {
+  void sendToSession(
+      String sessionId, String type, Map<String, dynamic> payload) {
     final conn = _connections[sessionId];
     if (conn != null && conn.authenticated) {
       _send(conn, {'type': type, 'payload': payload});
@@ -232,8 +246,11 @@ class WsServer {
   }
 
   /// Notify all connections about a transfer offer.
-  void notifyTransferOffer(String transferId, Map<String, dynamic> transferJson) {
-    broadcast('transfer_offer', {
+  void notifyTransferOffer(
+      String transferId, Map<String, dynamic> transferJson) {
+    final sessionId = _transferReceiver?.getTransfer(transferId)?.sessionId;
+    if (sessionId == null) return;
+    sendToSession(sessionId, 'file.offer', {
       'transferId': transferId,
       ...transferJson,
     });
@@ -241,17 +258,23 @@ class WsServer {
 
   /// Notify about transfer acceptance/rejection.
   void notifyTransferResolution(String transferId, String status) {
-    broadcast('transfer_$status', {'transferId': transferId});
+    final sessionId = _transferReceiver?.getTransfer(transferId)?.sessionId;
+    if (sessionId == null) return;
+    sendToSession(sessionId, 'transfer.$status', {'transferId': transferId});
   }
 
   /// Notify about transfer completion.
   void notifyTransferCompleted(String transferId) {
-    broadcast('transfer_completed', {'transferId': transferId});
+    final sessionId = _transferReceiver?.getTransfer(transferId)?.sessionId;
+    if (sessionId == null) return;
+    sendToSession(sessionId, 'transfer.completed', {'transferId': transferId});
   }
 
   /// Notify about transfer failure.
   void notifyTransferFailed(String transferId, String reason) {
-    broadcast('transfer_failed', {
+    final sessionId = _transferReceiver?.getTransfer(transferId)?.sessionId;
+    if (sessionId == null) return;
+    sendToSession(sessionId, 'transfer.failed', {
       'transferId': transferId,
       'reason': reason,
     });

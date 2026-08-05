@@ -57,4 +57,14 @@ class DeviceIdManager {
     await prefs.setString(_key, newId);
     return newId;
   }
+
+  /// A stable, privacy-friendly display name derived only from the random
+  /// FastDrop device ID. It does not expose the phone model or OS hostname.
+  static String anonymousDeviceName(String deviceId) {
+    final cleanId = deviceId.replaceAll(RegExp(r'[^A-Za-z0-9]'), '');
+    final suffix = cleanId.length <= 6 ? cleanId : cleanId.substring(0, 6);
+    return suffix.isEmpty
+        ? 'FastDrop-Mobile'
+        : 'FastDrop-${suffix.toUpperCase()}';
+  }
 }

@@ -25,7 +25,7 @@ class _HistoryScreenState extends State<HistoryScreen> {
   bool _loading = true;
   String? _error;
 
-  FastDropHttpClient? _httpClient;
+  final List<FastDropHttpClient> _httpClients = [];
   Timer? _autoRefreshTimer;
 
   @override
@@ -39,19 +39,20 @@ class _HistoryScreenState extends State<HistoryScreen> {
   }
 
   Future<void> _initClientAndLoad() async {
-    final store = SessionStore();
-    final data = await store.loadSession();
-    if (data == null) {
+    final devices = await DeviceStore().loadDevices();
+    if (devices.isEmpty) {
       setState(() {
         _loading = false;
-        _error = 'No active session. Pair with a PC first.';
+        _error = 'No paired devices.';
       });
       return;
     }
 
-    final client = FastDropHttpClient(baseUrl: data.serverBaseUrl);
-    client.setSession(data.sessionId, data.accessToken);
-    _httpClient = client;
+    for (final device in devices.where((device) => !device.isExpired)) {
+      final client = FastDropHttpClient(baseUrl: device.serverBaseUrl)
+        ..setSession(device.sessionId, device.accessToken);
+      _httpClients.add(client);
+    }
 
     await _loadTransfers();
   }
@@ -59,7 +60,9 @@ class _HistoryScreenState extends State<HistoryScreen> {
   @override
   void dispose() {
     _autoRefreshTimer?.cancel();
-    _httpClient?.dispose();
+    for (final client in _httpClients) {
+      client.dispose();
+    }
     super.dispose();
   }
 
@@ -230,9 +233,11 @@ class _HistoryScreenState extends State<HistoryScreen> {
                 const Divider(),
                 const SizedBox(height: 8),
                 _detailRow('Transfer ID', transfer.id),
-                _detailRow('Direction', transfer.direction == 'client_to_server'
-                    ? 'Phone to PC'
-                    : 'PC to Phone'),
+                _detailRow(
+                    'Direction',
+                    transfer.direction == 'client_to_server'
+                        ? 'Phone to PC'
+                        : 'PC to Phone'),
                 _detailRow('Status', transfer.status),
                 _detailRow('Files', '${transfer.totalFiles}'),
                 _detailRow('Size', _formatBytes(transfer.totalBytes)),
@@ -268,7 +273,7 @@ class _HistoryScreenState extends State<HistoryScreen> {
   // ---------------------------------------------------------------------------
 
   Future<void> _loadTransfers() async {
-    if (_httpClient == null) return;
+    if (_httpClients.isEmpty) return;
 
     setState(() {
       _loading = true;
@@ -281,25 +286,37 @@ class _HistoryScreenState extends State<HistoryScreen> {
         queryParams['status'] = _statusFilter;
       }
 
-      final response = await _httpClient!.get(
-        '/api/v1/transfers',
-        queryParams: queryParams.isNotEmpty ? queryParams : null,
-      );
+      final responses = await Future.wait(_httpClients.map((client) async {
+        try {
+          return await client.get(
+            '/api/v1/transfers',
+            queryParams: queryParams.isNotEmpty ? queryParams : null,
+          );
+        } catch (_) {
+          return null;
+        }
+      }));
 
-      final body = jsonDecode(response.body);
-      final List<dynamic> items;
-      if (body is List) {
-        items = body;
-      } else if (body is Map<String, dynamic> && body.containsKey('transfers')) {
-        items = body['transfers'] as List<dynamic>;
-      } else {
-        items = [];
+      final transfers = <TransferRow>[];
+      for (final response in responses) {
+        if (response == null) continue;
+        final body = jsonDecode(response.body);
+        final List<dynamic> items;
+        if (body is List) {
+          items = body;
+        } else if (body is Map<String, dynamic> && body['transfers'] is List) {
+          items = body['transfers'] as List<dynamic>;
+        } else {
+          items = const [];
+        }
+        transfers.addAll(items.map(
+          (item) => TransferRow.fromJson(item as Map<String, dynamic>),
+        ));
       }
+      transfers.sort((a, b) => b.createdAt.compareTo(a.createdAt));
 
       setState(() {
-        _transfers = items
-            .map((j) => TransferRow.fromJson(j as Map<String, dynamic>))
-            .toList();
+        _transfers = transfers;
         _loading = false;
       });
     } catch (e) {

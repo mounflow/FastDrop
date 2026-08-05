@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:convert';
 import 'dart:io';
 
 import 'package:bonsoir/bonsoir.dart';
@@ -6,63 +7,102 @@ import 'package:flutter/foundation.dart';
 
 import 'device_discovery.dart';
 
-/// mDNS-based device discovery. Listens for `_fastdrop._tcp` services
-/// broadcast by FastDrop PC instances on the LAN and converts them to
-/// [DiscoveredDevice] objects.
+/// Discovers FastDrop peers over mDNS and verifies every result against the
+/// peer's public health endpoint before exposing it to the UI.
 ///
-/// Spec §30.2 mandates that TXT records carry id/name/version/protocol
-/// /platform/pairing/tls. Token / sessionId / paths MUST NEVER appear
-/// in TXT records.
+/// Android NSD implementations may report a service name without resolving
+/// its host, and DNS proxy "fake-ip" modes can synthesize 198.18.0.0/15
+/// addresses for those names. Service names and TXT data are therefore hints
+/// only; the health response is the source of truth for peer identity.
 class MdnsDiscovery implements DeviceDiscovery {
   MdnsDiscovery();
 
   static const String _serviceType = '_fastdrop._tcp';
+  static const int _defaultPort = 9527;
+  static const Duration _probeTimeout = Duration(milliseconds: 800);
+  static const Duration _subnetScanCooldown = Duration(seconds: 5);
+  static const Duration _staleAfter = Duration(seconds: 60);
 
   BonsoirDiscovery? _bonsoir;
   BonsoirBroadcast? _broadcast;
   StreamSubscription<BonsoirDiscoveryEvent>? _sub;
   StreamController<List<DiscoveredDevice>>? _controller;
+  Timer? _staleTimer;
+  Timer? _revalidateTimer;
+  HttpClient? _httpClient;
 
   final Map<String, DiscoveredDevice> _byDeviceId = {};
+  final Map<String, DateTime> _lastSeen = {};
+  final Map<String, String> _serviceToDeviceId = {};
 
-  /// Whether this device is also broadcasting itself via mDNS (Phase 3).
   bool _broadcasting = false;
+  bool _subnetScanInProgress = false;
+  bool _revalidationInProgress = false;
+  DateTime? _lastSubnetScan;
+  String? _localDeviceId;
 
   @override
   bool get isRunning => _bonsoir != null;
 
+  HttpClient get _client {
+    return _httpClient ??= HttpClient()
+      ..connectionTimeout = _probeTimeout
+      ..idleTimeout = const Duration(seconds: 2);
+  }
+
   @override
   Stream<List<DiscoveredDevice>> start() {
-    if (_controller != null) {
-      // Already started — give the caller the existing stream.
-      return _controller!.stream;
-    }
+    if (_controller != null) return _controller!.stream;
+
     _controller = StreamController<List<DiscoveredDevice>>.broadcast(
       onListen: _startScan,
       onCancel: _stopScan,
     );
-    // Emit an initial empty list so subscribers can render the
-    // "scanning…" state without waiting for the first discovery.
-    _controller!.add(const []);
     return _controller!.stream;
   }
 
   void _startScan() {
+    if (_bonsoir != null) return;
+
     debugPrint('[mDNS] 开始扫描 $_serviceType ...');
+    _emit();
+    _staleTimer ??= Timer.periodic(
+      const Duration(seconds: 15),
+      (_) => _removeStaleDevices(),
+    );
+    _revalidateTimer ??= Timer.periodic(
+      const Duration(seconds: 20),
+      (_) => unawaited(_revalidateKnownDevices()),
+    );
+
     _bonsoir = BonsoirDiscovery(type: _serviceType);
     _bonsoir!.ready.then((_) async {
+      if (_bonsoir == null) return;
       debugPrint('[mDNS] ready，启动发现...');
       await _bonsoir!.start();
-      debugPrint('[mDNS] 发现已启动，eventStream=${_bonsoir!.eventStream != null}');
       _sub = _bonsoir!.eventStream?.listen(_handleEvent);
+      // Some Android/Windows combinations drop the mDNS announcement
+      // entirely, so no "found" or "resolve failed" event is emitted.
+      // Always run one verified LAN scan at startup as a deterministic
+      // fallback. Only peers whose FastDrop health identity validates are
+      // exposed to the UI.
+      _scheduleSubnetScan();
+    }).catchError((Object error) {
+      debugPrint('[mDNS] 启动失败: $error');
     });
   }
 
   Future<void> _stopScan() async {
+    _staleTimer?.cancel();
+    _staleTimer = null;
+    _revalidateTimer?.cancel();
+    _revalidateTimer = null;
     await _sub?.cancel();
     _sub = null;
     await _bonsoir?.stop();
     _bonsoir = null;
+    _httpClient?.close(force: true);
+    _httpClient = null;
   }
 
   void _handleEvent(BonsoirDiscoveryEvent event) {
@@ -72,51 +112,25 @@ class MdnsDiscovery implements DeviceDiscovery {
 
     switch (event.type) {
       case BonsoirDiscoveryEventType.discoveryServiceResolved:
-        // Only the *resolved* event carries the host IP we need to
-        // build a base URL. discoveryServiceFound fires first but
-        // the service at that point is the unresolved form.
-        if (service == null) return;
-        final device = _parseService(service);
-        if (device != null) {
-          _byDeviceId[device.deviceId] = device;
-          _emit();
-        }
-        break;
-      case BonsoirDiscoveryEventType.discoveryServiceLost:
-        if (service == null) return;
-        // TXT records may not be present on the "lost" event, so use
-        // service.name as the lookup key.
-        final staleKeys = _byDeviceId.entries
-            .where((e) =>
-                e.value.deviceName == service.name ||
-                e.value.deviceId == service.name)
-            .map((e) => e.key)
-            .toList();
-        for (final key in staleKeys) {
-          _byDeviceId.remove(key);
-        }
-        _emit();
-        break;
-      case BonsoirDiscoveryEventType.discoveryServiceResolveFailed:
-        // NSD 解析失败（MIUI 常见）——降级用 DNS 查询。
-        debugPrint('[mDNS] 解析失败: ${service?.name}，尝试 DNS 降级');
-        if (service != null) _fallbackResolve(service);
+        if (service != null) unawaited(_verifyResolvedService(service));
         break;
       case BonsoirDiscoveryEventType.discoveryServiceFound:
-        // MIUI 的 NSD 经常卡在 Found 不往 Resolved 走。
-        // 等 2 秒，如果还没 Resolved 就用 DNS 降级。
-        if (service != null) {
-          final name = service.name;
-          Future.delayed(const Duration(seconds: 2), () {
-            final alreadyResolved = _byDeviceId.values.any(
-              (d) => d.deviceName == name,
-            );
-            if (!alreadyResolved) {
-              debugPrint('[mDNS] 2s 未 Resolved，DNS 降级: $name');
-              _fallbackResolve(service);
-            }
-          });
-        }
+        if (service == null) return;
+        final serviceName = service.name;
+        Future.delayed(const Duration(seconds: 2), () {
+          if (_bonsoir == null) return;
+          if (!_serviceToDeviceId.containsKey(serviceName)) {
+            debugPrint('[mDNS] 2s 未验证，启动身份校验扫描: $serviceName');
+            _scheduleSubnetScan();
+          }
+        });
+        break;
+      case BonsoirDiscoveryEventType.discoveryServiceResolveFailed:
+        debugPrint('[mDNS] 解析失败: ${service?.name}，启动身份校验扫描');
+        _scheduleSubnetScan();
+        break;
+      case BonsoirDiscoveryEventType.discoveryServiceLost:
+        if (service != null) _removeService(service.name);
         break;
       case BonsoirDiscoveryEventType.discoveryStarted:
       case BonsoirDiscoveryEventType.discoveryStopped:
@@ -125,138 +139,218 @@ class MdnsDiscovery implements DeviceDiscovery {
     }
   }
 
-  /// MIUI NSD 解析降级：
-  /// 1. 先尝试 DNS 查询（不带 .local，路由器可能解析 NetBIOS 名）
-  /// 2. 再尝试 .local 后缀
-  /// 3. 都失败则扫描子网 9527 端口
-  void _fallbackResolve(BonsoirService service) {
-    final name = service.name.replaceAll(' ', '-');
-    // Found 事件的 port 是 0（未解析），用默认端口 9527。
-    final port = (service.port != null && service.port! > 0)
-        ? service.port!
-        : 9527;
-    debugPrint('[mDNS] 降级解析: $name (port=$port)');
-
-    // 依次尝试的 hostname 列表
-    final candidates = [name, '$name.local'];
-
-    Future<void> tryNext(int i) async {
-      if (i >= candidates.length) {
-        debugPrint('[mDNS] DNS 全部失败，尝试子网扫描');
-        _subnetScan(service.name, port);
-        return;
-      }
-      debugPrint('[mDNS] 尝试 DNS: ${candidates[i]}');
-      try {
-        final addresses = await InternetAddress.lookup(candidates[i]);
-        final ipv4 =
-            addresses.where((a) => a.type == InternetAddressType.IPv4);
-        if (ipv4.isNotEmpty) {
-          final ip = ipv4.first.address;
-          debugPrint('[mDNS] DNS 成功: $ip:$port');
-          _addFallbackDevice(service.name, ip, port);
-          return;
-        }
-      } catch (e) {
-        debugPrint('[mDNS] DNS 失败: ${candidates[i]} → $e');
-      }
-      tryNext(i + 1);
+  Future<void> _verifyResolvedService(BonsoirService service) async {
+    if (service is! ResolvedBonsoirService) {
+      _scheduleSubnetScan();
+      return;
+    }
+    final host = (service.host ?? '').trim();
+    final port = service.port > 0 ? service.port : _defaultPort;
+    if (!isUsableLANIPv4(host)) {
+      debugPrint('[mDNS] 丢弃非局域网或 Fake-IP 地址: $host');
+      _scheduleSubnetScan();
+      return;
     }
 
-    tryNext(0);
+    final device = await _probeHealth(host, port);
+    if (device == null) {
+      debugPrint('[mDNS] 身份验证失败: $host:$port');
+      _scheduleSubnetScan();
+      return;
+    }
+    _addVerifiedDevice(device, serviceName: service.name);
   }
 
-  /// 扫描本机所在子网的 9527 端口，找到 FastDrop 服务器。
-  void _subnetScan(String deviceName, int port) async {
+  void _scheduleSubnetScan() {
+    if (_subnetScanInProgress) return;
+    final now = DateTime.now();
+    if (_lastSubnetScan != null &&
+        now.difference(_lastSubnetScan!) < _subnetScanCooldown) {
+      return;
+    }
+    unawaited(_subnetScan());
+  }
+
+  Future<void> _subnetScan() async {
+    if (_subnetScanInProgress) return;
+    _subnetScanInProgress = true;
+    _lastSubnetScan = DateTime.now();
     try {
-      // 获取本机 IP
-      final interfaces = await NetworkInterface.list(
-        type: InternetAddressType.IPv4,
-        includeLoopback: false,
-      );
-      if (interfaces.isEmpty) {
-        debugPrint('[mDNS] 子网扫描: 无网络接口');
+      final localIP = await _findLocalLANIPv4();
+      if (localIP == null) {
+        debugPrint('[mDNS] 身份校验扫描: 无可用局域网 IPv4');
         return;
       }
-      final myIp = interfaces.first.addresses.first.address;
-      final parts = myIp.split('.');
-      if (parts.length != 4) return;
+      final parts = localIP.split('.');
       final subnet = '${parts[0]}.${parts[1]}.${parts[2]}';
-      debugPrint('[mDNS] 子网扫描: $subnet.0/24 端口 $port');
+      debugPrint('[mDNS] 身份校验扫描: $subnet.0/24 端口 $_defaultPort');
 
-      // 并发扫描所有 IP（超时 500ms）
-      final futures = <Future<void>>[];
-      for (int i = 1; i <= 254; i++) {
-        final ip = '$subnet.$i';
-        if (ip == myIp) continue;
-        futures.add(_probePort(ip, port, deviceName));
+      const batchSize = 32;
+      for (var first = 1; first <= 254; first += batchSize) {
+        final probes = <Future<void>>[];
+        final last = (first + batchSize - 1).clamp(1, 254);
+        for (var suffix = first; suffix <= last; suffix++) {
+          final ip = '$subnet.$suffix';
+          if (ip == localIP) continue;
+          probes.add(_probeAndAdd(ip, _defaultPort));
+        }
+        await Future.wait(probes);
       }
-      await Future.wait(futures);
-    } catch (e) {
-      debugPrint('[mDNS] 子网扫描异常: $e');
+    } catch (error) {
+      debugPrint('[mDNS] 身份校验扫描异常: $error');
+    } finally {
+      _subnetScanInProgress = false;
     }
   }
 
-  /// 尝试 TCP 连接 ip:port，成功则认为是 FastDrop 服务器。
-  Future<void> _probePort(String ip, int port, String deviceName) async {
-    try {
-      final socket = await Socket.connect(ip, port,
-          timeout: const Duration(milliseconds: 500));
-      socket.destroy();
-      debugPrint('[mDNS] 子网扫描命中: $ip:$port');
-      _addFallbackDevice(deviceName, ip, port);
-    } catch (_) {
-      // 连接失败——不是 FastDrop 服务器
-    }
-  }
-
-  void _addFallbackDevice(String name, String ip, int port) {
-    final device = DiscoveredDevice(
-      deviceId: name,
-      deviceName: name,
-      baseUrl: 'http://$ip:$port',
-      protocolVersion: 1,
-      platform: 'unknown',
-      pairingRequired: true,
+  Future<String?> _findLocalLANIPv4() async {
+    final interfaces = await NetworkInterface.list(
+      type: InternetAddressType.IPv4,
+      includeLoopback: false,
     );
+    for (final interface in interfaces) {
+      final name = interface.name.toLowerCase();
+      if (!name.contains('wlan') && !name.contains('wifi') && name != 'en0') {
+        continue;
+      }
+      for (final address in interface.addresses) {
+        if (isUsableLANIPv4(address.address)) return address.address;
+      }
+    }
+    for (final interface in interfaces) {
+      for (final address in interface.addresses) {
+        if (isUsableLANIPv4(address.address)) return address.address;
+      }
+    }
+    return null;
+  }
+
+  Future<void> _probeAndAdd(String ip, int port) async {
+    final device = await _probeHealth(ip, port);
+    if (device != null) _addVerifiedDevice(device);
+  }
+
+  Future<DiscoveredDevice?> _probeHealth(String ip, int port) async {
+    if (!isUsableLANIPv4(ip)) return null;
+    try {
+      final health = await _getJson(ip, port, '/api/v1/health');
+      if (health == null || health['status'] != 'ok') return null;
+
+      var identity = Map<String, dynamic>.from(health);
+      if ((identity['deviceId']?.toString().trim().isEmpty ?? true) ||
+          ((identity['deviceName'] ?? identity['name'])
+                  ?.toString()
+                  .trim()
+                  .isEmpty ??
+              true)) {
+        final info = await _getJson(ip, port, '/api/v1/server/info');
+        if (info != null) identity.addAll(info);
+      }
+      return deviceFromVerifiedIdentity(
+        identity,
+        ip: ip,
+        port: port,
+        localDeviceId: _localDeviceId,
+      );
+    } catch (_) {
+      return null;
+    }
+  }
+
+  Future<Map<String, dynamic>?> _getJson(
+    String ip,
+    int port,
+    String path,
+  ) async {
+    final request = await _client
+        .getUrl(Uri(scheme: 'http', host: ip, port: port, path: path))
+        .timeout(_probeTimeout);
+    request.headers.set(HttpHeaders.acceptHeader, 'application/json');
+    final response = await request.close().timeout(_probeTimeout);
+    if (response.statusCode != HttpStatus.ok) {
+      await response.drain<void>();
+      return null;
+    }
+    final body =
+        await response.transform(utf8.decoder).join().timeout(_probeTimeout);
+    final decoded = jsonDecode(body);
+    return decoded is Map<String, dynamic> ? decoded : null;
+  }
+
+  void _addVerifiedDevice(
+    DiscoveredDevice device, {
+    String? serviceName,
+  }) {
+    if (device.deviceId == _localDeviceId) return;
+
+    final duplicateIDs = _byDeviceId.entries
+        .where((entry) =>
+            entry.key != device.deviceId &&
+            entry.value.baseUrl == device.baseUrl)
+        .map((entry) => entry.key)
+        .toList(growable: false);
+    for (final duplicateID in duplicateIDs) {
+      _byDeviceId.remove(duplicateID);
+      _lastSeen.remove(duplicateID);
+      _serviceToDeviceId.removeWhere((_, id) => id == duplicateID);
+    }
+
     _byDeviceId[device.deviceId] = device;
+    _lastSeen[device.deviceId] = DateTime.now();
+    if (serviceName != null) {
+      _serviceToDeviceId[serviceName] = device.deviceId;
+    }
     _emit();
   }
 
-  DiscoveredDevice? _parseService(BonsoirService service) {
-    final txt = <String, String>{};
-    // bonsoir 5.x exposes TXT records as Map<String, String> on
-    // BonsoirService.attributes — keys are lowercased by the plugin.
-    service.attributes?.forEach((k, v) {
-      txt[k.toLowerCase()] = v;
-    });
+  void _removeService(String serviceName) {
+    final deviceID = _serviceToDeviceId.remove(serviceName);
+    if (deviceID == null || _serviceToDeviceId.containsValue(deviceID)) return;
+    _byDeviceId.remove(deviceID);
+    _lastSeen.remove(deviceID);
+    _emit();
+  }
 
-    final deviceId = txt['id'] ?? service.name;
-    final port = service.port ?? 9527;
-
-    // Only ResolvedBonsoirService exposes `host`. The service at
-    // this point has already gone through the resolved event.
-    String host = '';
-    if (service is ResolvedBonsoirService) {
-      host = (service.host ?? '').trim();
+  Future<void> _revalidateKnownDevices() async {
+    if (_revalidationInProgress || _byDeviceId.isEmpty) return;
+    _revalidationInProgress = true;
+    try {
+      final current = _byDeviceId.values.toList(growable: false);
+      await Future.wait(current.map((device) async {
+        final uri = Uri.tryParse(device.baseUrl);
+        if (uri == null || uri.host.isEmpty) return;
+        final refreshed =
+            await _probeHealth(uri.host, uri.hasPort ? uri.port : _defaultPort);
+        if (refreshed != null) _addVerifiedDevice(refreshed);
+      }));
+    } finally {
+      _revalidationInProgress = false;
     }
-    if (host.isEmpty) return null;
+  }
 
-    return DiscoveredDevice(
-      deviceId: deviceId,
-      deviceName: txt['name'] ?? service.name,
-      baseUrl: 'http://$host:$port',
-      protocolVersion: int.tryParse(txt['protocol'] ?? '1') ?? 1,
-      platform: txt['platform'] ?? 'unknown',
-      pairingRequired: (txt['pairing'] ?? 'required') != 'none',
-      tls: (txt['tls'] ?? '0') == '1',
-    );
+  void _removeStaleDevices() {
+    final cutoff = DateTime.now().subtract(_staleAfter);
+    final staleIDs = _lastSeen.entries
+        .where((entry) => entry.value.isBefore(cutoff))
+        .map((entry) => entry.key)
+        .toList(growable: false);
+    if (staleIDs.isEmpty) return;
+    for (final id in staleIDs) {
+      _lastSeen.remove(id);
+      _byDeviceId.remove(id);
+      _serviceToDeviceId.removeWhere((_, deviceID) => deviceID == id);
+    }
+    _emit();
   }
 
   void _emit() {
-    if (_controller != null && !_controller!.isClosed) {
-      _controller!.add(_byDeviceId.values.toList(growable: false));
-    }
+    if (_controller == null || _controller!.isClosed) return;
+    final devices = _byDeviceId.values.toList(growable: false)
+      ..sort((a, b) {
+        final byName = a.deviceName.compareTo(b.deviceName);
+        return byName != 0 ? byName : a.baseUrl.compareTo(b.baseUrl);
+      });
+    _controller!.add(devices);
   }
 
   @override
@@ -266,29 +360,26 @@ class MdnsDiscovery implements DeviceDiscovery {
     await _controller?.close();
     _controller = null;
     _byDeviceId.clear();
+    _lastSeen.clear();
+    _serviceToDeviceId.clear();
   }
 
-  // ---------------------------------------------------------------------------
-  // Phase 3: mDNS broadcast (advertise this device as a FastDrop server)
-  // ---------------------------------------------------------------------------
-
-  /// Start broadcasting this device via mDNS so other devices can discover it.
-  ///
-  /// TXT records match the Go backend: id, name, version, protocol, platform,
-  /// pairing, tls.
   Future<void> startBroadcast({
     required String deviceId,
     required String deviceName,
     required String platform,
-    int port = 9527,
+    int port = _defaultPort,
   }) async {
     if (_broadcasting) return;
+    _localDeviceId = deviceId;
+    _byDeviceId.remove(deviceId);
+    _lastSeen.remove(deviceId);
 
-    debugPrint('[mDNS] Starting broadcast: $deviceName on port $port');
-
+    final instanceName = broadcastInstanceName(deviceName, deviceId);
+    debugPrint('[mDNS] Starting broadcast: $instanceName on port $port');
     _broadcast = BonsoirBroadcast(
       service: BonsoirService(
-        name: deviceName,
+        name: instanceName,
         type: _serviceType,
         port: port,
         attributes: {
@@ -302,14 +393,12 @@ class MdnsDiscovery implements DeviceDiscovery {
         },
       ),
     );
-
     await _broadcast!.ready;
     await _broadcast!.start();
     _broadcasting = true;
     debugPrint('[mDNS] Broadcast started');
   }
 
-  /// Stop broadcasting this device.
   Future<void> stopBroadcast() async {
     if (!_broadcasting) return;
     await _broadcast?.stop();
@@ -319,4 +408,68 @@ class MdnsDiscovery implements DeviceDiscovery {
   }
 
   bool get isBroadcasting => _broadcasting;
+
+  @visibleForTesting
+  static bool isUsableLANIPv4(String address) {
+    final parsed = InternetAddress.tryParse(address);
+    if (parsed == null || parsed.type != InternetAddressType.IPv4) return false;
+    final parts = address.split('.').map(int.tryParse).toList();
+    if (parts.length != 4 || parts.any((part) => part == null)) return false;
+    final a = parts[0]!;
+    final b = parts[1]!;
+    if (a == 198 && (b == 18 || b == 19)) return false;
+    return a == 10 ||
+        (a == 172 && b >= 16 && b <= 31) ||
+        (a == 192 && b == 168);
+  }
+
+  @visibleForTesting
+  static String broadcastInstanceName(String deviceName, String deviceId) {
+    final cleanName =
+        deviceName.trim().isEmpty ? 'FastDrop' : deviceName.trim();
+    final cleanID = deviceId.replaceAll(RegExp(r'[^A-Za-z0-9]'), '');
+    final suffix = cleanID.length <= 6 ? cleanID : cleanID.substring(0, 6);
+    if (suffix.isNotEmpty &&
+        cleanName.toLowerCase().endsWith('-${suffix.toLowerCase()}')) {
+      return cleanName;
+    }
+    final maxNameLength = 50 - suffix.length;
+    final base = cleanName.length <= maxNameLength
+        ? cleanName
+        : cleanName.substring(0, maxNameLength);
+    return suffix.isEmpty ? base : '$base-$suffix';
+  }
+
+  @visibleForTesting
+  static DiscoveredDevice? deviceFromVerifiedIdentity(
+    Map<String, dynamic> payload, {
+    required String ip,
+    required int port,
+    String? localDeviceId,
+  }) {
+    if (!isUsableLANIPv4(ip)) return null;
+    final deviceID = payload['deviceId']?.toString().trim() ?? '';
+    final deviceName =
+        (payload['deviceName'] ?? payload['name'])?.toString().trim() ?? '';
+    final platform = payload['platform']?.toString().trim() ?? '';
+    final protocolValue = payload['protocol'];
+    final protocol = protocolValue is int
+        ? protocolValue
+        : int.tryParse(protocolValue?.toString() ?? '');
+    if (deviceID.isEmpty ||
+        deviceName.isEmpty ||
+        platform.isEmpty ||
+        protocol != 1 ||
+        deviceID == localDeviceId) {
+      return null;
+    }
+    return DiscoveredDevice(
+      deviceId: deviceID,
+      deviceName: deviceName,
+      baseUrl: 'http://$ip:$port',
+      protocolVersion: protocol!,
+      platform: platform,
+      pairingRequired: true,
+    );
+  }
 }

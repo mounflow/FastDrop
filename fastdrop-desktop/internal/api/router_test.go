@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -23,6 +24,8 @@ import (
 func newTestServer(t *testing.T) (*Server, *config.Config) {
 	t.Helper()
 	cfg := config.Default()
+	cfg.Security.RequirePairConfirmation = true
+	cfg.Server.DeviceID = "windows-test-id"
 	cfg.Server.DeviceName = "TestPC"
 	cfg.Server.BindAddress = "127.0.0.1"
 	cfg.Server.Port = 19527
@@ -35,7 +38,7 @@ func newTestServer(t *testing.T) (*Server, *config.Config) {
 	t.Cleanup(func() { db.Close() })
 
 	// Seed the local server device.
-	_ = db.UpsertDevice(database.Device{ID: "windows-local", Name: "TestPC", Platform: "windows", FirstSeenAt: 1, LastSeenAt: 1})
+	_ = db.UpsertDevice(database.Device{ID: cfg.Server.DeviceID, Name: "TestPC", Platform: "windows", FirstSeenAt: 1, LastSeenAt: 1})
 
 	pairMgr := pairing.NewManager(time.Minute)
 	sessMgr := session.NewManager(db, time.Hour)
@@ -66,10 +69,87 @@ func TestHealthAndInfo(t *testing.T) {
 	if !strings.Contains(body, "ok") {
 		t.Errorf("body: %s", body)
 	}
+	if !strings.Contains(body, "windows-test-id") || !strings.Contains(body, "TestPC") {
+		t.Errorf("health identity missing: %s", body)
+	}
 
 	resp, body = doReq(t, ts, "GET", "/api/v1/capabilities", nil, "")
 	if resp.StatusCode != 200 || !strings.Contains(body, "chunkSize") {
 		t.Errorf("capabilities: %d %s", resp.StatusCode, body)
+	}
+}
+
+func TestLANPeerCORSUsesConcreteOrigin(t *testing.T) {
+	srv, _ := newTestServer(t)
+	ts := httptest.NewServer(New(srv))
+	defer ts.Close()
+
+	req, err := http.NewRequest(http.MethodOptions, ts.URL+"/api/v1/pair/discover", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Origin", "http://192.168.1.20:9527")
+	req.Header.Set("Access-Control-Request-Method", "POST")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusNoContent {
+		t.Fatalf("preflight status=%d", resp.StatusCode)
+	}
+	if got := resp.Header.Get("Access-Control-Allow-Origin"); got != "http://192.168.1.20:9527" {
+		t.Fatalf("allow-origin=%q", got)
+	}
+	if got := resp.Header.Get("Access-Control-Allow-Origin"); got == "*" {
+		t.Fatal("authenticated LAN APIs must never use wildcard CORS")
+	}
+}
+
+func TestServerToClientStagingCanBeOffered(t *testing.T) {
+	srv, _ := newTestServer(t)
+	ts := httptest.NewServer(New(srv))
+	defer ts.Close()
+
+	ctx := context.Background()
+	_ = srv.DB.UpsertDevice(database.Device{
+		ID: "phone-1", Name: "Phone", Platform: "android",
+		FirstSeenAt: 1, LastSeenAt: 1,
+	})
+	sess, err := srv.Session.Create(ctx, "phone-1", "127.0.0.1")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	resp, body := doReqAuthJSON(t, ts, http.MethodPost, "/api/v1/transfers", sess.ID, sess.Token, map[string]any{
+		"offerId":   "offer-1",
+		"direction": "server_to_client",
+		"files": []map[string]any{{
+			"clientFileId": "client-file-1", "name": "hello.txt",
+			"size": 5, "mimeType": "text/plain",
+		}},
+	})
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("create status=%d body=%s", resp.StatusCode, body)
+	}
+	var created struct {
+		TransferID string `json:"transferId"`
+		Files      []struct {
+			FileID string `json:"fileId"`
+		} `json:"files"`
+	}
+	if err := json.Unmarshal([]byte(body), &created); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(srv.Storage.PartPath(created.TransferID, created.Files[0].FileID)); err != nil {
+		t.Fatalf("staging part file missing: %v", err)
+	}
+
+	resp, body = doReqAuth(t, ts, http.MethodPost,
+		"/api/v1/transfers/"+created.TransferID+"/offer",
+		sess.ID, sess.Token, nil)
+	if resp.StatusCode != http.StatusAccepted {
+		t.Fatalf("offer status=%d body=%s", resp.StatusCode, body)
 	}
 }
 
@@ -116,6 +196,41 @@ func TestPairFlowEndToEnd(t *testing.T) {
 	})
 	if resp.StatusCode != 401 {
 		t.Errorf("bad token: %d %s", resp.StatusCode, body)
+	}
+}
+
+func TestPairDiscoverAutoAcceptsWhenConfirmationDisabled(t *testing.T) {
+	srv, cfg := newTestServer(t)
+	cfg.Security.RequirePairConfirmation = false
+	ts := httptest.NewServer(New(srv))
+	defer ts.Close()
+
+	resp, body := doReqJSON(t, ts, http.MethodPost, "/api/v1/pair/discover", map[string]any{
+		"device": map[string]any{
+			"deviceId":   "android-auto",
+			"deviceName": "FastDrop-AUTO01",
+			"platform":   "android",
+			"appVersion": "1.0.0",
+		},
+	})
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("discover status=%d body=%s", resp.StatusCode, body)
+	}
+	var created map[string]any
+	if err := json.Unmarshal([]byte(body), &created); err != nil {
+		t.Fatal(err)
+	}
+	if created["status"] != "accepted" {
+		t.Fatalf("discover did not auto-accept: %s", body)
+	}
+
+	requestID := created["requestId"].(string)
+	resp, body = doReq(t, ts, http.MethodGet, "/api/v1/pair/requests/"+requestID, nil, "")
+	if resp.StatusCode != http.StatusOK || !strings.Contains(body, `"status":"accepted"`) {
+		t.Fatalf("poll status=%d body=%s", resp.StatusCode, body)
+	}
+	if !strings.Contains(body, `"session"`) {
+		t.Fatalf("accepted response has no session: %s", body)
 	}
 }
 
@@ -231,7 +346,9 @@ func TestPathTraversalRejected(t *testing.T) {
 	}
 	var res struct {
 		TransferID string `json:"transferId"`
-		Files      []struct{ FileID string `json:"fileId"` } `json:"files"`
+		Files      []struct {
+			FileID string `json:"fileId"`
+		} `json:"files"`
 	}
 	json.Unmarshal([]byte(body), &res)
 
@@ -332,9 +449,9 @@ func fileExists(path string) bool {
 func TestParseRange(t *testing.T) {
 	const size = 1000
 	cases := []struct {
-		header         string
-		wantS, wantE   int64
-		wantOK         bool
+		header       string
+		wantS, wantE int64
+		wantOK       bool
 	}{
 		{"bytes=0-499", 0, 499, true},
 		{"bytes=500-999", 500, 999, true},
@@ -343,7 +460,7 @@ func TestParseRange(t *testing.T) {
 		{"bytes=-100", 900, 999, true},
 		{"bytes=-1000", 0, 999, true},
 		// Invalid ranges.
-		{"bytes=1000-", 0, 0, false},   // start >= size
+		{"bytes=1000-", 0, 0, false}, // start >= size
 		{"bytes=1000-1001", 0, 0, false},
 		{"bytes=500-499", 0, 0, false}, // end < start
 		{"bytes=0-1000", 0, 0, false},  // end >= size
@@ -472,7 +589,9 @@ func TestCrossSessionTransferDenial(t *testing.T) {
 	}
 	var res struct {
 		TransferID string `json:"transferId"`
-		Files      []struct{ FileID string `json:"fileId"` } `json:"files"`
+		Files      []struct {
+			FileID string `json:"fileId"`
+		} `json:"files"`
 	}
 	json.Unmarshal([]byte(body), &res)
 
@@ -533,7 +652,9 @@ func TestFileOwnedMismatchedTransfer(t *testing.T) {
 		}
 		var r struct {
 			TransferID string `json:"transferId"`
-			Files      []struct{ FileID string `json:"fileId"` } `json:"files"`
+			Files      []struct {
+				FileID string `json:"fileId"`
+			} `json:"files"`
 		}
 		json.Unmarshal([]byte(body), &r)
 		return r.TransferID, r.Files[0].FileID
@@ -574,7 +695,9 @@ func TestDownloadFileWithRange(t *testing.T) {
 	}
 	var res struct {
 		TransferID string `json:"transferId"`
-		Files      []struct{ FileID string `json:"fileId"` } `json:"files"`
+		Files      []struct {
+			FileID string `json:"fileId"`
+		} `json:"files"`
 	}
 	json.Unmarshal([]byte(body), &res)
 	tid, fid := res.TransferID, res.Files[0].FileID
@@ -789,7 +912,9 @@ func TestBreakpointResume(t *testing.T) {
 	}
 	var res struct {
 		TransferID string `json:"transferId"`
-		Files      []struct{ FileID string `json:"fileId"` } `json:"files"`
+		Files      []struct {
+			FileID string `json:"fileId"`
+		} `json:"files"`
 	}
 	json.Unmarshal([]byte(body), &res)
 	tid, fid := res.TransferID, res.Files[0].FileID
@@ -859,7 +984,9 @@ func TestRetryTransferFlow(t *testing.T) {
 	}
 	var res struct {
 		TransferID string `json:"transferId"`
-		Files      []struct{ FileID string `json:"fileId"` } `json:"files"`
+		Files      []struct {
+			FileID string `json:"fileId"`
+		} `json:"files"`
 	}
 	json.Unmarshal([]byte(body), &res)
 	tid, fid := res.TransferID, res.Files[0].FileID
@@ -916,7 +1043,9 @@ func TestCancelAndDeleteTransfer(t *testing.T) {
 	if resp.StatusCode != 201 {
 		t.Fatalf("create: %d %s", resp.StatusCode, body)
 	}
-	var res struct{ TransferID string `json:"transferId"` }
+	var res struct {
+		TransferID string `json:"transferId"`
+	}
 	json.Unmarshal([]byte(body), &res)
 	tid := res.TransferID
 
@@ -978,7 +1107,9 @@ func TestChunkIndexValidation(t *testing.T) {
 	}
 	var res struct {
 		TransferID string `json:"transferId"`
-		Files      []struct{ FileID string `json:"fileId"` } `json:"files"`
+		Files      []struct {
+			FileID string `json:"fileId"`
+		} `json:"files"`
 	}
 	json.Unmarshal([]byte(body), &res)
 	tid, fid := res.TransferID, res.Files[0].FileID
@@ -1025,7 +1156,9 @@ func TestListActiveTransfers(t *testing.T) {
 		if resp.StatusCode != 201 {
 			t.Fatalf("create %s: %d", offer, resp.StatusCode)
 		}
-		var r struct{ TransferID string `json:"transferId"` }
+		var r struct {
+			TransferID string `json:"transferId"`
+		}
 		json.Unmarshal([]byte(body), &r)
 		return r.TransferID
 	}

@@ -8,7 +8,7 @@ import 'package:fastdrop_mobile/core/discovery/discovery_providers.dart';
 import 'package:fastdrop_mobile/core/server/server_providers.dart';
 import 'package:fastdrop_mobile/core/storage/session_store.dart';
 import 'package:fastdrop_mobile/core/providers.dart';
-import 'package:fastdrop_mobile/features/devices/devices_screen.dart';
+import 'package:fastdrop_mobile/features/devices/multi_device_connection.dart';
 import 'package:fastdrop_mobile/features/pairing/pairing_screen.dart';
 import 'package:fastdrop_mobile/core/utils/file_utils.dart';
 
@@ -235,6 +235,32 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
 
           const Divider(),
 
+          const _SectionHeader(title: '配对安全'),
+          Consumer(
+            builder: (context, ref, child) {
+              final serverState = ref.watch(fastdropServerProvider);
+              final notifier = ref.read(fastdropServerProvider.notifier);
+              return SwitchListTile(
+                secondary: const Icon(Icons.verified_user_outlined),
+                title: const Text('配对时需要确认'),
+                subtitle: const Text(
+                  '默认关闭：同一局域网内点击配对后直接连接；开启后需在本机确认。',
+                ),
+                value: serverState.requirePairConfirmation,
+                onChanged: notifier.setRequirePairConfirmation,
+              );
+            },
+          ),
+          const Padding(
+            padding: EdgeInsets.symmetric(horizontal: 16, vertical: 4),
+            child: Text(
+              '关闭确认更方便，但同一局域网内的其他 FastDrop 设备也能发起配对。文件接收确认不受此开关影响。',
+              style: TextStyle(color: Colors.grey, fontSize: 12),
+            ),
+          ),
+
+          const Divider(),
+
           // -- About -----------------------------------------------------------
           const _SectionHeader(title: 'About'),
           const ListTile(
@@ -287,12 +313,9 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
 
     if (confirmed != true) return;
 
-    // Disconnect WebSocket if this is the active connection.
-    try {
-      ref.read(wsClientProvider).disconnect();
-    } catch (_) {}
-
-    ref.read(httpClientProvider).clearSession();
+    ref
+        .read(multiDeviceConnectionProvider.notifier)
+        .disconnectDevice(device.id);
 
     // Remove the device from the store.
     await ref.read(deviceStoreProvider).removeDevice(device.id);
@@ -302,8 +325,7 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
 
       // Back to devices screen — it will show the next device or the
       // empty state.
-      Navigator.of(context).pushNamedAndRemoveUntil(
-          '/devices', (_) => false);
+      Navigator.of(context).pushNamedAndRemoveUntil('/devices', (_) => false);
     }
   }
 
@@ -408,9 +430,8 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
 
     if (matched != null) {
       // 已配对 → 直连
-      ref.read(deviceConnectionProvider.notifier).switchToDevice(matched);
-      Navigator.of(context)
-          .pushNamedAndRemoveUntil('/devices', (_) => false);
+      ref.read(multiDeviceConnectionProvider.notifier).switchToDevice(matched);
+      Navigator.of(context).pushNamedAndRemoveUntil('/devices', (_) => false);
     } else {
       // 未配对 → D-2 半自动配对
       ref.read(pairingProvider.notifier).pairViaMdns(discovered);

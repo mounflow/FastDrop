@@ -141,7 +141,7 @@ class TransferReceiver {
   // -- Concurrency semaphores (spec: 3 chunks/file, 2 files, 6 global) --------
   final Semaphore _globalSem = Semaphore(6);
   final HashMap<String, Semaphore> _fileSems = HashMap();
-  int _activeFiles = 0;
+  final HashMap<String, int> _fileInFlight = HashMap();
   static const _maxActiveFiles = 2;
 
   // -- Progress throttle -------------------------------------------------------
@@ -196,12 +196,13 @@ class TransferReceiver {
 
   ServerTransfer? getTransfer(String transferId) => _transfers[transferId];
 
-  List<ServerTransfer> get activeTransfers =>
-      _transfers.values.where((t) =>
+  List<ServerTransfer> get activeTransfers => _transfers.values
+      .where((t) =>
           t.status == 'transferring' ||
           t.status == 'preparing' ||
           t.status == 'verifying' ||
-          t.status == 'waiting_accept').toList();
+          t.status == 'waiting_accept')
+      .toList();
 
   List<ServerTransfer> get allTransfers => _transfers.values.toList();
 
@@ -250,13 +251,15 @@ class TransferReceiver {
     onTransferRequest?.call(transfer);
 
     // Build response matching Go backend format.
-    final fileResults = files.map((f) => {
-          'fileId': f.fileId,
-          'clientFileId': f.clientFileId,
-          'name': f.name,
-          'chunkSize': FileUtils.chunkSize,
-          'totalChunks': f.totalChunks,
-        }).toList();
+    final fileResults = files
+        .map((f) => {
+              'fileId': f.fileId,
+              'clientFileId': f.clientFileId,
+              'name': f.name,
+              'chunkSize': FileUtils.chunkSize,
+              'totalChunks': f.totalChunks,
+            })
+        .toList();
 
     return _json(201, {
       'transferId': transferId,
@@ -275,8 +278,13 @@ class TransferReceiver {
     if (transfer == null) {
       return _error(404, 'FILE_NOT_FOUND', 'Transfer not found');
     }
+    if (!_isOwnedByRequest(request, transfer)) {
+      return _error(
+          403, 'SESSION_INVALID', 'Transfer belongs to another session');
+    }
     if (transfer.status != 'transferring') {
-      return _error(409, 'INVALID_REQUEST', 'Transfer is not in transferring state');
+      return _error(
+          409, 'INVALID_REQUEST', 'Transfer is not in transferring state');
     }
 
     final file = transfer.files.where((f) => f.fileId == fileId).firstOrNull;
@@ -285,13 +293,10 @@ class TransferReceiver {
     }
 
     final chunkIndex = int.tryParse(chunkIndexStr);
-    if (chunkIndex == null || chunkIndex < 0 || chunkIndex >= file.totalChunks) {
+    if (chunkIndex == null ||
+        chunkIndex < 0 ||
+        chunkIndex >= file.totalChunks) {
       return _error(400, 'INVALID_REQUEST', 'Invalid chunk index');
-    }
-
-    // Check file concurrency limit.
-    if (_activeFiles >= _maxActiveFiles && !_fileSems.containsKey(fileId)) {
-      return _error(429, 'INVALID_REQUEST', 'Too many concurrent files');
     }
 
     // Read the chunk body.
@@ -306,12 +311,20 @@ class TransferReceiver {
       return _error(400, 'INVALID_REQUEST', 'Empty chunk body');
     }
 
-    // Acquire semaphores: global + per-file.
+    // Reserve one of the two distinct-file slots before the first await.
+    // Multiple chunks of the same file share that slot; they must not each be
+    // counted as a separate active file.
+    if (!_fileInFlight.containsKey(fileId) &&
+        _fileInFlight.length >= _maxActiveFiles) {
+      return _error(429, 'INVALID_REQUEST', 'Too many concurrent files');
+    }
+    _fileInFlight[fileId] = (_fileInFlight[fileId] ?? 0) + 1;
+
+    // Acquire semaphores: six chunks globally, three per file.
     final fileSem = _fileSems.putIfAbsent(fileId, () => Semaphore(3));
 
     await _globalSem.acquire();
     await fileSem.acquire();
-    _activeFiles++;
 
     try {
       // Write at offset = chunkIndex * chunkSize.
@@ -340,9 +353,12 @@ class TransferReceiver {
     } finally {
       fileSem.release();
       _globalSem.release();
-      _activeFiles--;
-      if (_activeFiles <= 0) {
+      final remaining = (_fileInFlight[fileId] ?? 1) - 1;
+      if (remaining <= 0) {
+        _fileInFlight.remove(fileId);
         _fileSems.remove(fileId);
+      } else {
+        _fileInFlight[fileId] = remaining;
       }
     }
   }
@@ -356,6 +372,10 @@ class TransferReceiver {
     final transfer = _transfers[transferId];
     if (transfer == null) {
       return _error(404, 'FILE_NOT_FOUND', 'Transfer not found');
+    }
+    if (!_isOwnedByRequest(request, transfer)) {
+      return _error(
+          403, 'SESSION_INVALID', 'Transfer belongs to another session');
     }
 
     final file = transfer.files.where((f) => f.fileId == fileId).firstOrNull;
@@ -385,7 +405,8 @@ class TransferReceiver {
       }
 
       // Atomic rename to downloads dir.
-      final finalPath = await FileUtils.movePartToFinal(file.partPath!, file.name);
+      final finalPath =
+          await FileUtils.movePartToFinal(file.partPath!, file.name);
       file.finalPath = finalPath;
       file.status = 'completed';
 
@@ -431,6 +452,10 @@ class TransferReceiver {
     final transfer = _transfers[transferId];
     if (transfer == null) {
       return _error(404, 'FILE_NOT_FOUND', 'Transfer not found');
+    }
+    if (!_isOwnedByRequest(request, transfer)) {
+      return _error(
+          403, 'SESSION_INVALID', 'Transfer belongs to another session');
     }
 
     final file = transfer.files.where((f) => f.fileId == fileId).firstOrNull;
@@ -493,17 +518,21 @@ class TransferReceiver {
 
   /// GET /api/v1/transfers — list transfers.
   Response handleListTransfers(Request request) {
-    final transfers = _transfers.values.map((t) => {
-          'id': t.transferId,
-          'sessionId': t.sessionId,
-          'peerDeviceId': '',
-          'direction': t.direction,
-          'status': t.status,
-          'totalFiles': t.totalFiles,
-          'totalBytes': t.totalBytes,
-          'transferredBytes': t.transferredBytes,
-          'createdAt': t.createdAt.millisecondsSinceEpoch ~/ 1000,
-        }).toList();
+    final sessionId = request.context['fastdrop.sessionId'] as String?;
+    final transfers = _transfers.values
+        .where((transfer) => transfer.sessionId == sessionId)
+        .map((t) => {
+              'id': t.transferId,
+              'sessionId': t.sessionId,
+              'peerDeviceId': '',
+              'direction': t.direction,
+              'status': t.status,
+              'totalFiles': t.totalFiles,
+              'totalBytes': t.totalBytes,
+              'transferredBytes': t.transferredBytes,
+              'createdAt': t.createdAt.millisecondsSinceEpoch ~/ 1000,
+            })
+        .toList();
 
     return _json(200, {'transfers': transfers});
   }
@@ -579,6 +608,10 @@ class TransferReceiver {
       builder.add(chunk);
     }
     return builder.takeBytes();
+  }
+
+  static bool _isOwnedByRequest(Request request, ServerTransfer transfer) {
+    return request.context['fastdrop.sessionId'] == transfer.sessionId;
   }
 
   static Response _json(int status, Map<String, dynamic> body) {

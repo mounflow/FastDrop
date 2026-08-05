@@ -17,9 +17,9 @@ import (
 
 // createTransferBody mirrors §10.1.
 type createTransferBody struct {
-	OfferID   string                  `json:"offerId"`
-	Direction string                  `json:"direction"`
-	Files     []createTransferFile    `json:"files"`
+	OfferID   string               `json:"offerId"`
+	Direction string               `json:"direction"`
+	Files     []createTransferFile `json:"files"`
 }
 
 type createTransferFile struct {
@@ -61,11 +61,11 @@ func (s *Server) handleCreateTransfer(w http.ResponseWriter, r *http.Request) {
 		if !ok {
 			writeJSON(w, http.StatusInsufficientStorage, map[string]any{
 				"error": map[string]any{
-					"code":    "INSUFFICIENT_STORAGE",
-					"message": "接收设备存储空间不足",
+					"code":      "INSUFFICIENT_STORAGE",
+					"message":   "接收设备存储空间不足",
 					"requestId": requestID(r),
 					"details": map[string]any{
-						"requiredBytes": total,
+						"requiredBytes":  total,
 						"availableBytes": free,
 					},
 				},
@@ -86,11 +86,16 @@ func (s *Server) handleCreateTransfer(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// For inbound files: allocate .part files now.
-	if dir == transfer.DirClientToServer {
-		for _, f := range res.Files {
-			_ = s.Storage.CreatePart(res.TransferID, f.FileID, fileSizeByID(body, f.ClientFileID))
+	// Both inbound uploads and PC-side staging write into the same temporary
+	// part-file layout. server_to_client files stay there until the peer has
+	// downloaded them; client_to_server files are finalized after verification.
+	for _, f := range res.Files {
+		if err := s.Storage.CreatePart(res.TransferID, f.FileID, fileSizeByID(body, f.ClientFileID)); err != nil {
+			writeError(w, http.StatusInternalServerError, "INTERNAL_ERROR", err.Error(), requestID(r))
+			return
 		}
+	}
+	if dir == transfer.DirClientToServer {
 		// Intentionally NOT broadcasting file.offer here. Per spec,
 		// file.offer is for the PC→phone direction so the phone can
 		// accept/reject. For phone→PC uploads the PC is the passive
@@ -104,6 +109,42 @@ func (s *Server) handleCreateTransfer(w http.ResponseWriter, r *http.Request) {
 		"files":      toFileResponses(res),
 	}
 	writeJSON(w, http.StatusCreated, resp)
+}
+
+// handleOfferTransfer announces an already-staged server_to_client transfer
+// to the session peer. Keeping this as an authenticated REST action prevents
+// the local Vue sender's file.offer frame from being mistaken for a new
+// inbound transfer by the WebSocket router.
+func (s *Server) handleOfferTransfer(w http.ResponseWriter, r *http.Request) {
+	sessID, _ := r.Context().Value(ctxSessionID).(string)
+	transferID := r.PathValue("transferId")
+	t, err := s.transferOwned(r.Context(), transferID, sessID)
+	if err != nil {
+		writeError(w, http.StatusForbidden, "SESSION_INVALID", "transfer not owned by session", requestID(r))
+		return
+	}
+	if t.Direction != string(transfer.DirServerToClient) {
+		writeError(w, http.StatusConflict, "INVALID_REQUEST", "only server_to_client transfers can be offered", requestID(r))
+		return
+	}
+	files, err := s.DB.ListTransferFiles(r.Context(), transferID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL_ERROR", err.Error(), requestID(r))
+		return
+	}
+	offerFiles := make([]map[string]any, 0, len(files))
+	for _, f := range files {
+		offerFiles = append(offerFiles, map[string]any{
+			"fileId": f.ID, "clientFileId": f.ClientFileID,
+			"name": f.OriginalName, "size": f.TotalBytes,
+			"mimeType": f.MimeType, "sha256": f.Sha256Expected,
+		})
+	}
+	s.pushWSEvent(sessID, ws.MsgFileOffer, map[string]any{
+		"offerId": transferID, "transferId": transferID,
+		"deviceName": s.Cfg.Server.DeviceName, "files": offerFiles,
+	})
+	writeJSON(w, http.StatusAccepted, map[string]any{"transferId": transferID, "status": "waiting_accept"})
 }
 
 func toFileResponses(res *transfer.CreateResult) []map[string]any {
@@ -345,8 +386,8 @@ func (s *Server) handlePutChunk(w http.ResponseWriter, r *http.Request) {
 		})
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"fileId":         fileID,
-		"chunkIndex":     idx,
+		"fileId":          fileID,
+		"chunkIndex":      idx,
 		"completedChunks": count,
 	})
 }
@@ -457,8 +498,8 @@ func (s *Server) handleCompleteFile(w http.ResponseWriter, r *http.Request) {
 		})
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"fileId":   fileID,
-		"sha256":   shaActual,
+		"fileId":    fileID,
+		"sha256":    shaActual,
 		"savedPath": finalPath,
 	})
 }

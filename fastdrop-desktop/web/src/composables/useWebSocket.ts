@@ -103,6 +103,16 @@ export function useWebSocket(opts: UseWebSocketOptions): {
           missedPongs = 0
           return
         }
+        if (msg?.type === 'heartbeat.ping') {
+          // Mobile peers expect an application-level pong; the browser's
+          // native control-frame handling does not satisfy that watchdog.
+          ws?.send(JSON.stringify({
+            version: 1,
+            type: 'heartbeat.pong',
+            timestamp: Date.now(),
+          }))
+          return
+        }
         opts.handlers.onMessage?.(msg)
       } catch {
         // ignore malformed frames

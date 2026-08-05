@@ -18,12 +18,14 @@ class ServerState {
     this.status = ServerStatus.idle,
     this.port = 9527,
     this.deviceName = '',
+    this.requirePairConfirmation = false,
     this.errorMessage,
   });
 
   final ServerStatus status;
   final int port;
   final String deviceName;
+  final bool requirePairConfirmation;
   final String? errorMessage;
 
   bool get isRunning => status == ServerStatus.running;
@@ -32,12 +34,15 @@ class ServerState {
     ServerStatus? status,
     int? port,
     String? deviceName,
+    bool? requirePairConfirmation,
     String? errorMessage,
   }) {
     return ServerState(
       status: status ?? this.status,
       port: port ?? this.port,
       deviceName: deviceName ?? this.deviceName,
+      requirePairConfirmation:
+          requirePairConfirmation ?? this.requirePairConfirmation,
       errorMessage: errorMessage,
     );
   }
@@ -57,15 +62,23 @@ class FastDropServerNotifier extends StateNotifier<ServerState> {
   FastDropServer? _server;
 
   static const _enabledKey = 'fastdrop.server_enabled';
+  static const _requirePairConfirmationKey =
+      'fastdrop.require_pair_confirmation';
   bool _enabled = true;
+  bool _requirePairConfirmation = false;
 
   bool get isEnabled => _enabled;
 
   Future<void> _loadEnabled() async {
     final prefs = await SharedPreferences.getInstance();
     _enabled = prefs.getBool(_enabledKey) ?? true;
+    _requirePairConfirmation =
+        prefs.getBool(_requirePairConfirmationKey) ?? false;
+    state = state.copyWith(
+      requirePairConfirmation: _requirePairConfirmation,
+    );
     if (_enabled) {
-      start();
+      await start();
     }
   }
 
@@ -82,6 +95,18 @@ class FastDropServerNotifier extends StateNotifier<ServerState> {
     }
   }
 
+  /// Toggle whether an incoming pairing request needs local approval.
+  Future<void> setRequirePairConfirmation(bool value) async {
+    _requirePairConfirmation = value;
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setBool(_requirePairConfirmationKey, value);
+    _server?.pairingHandler.requireConfirmation = value;
+    if (!value) {
+      ref.read(pendingPairRequestsProvider.notifier).clear();
+    }
+    state = state.copyWith(requirePairConfirmation: value);
+  }
+
   /// Start the embedded server.
   Future<void> start() async {
     if (state.isRunning || state.status == ServerStatus.starting) return;
@@ -91,7 +116,7 @@ class FastDropServerNotifier extends StateNotifier<ServerState> {
 
     try {
       final deviceId = await DeviceIdManager.getDeviceId();
-      final deviceName = await _getDeviceName();
+      final deviceName = DeviceIdManager.anonymousDeviceName(deviceId);
 
       final localDevice = DeviceInfo(
         deviceId: deviceId,
@@ -102,6 +127,7 @@ class FastDropServerNotifier extends StateNotifier<ServerState> {
 
       final server = FastDropServer(
         localDevice: localDevice,
+        requirePairConfirmation: _requirePairConfirmation,
         onPairRequest: (request) {
           debugPrint('[Server] Pair request from ${request.device.deviceName}');
           ref.read(pendingPairRequestsProvider.notifier).addRequest(request);
@@ -131,6 +157,7 @@ class FastDropServerNotifier extends StateNotifier<ServerState> {
         status: ServerStatus.running,
         deviceName: deviceName,
         port: server.port,
+        requirePairConfirmation: _requirePairConfirmation,
       );
 
       debugPrint('[Server] Running on port ${server.port}');
@@ -162,7 +189,9 @@ class FastDropServerNotifier extends StateNotifier<ServerState> {
     ref.read(incomingTransfersProvider.notifier).clear();
     ref.read(activeServerTransfersProvider.notifier).clear();
 
-    state = const ServerState();
+    state = ServerState(
+      requirePairConfirmation: _requirePairConfirmation,
+    );
   }
 
   /// Accept a pending pair request.
@@ -217,30 +246,6 @@ class FastDropServerNotifier extends StateNotifier<ServerState> {
     if (Platform.isWindows) return 'windows';
     if (Platform.isLinux) return 'linux';
     return 'unknown';
-  }
-
-  static Future<String> _getDeviceName() async {
-    // On Android, Platform.localHostname returns "localhost" which is useless.
-    // Read the device model from /system/build.prop (readable by apps).
-    if (Platform.isAndroid) {
-      try {
-        final buildProp = File('/system/build.prop');
-        if (buildProp.existsSync()) {
-          final lines = await buildProp.readAsLines();
-          for (final line in lines) {
-            if (line.startsWith('ro.product.model=')) {
-              final model = line.substring('ro.product.model='.length).trim();
-              if (model.isNotEmpty) return model;
-            }
-          }
-        }
-      } catch (_) {}
-    }
-    try {
-      final hostname = Platform.localHostname;
-      if (hostname.isNotEmpty && hostname != 'localhost') return hostname;
-    } catch (_) {}
-    return 'FastDrop Device';
   }
 
   @override

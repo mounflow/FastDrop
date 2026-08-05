@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 
@@ -45,7 +46,7 @@ func New(s *Server) http.Handler {
 	mux := http.NewServeMux()
 
 	// --- system ---
-	mux.HandleFunc("GET /api/v1/health", handleHealth)
+	mux.HandleFunc("GET /api/v1/health", s.handleHealth)
 	mux.HandleFunc("GET /api/v1/server/info", s.handleServerInfo)
 	mux.HandleFunc("GET /api/v1/capabilities", s.handleCapabilities)
 
@@ -68,6 +69,7 @@ func New(s *Server) http.Handler {
 	mux.HandleFunc("GET /api/v1/transfers/active", s.withAuth(s.handleListActiveTransfers))
 	mux.HandleFunc("GET /api/v1/transfers/{transferId}", s.withAuth(s.handleGetTransfer))
 	mux.HandleFunc("POST /api/v1/transfers/{transferId}/cancel", s.withAuth(s.handleCancelTransfer))
+	mux.HandleFunc("POST /api/v1/transfers/{transferId}/offer", s.withAuth(s.handleOfferTransfer))
 	mux.HandleFunc("POST /api/v1/transfers/{transferId}/retry", s.withAuth(s.handleRetryTransfer))
 	mux.HandleFunc("DELETE /api/v1/transfers/{transferId}", s.withAuth(s.handleDeleteTransfer))
 
@@ -86,7 +88,32 @@ func New(s *Server) http.Handler {
 	// --- current pair token (for the QR code) ---
 	mux.HandleFunc("GET /api/v1/pair/qr", s.handleCurrentQRPayload)
 
-	return withRecover(mux)
+	return withRecover(withLANPeerCORS(mux))
+}
+
+// withLANPeerCORS allows the UI hosted by one FastDrop peer to call another
+// peer directly. Authenticated routes still require both session headers; we
+// echo a concrete HTTP(S) Origin and never use a wildcard.
+func withLANPeerCORS(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		origin := r.Header.Get("Origin")
+		if origin != "" {
+			if parsed, err := url.Parse(origin); err == nil &&
+				(parsed.Scheme == "http" || parsed.Scheme == "https") &&
+				parsed.Host != "" {
+				w.Header().Set("Access-Control-Allow-Origin", origin)
+				w.Header().Set("Vary", "Origin")
+				w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, HEAD, OPTIONS")
+				w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization, X-Session-Id")
+				w.Header().Set("Access-Control-Max-Age", "3600")
+			}
+		}
+		if r.Method == http.MethodOptions {
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
 }
 
 // withRecover wraps the handler to convert panics into 500s.
@@ -117,33 +144,36 @@ func requestID(r *http.Request) string {
 }
 
 // handleHealth is a simple liveness probe.
-func handleHealth(w http.ResponseWriter, r *http.Request) {
+func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{
-		"status":   "ok",
-		"version":  "0.1.0",
-		"protocol": 1,
+		"status":     "ok",
+		"deviceId":   s.Cfg.Server.DeviceID,
+		"deviceName": s.Cfg.Server.DeviceName,
+		"platform":   "windows",
+		"version":    "0.1.0",
+		"protocol":   1,
 	})
 }
 
 func (s *Server) handleServerInfo(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{
-		"deviceId":   "local",
-		"name":       s.Cfg.Server.DeviceName,
-		"platform":   "windows",
-		"protocol":   1,
-		"version":    "0.1.0",
-		"port":       s.Cfg.Server.Port,
+		"deviceId":    s.Cfg.Server.DeviceID,
+		"name":        s.Cfg.Server.DeviceName,
+		"platform":    "windows",
+		"protocol":    1,
+		"version":     "0.1.0",
+		"port":        s.Cfg.Server.Port,
 		"mdnsEnabled": s.Cfg.Discovery.MdnsEnabled,
 	})
 }
 
 func (s *Server) handleCapabilities(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{
-		"chunkSize":          s.Cfg.Transfer.ChunkSize,
-		"maxConcurrentFiles": s.Cfg.Transfer.MaxConcurrentFiles,
+		"chunkSize":           s.Cfg.Transfer.ChunkSize,
+		"maxConcurrentFiles":  s.Cfg.Transfer.MaxConcurrentFiles,
 		"maxConcurrentChunks": s.Cfg.Transfer.MaxConcurrentChunks,
-		"maxGlobalHTTP":      s.Cfg.Transfer.MaxGlobalHTTP,
-		"supportedVersions":  []int{1},
+		"maxGlobalHTTP":       s.Cfg.Transfer.MaxGlobalHTTP,
+		"supportedVersions":   []int{1},
 	})
 }
 

@@ -61,12 +61,26 @@ class PairingHandler {
   PairingHandler({
     required SessionManager sessionManager,
     required DeviceInfo localDevice,
+    bool requireConfirmation = false,
     this.onPairRequest,
   })  : _sessionManager = sessionManager,
-        _localDevice = localDevice;
+        _localDevice = localDevice,
+        _requireConfirmation = requireConfirmation;
 
   final SessionManager _sessionManager;
   final DeviceInfo _localDevice;
+  bool _requireConfirmation;
+
+  bool get requireConfirmation => _requireConfirmation;
+
+  set requireConfirmation(bool value) {
+    _requireConfirmation = value;
+    if (!value) {
+      for (final request in _requests.values.toList()) {
+        acceptRequest(request.requestId);
+      }
+    }
+  }
 
   /// Called when a new pair request needs user confirmation.
   PairRequestCallback? onPairRequest;
@@ -170,7 +184,8 @@ class PairingHandler {
   // ---------------------------------------------------------------------------
 
   /// Create a pair request (from QR or discover flow).
-  ServerPairRequest _createRequest(DeviceInfo device, {bool viaDiscover = false}) {
+  ServerPairRequest _createRequest(DeviceInfo device,
+      {bool viaDiscover = false}) {
     final requestId = TokenManager.generateToken();
     final request = ServerPairRequest(
       requestId: requestId,
@@ -180,8 +195,11 @@ class PairingHandler {
     );
     _requests[requestId] = request;
 
-    // Notify UI.
-    onPairRequest?.call(request);
+    if (_requireConfirmation) {
+      onPairRequest?.call(request);
+    } else {
+      acceptRequest(requestId);
+    }
 
     // Auto-expire after 30s.
     Timer(ServerPairRequest.confirmTimeout, () {
@@ -244,7 +262,9 @@ class PairingHandler {
   /// POST /api/v1/pair/request — QR-based pair request.
   Future<Response> handlePairRequest(Request request) async {
     final body = await _readJson(request);
-    if (body == null) return _error(400, 'INVALID_REQUEST', 'Invalid JSON body');
+    if (body == null) {
+      return _error(400, 'INVALID_REQUEST', 'Invalid JSON body');
+    }
 
     final pairId = body['pairId'] as String?;
     final token = body['token'] as String?;
@@ -263,17 +283,21 @@ class PairingHandler {
     final device = DeviceInfo.fromJson(deviceJson);
     final pairRequest = _createRequest(device);
 
-    return _json(201, PairRequestResponse(
-      requestId: pairRequest.requestId,
-      status: pairRequest.status,
-      expiresIn: ServerPairRequest.confirmTimeout.inSeconds,
-    ).toJson());
+    return _json(
+        201,
+        PairRequestResponse(
+          requestId: pairRequest.requestId,
+          status: pairRequest.status,
+          expiresIn: ServerPairRequest.confirmTimeout.inSeconds,
+        ).toJson());
   }
 
   /// POST /api/v1/pair/discover — mDNS-based pair request (no token needed).
   Future<Response> handlePairDiscover(Request request) async {
     final body = await _readJson(request);
-    if (body == null) return _error(400, 'INVALID_REQUEST', 'Invalid JSON body');
+    if (body == null) {
+      return _error(400, 'INVALID_REQUEST', 'Invalid JSON body');
+    }
 
     final deviceJson = body['device'] as Map<String, dynamic>?;
     if (deviceJson == null) {
@@ -283,11 +307,13 @@ class PairingHandler {
     final device = DeviceInfo.fromJson(deviceJson);
     final pairRequest = _createRequest(device, viaDiscover: true);
 
-    return _json(201, PairRequestResponse(
-      requestId: pairRequest.requestId,
-      status: pairRequest.status,
-      expiresIn: ServerPairRequest.confirmTimeout.inSeconds,
-    ).toJson());
+    return _json(
+        201,
+        PairRequestResponse(
+          requestId: pairRequest.requestId,
+          status: pairRequest.status,
+          expiresIn: ServerPairRequest.confirmTimeout.inSeconds,
+        ).toJson());
   }
 
   /// GET /api/v1/pair/requests/<requestId> — poll pair request status.
@@ -303,17 +329,21 @@ class PairingHandler {
     }
 
     if (pairRequest.status == 'accepted') {
-      return _json(200, PairAccepted(
-        status: 'accepted',
-        session: pairRequest.sessionInfo!,
-        server: pairRequest.serverInfo!,
-      ).toJson());
+      return _json(
+          200,
+          PairAccepted(
+            status: 'accepted',
+            session: pairRequest.sessionInfo!,
+            server: pairRequest.serverInfo!,
+          ).toJson());
     }
 
     return _json(200, {
       'status': pairRequest.status,
-      if (pairRequest.status == 'rejected') 'reason': 'User rejected the pairing request',
-      if (pairRequest.status == 'expired') 'reason': 'Pairing request timed out',
+      if (pairRequest.status == 'rejected')
+        'reason': 'User rejected the pairing request',
+      if (pairRequest.status == 'expired')
+        'reason': 'Pairing request timed out',
     });
   }
 

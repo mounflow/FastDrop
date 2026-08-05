@@ -10,6 +10,15 @@ import (
 
 func TestDefaultValues(t *testing.T) {
 	cfg := Default()
+	if cfg.Server.DeviceID == "" {
+		t.Fatal("default device id is empty")
+	}
+	if !strings.HasPrefix(cfg.Server.DeviceName, "FastDrop-PC-") {
+		t.Fatalf("default device name is not anonymous: %q", cfg.Server.DeviceName)
+	}
+	if cfg.Security.RequirePairConfirmation {
+		t.Fatal("pair confirmation should be disabled by default")
+	}
 	if cfg.Server.Port != DefaultPort {
 		t.Errorf("port = %d, want %d", cfg.Server.Port, DefaultPort)
 	}
@@ -35,6 +44,14 @@ func TestLoadMissingFile(t *testing.T) {
 	}
 	if cfg.Server.Port != DefaultPort {
 		t.Errorf("port = %d", cfg.Server.Port)
+	}
+	firstID := cfg.Server.DeviceID
+	loaded, err := Load()
+	if err != nil {
+		t.Fatalf("second Load: %v", err)
+	}
+	if loaded.Server.DeviceID != firstID {
+		t.Fatalf("device id was not persisted: %q != %q", loaded.Server.DeviceID, firstID)
 	}
 }
 
@@ -71,6 +88,37 @@ func TestLoadUserOverride(t *testing.T) {
 	// Untouched field should retain default.
 	if cfg.Security.PairTokenTTLSeconds != 60 {
 		t.Errorf("pair ttl defaulted wrong: %d", cfg.Security.PairTokenTTLSeconds)
+	}
+}
+
+func TestLoadMigratesLegacyHostnameDefault(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("APPDATA", dir)
+	host, err := os.Hostname()
+	if err != nil || host == "" {
+		t.Skip("hostname unavailable")
+	}
+
+	cfgDir := filepath.Join(dir, "FastDrop")
+	if err := os.MkdirAll(cfgDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	data, _ := json.Marshal(map[string]any{
+		"server": map[string]any{
+			"deviceId":   "12345678-1234-1234-1234-123456789abc",
+			"deviceName": host,
+		},
+	})
+	if err := os.WriteFile(filepath.Join(cfgDir, "config.json"), data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Server.DeviceName != "FastDrop-PC-123456" {
+		t.Fatalf("legacy hostname was not anonymized: %q", cfg.Server.DeviceName)
 	}
 }
 

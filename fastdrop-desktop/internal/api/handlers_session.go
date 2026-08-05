@@ -38,7 +38,7 @@ func upsertDeviceFromRequest(s *Server, dev pairing.ClientDevice, ip string) *da
 // on pair-accept (§6.2).
 func serverDeviceIdentity(s *Server) pairing.ClientDevice {
 	return pairing.ClientDevice{
-		DeviceID:   "windows-local",
+		DeviceID:   s.Cfg.Server.DeviceID,
 		DeviceName: s.Cfg.Server.DeviceName,
 		Platform:   "windows",
 		AppVersion: "0.1.0",

@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"errors"
 	"net/http"
 
@@ -10,9 +11,9 @@ import (
 
 // pairRequestPayload mirrors §6.1.
 type pairRequestPayload struct {
-	PairID string                `json:"pairId"`
-	Token  string                `json:"token"`
-	Device pairing.ClientDevice  `json:"device"`
+	PairID string               `json:"pairId"`
+	Token  string               `json:"token"`
+	Device pairing.ClientDevice `json:"device"`
 }
 
 // handlePairRequest is called by the phone after scanning the QR.
@@ -36,6 +37,12 @@ func (s *Server) handlePairRequest(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		writeError(w, http.StatusBadRequest, "PAIR_TOKEN_INVALID", err.Error(), requestID(r))
 		return
+	}
+	if !s.Cfg.Security.RequirePairConfirmation {
+		if _, err := s.acceptPairRequest(r.Context(), req.RequestID, clientIP(r)); err != nil {
+			writeError(w, http.StatusInternalServerError, "INTERNAL_ERROR", err.Error(), requestID(r))
+			return
+		}
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"requestId": req.RequestID,
@@ -67,6 +74,12 @@ func (s *Server) handlePairDiscover(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "INTERNAL_ERROR", err.Error(), requestID(r))
 		return
+	}
+	if !s.Cfg.Security.RequirePairConfirmation {
+		if _, err := s.acceptPairRequest(r.Context(), req.RequestID, clientIP(r)); err != nil {
+			writeError(w, http.StatusInternalServerError, "INTERNAL_ERROR", err.Error(), requestID(r))
+			return
+		}
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"requestId": req.RequestID,
@@ -117,18 +130,27 @@ func (s *Server) handlePairStatus(w http.ResponseWriter, r *http.Request) {
 // handlePairAccept is invoked by the PC user (via Vue UI) to approve.
 func (s *Server) handlePairAccept(w http.ResponseWriter, r *http.Request) {
 	requestID := r.PathValue("requestId")
-	req, ok := s.Pairing.GetRequest(requestID)
-	if !ok {
-		writeError(w, http.StatusNotFound, "PAIR_REQUEST_EXPIRED", "no such pair request", requestID)
-		return
-	}
-	// Create the session.
-	ip := clientIP(r)
-	dbDev := upsertDeviceFromRequest(s, req.Device, ip)
-	sess, err := s.Session.Create(r.Context(), dbDev.ID, ip)
+	result, err := s.acceptPairRequest(r.Context(), requestID, clientIP(r))
 	if err != nil {
+		if errors.Is(err, pairing.ErrRequestNotFound) || errors.Is(err, pairing.ErrRequestExpired) {
+			writeError(w, http.StatusNotFound, "PAIR_REQUEST_EXPIRED", err.Error(), requestID)
+			return
+		}
 		writeError(w, http.StatusInternalServerError, "INTERNAL_ERROR", err.Error(), requestID)
 		return
+	}
+	writePairAccepted(w, result)
+}
+
+func (s *Server) acceptPairRequest(ctx context.Context, requestID, sourceIP string) (*pairing.AcceptResult, error) {
+	req, ok := s.Pairing.GetRequest(requestID)
+	if !ok {
+		return nil, pairing.ErrRequestNotFound
+	}
+	dbDev := upsertDeviceFromRequest(s, req.Device, sourceIP)
+	sess, err := s.Session.Create(ctx, dbDev.ID, sourceIP)
+	if err != nil {
+		return nil, err
 	}
 	result := pairing.AcceptResult{
 		SessionID:    sess.ID,
@@ -138,21 +160,25 @@ func (s *Server) handlePairAccept(w http.ResponseWriter, r *http.Request) {
 		ServerDevice: serverDeviceIdentity(s),
 	}
 	if err := s.Pairing.Accept(requestID, result); err != nil {
-		writeError(w, http.StatusBadRequest, "PAIR_REQUEST_EXPIRED", err.Error(), requestID)
-		return
+		_ = s.Session.Revoke(ctx, sess.ID)
+		return nil, err
 	}
+	return &result, nil
+}
+
+func writePairAccepted(w http.ResponseWriter, result *pairing.AcceptResult) {
 	writeJSON(w, http.StatusOK, map[string]any{
 		"status": "accepted",
 		"session": map[string]any{
-			"sessionId":    sess.ID,
-			"accessToken":  sess.Token,
-			"expiresIn":    sess.ExpiresIn(),
-			"websocketUrl": s.WebSocketURL(req.Device.DeviceID),
+			"sessionId":    result.SessionID,
+			"accessToken":  result.SessionToken,
+			"expiresIn":    result.ExpiresIn,
+			"websocketUrl": result.WebsocketURL,
 		},
 		"server": map[string]any{
-			"deviceId":   "local",
-			"deviceName": s.Cfg.Server.DeviceName,
-			"platform":   "windows",
+			"deviceId":   result.ServerDevice.DeviceID,
+			"deviceName": result.ServerDevice.DeviceName,
+			"platform":   result.ServerDevice.Platform,
 		},
 	})
 }
@@ -192,12 +218,12 @@ func (s *Server) handleListPairRequests(w http.ResponseWriter, r *http.Request) 
 	out := make([]map[string]any, 0, len(requests))
 	for _, req := range requests {
 		out = append(out, map[string]any{
-			"requestId":  req.RequestID,
-			"pairId":     req.PairID,
-			"status":     string(req.Status),
-			"device":     req.Device,
-			"expiresIn":  int(timeUntil(req.ExpiresAt).Seconds()),
-			"createdAt":  req.CreatedAt.UnixMilli(),
+			"requestId": req.RequestID,
+			"pairId":    req.PairID,
+			"status":    string(req.Status),
+			"device":    req.Device,
+			"expiresIn": int(timeUntil(req.ExpiresAt).Seconds()),
+			"createdAt": req.CreatedAt.UnixMilli(),
 		})
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"requests": out})

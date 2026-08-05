@@ -3,6 +3,7 @@
 import type {
   CreateTransferBody,
   CreateTransferResult,
+  DeviceInfo,
   PairAccepted,
   PairRequestResponse,
   QRPayload,
@@ -10,6 +11,12 @@ import type {
 } from './types'
 
 const SESSION_KEY = 'fastdrop_session'
+
+export interface ApiTarget {
+  baseUrl?: string
+  sessionId: string
+  accessToken: string
+}
 
 let cachedSession: { sessionId: string; accessToken: string } | null = null
 
@@ -36,12 +43,18 @@ export function restoreSession(): { sessionId: string; accessToken: string } | n
   return null
 }
 
-function authHeaders(): HeadersInit {
-  if (!cachedSession) return {}
+function authHeaders(target?: ApiTarget): HeadersInit {
+  const session = target ?? cachedSession
+  if (!session) return {}
   return {
-    Authorization: `Bearer ${cachedSession.accessToken}`,
-    'X-Session-Id': cachedSession.sessionId,
+    Authorization: `Bearer ${session.accessToken}`,
+    'X-Session-Id': session.sessionId,
   }
+}
+
+function targetUrl(path: string, target?: { baseUrl?: string }): string {
+  if (!target?.baseUrl) return path
+  return `${target.baseUrl.replace(/\/$/, '')}${path}`
 }
 
 async function asJson<T>(resp: Response): Promise<T> {
@@ -64,8 +77,8 @@ export async function refreshPairToken(pairId: string): Promise<QRPayload> {
   }))
 }
 
-export async function pollPairStatus(requestId: string): Promise<PairRequestResponse> {
-  return asJson(await fetch(`/api/v1/pair/requests/${requestId}`))
+export async function pollPairStatus(requestId: string, baseUrl?: string): Promise<PairRequestResponse | PairAccepted> {
+  return asJson(await fetch(`${baseUrl?.replace(/\/$/, '') ?? ''}/api/v1/pair/requests/${requestId}`))
 }
 
 export async function acceptPair(requestId: string): Promise<PairAccepted> {
@@ -83,6 +96,7 @@ export async function rejectPair(requestId: string): Promise<void> {
 
 export interface PendingPairRequest {
   requestId: string
+  deviceId: string
   deviceName: string
   platform: string
   status: string
@@ -90,11 +104,23 @@ export interface PendingPairRequest {
 }
 
 export async function listPairRequests(): Promise<{ requests: PendingPairRequest[] }> {
-  return asJson(await fetch('/api/v1/pair/requests'))
+  const data = await asJson<{ requests: Array<PendingPairRequest & { device?: DeviceInfo }> }>(
+    await fetch('/api/v1/pair/requests'),
+  )
+  return {
+    requests: (data.requests || []).map((request) => ({
+      requestId: request.requestId,
+      deviceId: request.deviceId || request.device?.deviceId || request.requestId,
+      deviceName: request.deviceName || request.device?.deviceName || 'Unknown Device',
+      platform: request.platform || request.device?.platform || 'unknown',
+      status: request.status,
+      createdAt: request.createdAt,
+    })),
+  }
 }
 
-export async function listTransfers(): Promise<TransferRow[]> {
-  const data = await asJson<{ transfers: TransferRow[] }>(await fetch('/api/v1/transfers', { headers: authHeaders() }))
+export async function listTransfers(target?: ApiTarget): Promise<TransferRow[]> {
+  const data = await asJson<{ transfers: TransferRow[] }>(await fetch(targetUrl('/api/v1/transfers', target), { headers: authHeaders(target) }))
   return data.transfers || []
 }
 
@@ -110,40 +136,48 @@ export async function revokeSession(): Promise<void> {
   })
 }
 
-export async function getTransfer(transferId: string): Promise<TransferRow> {
-  return asJson<TransferRow>(await fetch(`/api/v1/transfers/${transferId}`, { headers: authHeaders() }))
+export async function getTransfer(transferId: string, target?: ApiTarget): Promise<TransferRow> {
+  return asJson<TransferRow>(await fetch(targetUrl(`/api/v1/transfers/${transferId}`, target), { headers: authHeaders(target) }))
 }
 
-export async function createTransfer(body: CreateTransferBody, signal?: AbortSignal): Promise<CreateTransferResult> {
-  return asJson(await fetch('/api/v1/transfers', {
+export async function createTransfer(body: CreateTransferBody, signal?: AbortSignal, target?: ApiTarget): Promise<CreateTransferResult> {
+  return asJson(await fetch(targetUrl('/api/v1/transfers', target), {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json', ...authHeaders() },
+    headers: { 'Content-Type': 'application/json', ...authHeaders(target) },
     body: JSON.stringify(body),
     signal,
   }))
 }
 
-export async function uploadChunk(url: string, data: ArrayBuffer, signal?: AbortSignal): Promise<void> {
-  const resp = await fetch(url, {
+export async function uploadChunk(url: string, data: ArrayBuffer, signal?: AbortSignal, target?: ApiTarget): Promise<void> {
+  const resp = await fetch(url.startsWith('http') ? url : targetUrl(url, target), {
     method: 'PUT',
-    headers: { 'Content-Type': 'application/octet-stream', ...authHeaders() },
+    headers: { 'Content-Type': 'application/octet-stream', ...authHeaders(target) },
     body: data,
     signal,
   })
   if (!resp.ok) throw new Error(`chunk upload failed: ${resp.status}`)
 }
 
-export async function completeFile(url: string, size: number, sha256: string, signal?: AbortSignal): Promise<{ sha256: string; savedPath: string }> {
-  return asJson(await fetch(url, {
+export async function completeFile(url: string, size: number, sha256: string, signal?: AbortSignal, target?: ApiTarget): Promise<{ sha256: string; savedPath: string }> {
+  return asJson(await fetch(url.startsWith('http') ? url : targetUrl(url, target), {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json', ...authHeaders() },
+    headers: { 'Content-Type': 'application/json', ...authHeaders(target) },
     body: JSON.stringify({ size, sha256 }),
     signal,
   }))
 }
 
-export async function cancelTransfer(transferId: string): Promise<void> {
-  await fetch(`/api/v1/transfers/${transferId}/cancel`, { method: 'POST', headers: authHeaders() })
+export async function cancelTransfer(transferId: string, target?: ApiTarget): Promise<void> {
+  await fetch(targetUrl(`/api/v1/transfers/${transferId}/cancel`, target), { method: 'POST', headers: authHeaders(target) })
+}
+
+export async function announceTransfer(transferId: string, target?: ApiTarget): Promise<void> {
+  const response = await fetch(targetUrl(`/api/v1/transfers/${transferId}/offer`, target), {
+    method: 'POST',
+    headers: authHeaders(target),
+  })
+  if (!response.ok) throw new Error(`offer failed: ${response.status}`)
 }
 
 // ========== Settings ==========
@@ -153,6 +187,7 @@ export interface Settings {
   conflictPolicy: string
   deviceName: string
   mdnsEnabled: boolean
+  requirePairConfirmation: boolean
 }
 
 export async function getSettings(): Promise<Settings> {
@@ -163,6 +198,7 @@ export async function updateSettings(body: {
   downloadDirectory?: string
   conflictPolicy?: string
   mdnsEnabled?: boolean
+  requirePairConfirmation?: boolean
 }): Promise<Settings> {
   return asJson(await fetch('/api/v1/settings', {
     method: 'PUT',
@@ -172,13 +208,48 @@ export async function updateSettings(body: {
 }
 
 /// Download a file's content as a Blob (full GET, no Range).
-export async function downloadFileBlob(transferId: string, fileId: string, signal?: AbortSignal): Promise<Blob> {
-  const resp = await fetch(`/api/v1/transfers/${transferId}/files/${fileId}/content`, {
-    headers: authHeaders(),
+export async function downloadFileBlob(transferId: string, fileId: string, signal?: AbortSignal, target?: ApiTarget): Promise<Blob> {
+  const resp = await fetch(targetUrl(`/api/v1/transfers/${transferId}/files/${fileId}/content`, target), {
+    headers: authHeaders(target),
     signal,
   })
   if (!resp.ok) throw new Error(`download failed: ${resp.status}`)
   return resp.blob()
+}
+
+export interface ServerInfo {
+  deviceId: string
+  name: string
+  platform: string
+  protocol: number
+  port: number
+}
+
+export async function getServerInfo(baseUrl = ''): Promise<ServerInfo> {
+  const root = baseUrl.replace(/\/$/, '')
+  const response = await fetch(`${root}/api/v1/server/info`)
+  if (response.ok) return asJson(response)
+  const health = await asJson<{
+    deviceId?: string
+    deviceName?: string
+    platform?: string
+    protocol?: number
+  }>(await fetch(`${root}/api/v1/health`))
+  return {
+    deviceId: health.deviceId || `${health.deviceName || 'peer'}@${root}`,
+    name: health.deviceName || 'FastDrop Device',
+    platform: health.platform || 'unknown',
+    protocol: health.protocol || 1,
+    port: Number(new URL(root || location.origin).port || 9527),
+  }
+}
+
+export async function requestDiscoverPair(baseUrl: string, device: DeviceInfo): Promise<PairRequestResponse> {
+  return asJson(await fetch(`${baseUrl.replace(/\/$/, '')}/api/v1/pair/discover`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ device }),
+  }))
 }
 
 /// Trigger a browser file-save dialog for the given Blob.

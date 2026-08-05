@@ -16,17 +16,19 @@ func saveCfg(cfg *config.Config) error {
 
 // settingsResponse is the JSON shape returned by GET /api/v1/settings.
 type settingsResponse struct {
-	DownloadDirectory string `json:"downloadDirectory"`
-	ConflictPolicy    string `json:"conflictPolicy"`
-	DeviceName        string `json:"deviceName"`
-	MdnsEnabled       bool   `json:"mdnsEnabled"`
+	DownloadDirectory       string `json:"downloadDirectory"`
+	ConflictPolicy          string `json:"conflictPolicy"`
+	DeviceName              string `json:"deviceName"`
+	MdnsEnabled             bool   `json:"mdnsEnabled"`
+	RequirePairConfirmation bool   `json:"requirePairConfirmation"`
 }
 
 // updateSettingsRequest is the JSON body for PUT /api/v1/settings.
 type updateSettingsRequest struct {
-	DownloadDirectory *string `json:"downloadDirectory,omitempty"`
-	ConflictPolicy    *string `json:"conflictPolicy,omitempty"`
-	MdnsEnabled       *bool   `json:"mdnsEnabled,omitempty"`
+	DownloadDirectory       *string `json:"downloadDirectory,omitempty"`
+	ConflictPolicy          *string `json:"conflictPolicy,omitempty"`
+	MdnsEnabled             *bool   `json:"mdnsEnabled,omitempty"`
+	RequirePairConfirmation *bool   `json:"requirePairConfirmation,omitempty"`
 }
 
 // handleGetSettings returns the current configurable settings.
@@ -41,10 +43,11 @@ func (s *Server) handleGetSettings(w http.ResponseWriter, r *http.Request) {
 		mdnsEnabled = s.Discovery.IsEnabled()
 	}
 	writeJSON(w, http.StatusOK, settingsResponse{
-		DownloadDirectory: s.Storage.DownloadDir(),
-		ConflictPolicy:    s.Cfg.Storage.ConflictPolicy,
-		DeviceName:        s.Cfg.Server.DeviceName,
-		MdnsEnabled:       mdnsEnabled,
+		DownloadDirectory:       s.Storage.DownloadDir(),
+		ConflictPolicy:          s.Cfg.Storage.ConflictPolicy,
+		DeviceName:              s.Cfg.Server.DeviceName,
+		MdnsEnabled:             mdnsEnabled,
+		RequirePairConfirmation: s.Cfg.Security.RequirePairConfirmation,
 	})
 }
 
@@ -110,6 +113,11 @@ func (s *Server) handleUpdateSettings(w http.ResponseWriter, r *http.Request) {
 		changed = true
 	}
 
+	if req.RequirePairConfirmation != nil {
+		s.Cfg.Security.RequirePairConfirmation = *req.RequirePairConfirmation
+		changed = true
+	}
+
 	if changed {
 		if err := saveCfg(s.Cfg); err != nil {
 			writeError(w, http.StatusInternalServerError, "INTERNAL_ERROR", "failed to save config: "+err.Error(), reqID)
@@ -123,9 +131,10 @@ func (s *Server) handleUpdateSettings(w http.ResponseWriter, r *http.Request) {
 		mdnsEnabled = s.Discovery.IsEnabled()
 	}
 	writeJSON(w, http.StatusOK, settingsResponse{
-		DownloadDirectory: s.Storage.DownloadDir(),
-		ConflictPolicy:    s.Cfg.Storage.ConflictPolicy,
-		DeviceName:        s.Cfg.Server.DeviceName,
-		MdnsEnabled:       mdnsEnabled,
+		DownloadDirectory:       s.Storage.DownloadDir(),
+		ConflictPolicy:          s.Cfg.Storage.ConflictPolicy,
+		DeviceName:              s.Cfg.Server.DeviceName,
+		MdnsEnabled:             mdnsEnabled,
+		RequirePairConfirmation: s.Cfg.Security.RequirePairConfirmation,
 	})
 }

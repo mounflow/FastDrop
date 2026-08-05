@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"net"
 	"strings"
 	"sync"
 
@@ -52,13 +53,17 @@ func (p *MdnsPublisher) Start(_ context.Context, info ServiceInfo) error {
 		"pairing=required",
 		"tls=0",
 	}
+	var advertisedIPs []net.IP
+	if ip := net.ParseIP(info.Host); ip != nil {
+		advertisedIPs = []net.IP{ip}
+	}
 	service, err := mdns.NewMDNSService(
-		host,                                      // instance name (human-readable)
+		host, // instance name (human-readable)
 		strings.TrimSuffix(ServiceType, ".local."), // "_fastdrop._tcp"
-		"",                                        // domain
-		fqdn,                                      // hostName (FQDN)
-		info.Port,                                 // port
-		nil,                                       // IPs (let mdns pick)
+		"",            // domain
+		fqdn,          // hostName (FQDN)
+		info.Port,     // port
+		advertisedIPs, // advertise only the selected LAN address
 		txt,
 	)
 	if err != nil {

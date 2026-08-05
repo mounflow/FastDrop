@@ -2,9 +2,13 @@ import 'dart:io';
 
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter/services.dart';
 import 'package:path_provider/path_provider.dart';
 
+import 'package:fastdrop_mobile/core/providers.dart';
+import 'package:fastdrop_mobile/core/storage/session_store.dart';
+import 'package:fastdrop_mobile/features/devices/multi_device_connection.dart';
 import 'package:fastdrop_mobile/shared/widgets/file_icon.dart';
 
 /// A file browser with three category tabs (Images, Videos, All Files)
@@ -13,22 +17,39 @@ import 'package:fastdrop_mobile/shared/widgets/file_icon.dart';
 /// Selected files are shown in a list with thumbnails, sizes, and the
 /// ability to remove individual items before sending. A "Send" FAB
 /// navigates to the transfer screen with the final selection.
-class FilePickerScreen extends StatefulWidget {
+class FilePickerScreen extends ConsumerStatefulWidget {
   const FilePickerScreen({super.key});
 
   @override
-  State<FilePickerScreen> createState() => _FilePickerScreenState();
+  ConsumerState<FilePickerScreen> createState() => _FilePickerScreenState();
 }
 
-class _FilePickerScreenState extends State<FilePickerScreen>
+class _FilePickerScreenState extends ConsumerState<FilePickerScreen>
     with SingleTickerProviderStateMixin {
   late final TabController _tabController;
   final List<_SelectedFile> _selected = [];
+  final Set<String> _selectedDeviceIds = {};
+  List<Device> _devices = const [];
+  bool _routeArgsLoaded = false;
 
   @override
   void initState() {
     super.initState();
     _tabController = TabController(length: 3, vsync: this);
+    _loadDevices();
+  }
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    if (_routeArgsLoaded) return;
+    _routeArgsLoaded = true;
+    final args = ModalRoute.of(context)?.settings.arguments;
+    if (args is Map<String, dynamic>) {
+      final ids = (args['initialDeviceIds'] as List<dynamic>? ?? const [])
+          .map((value) => value.toString());
+      _selectedDeviceIds.addAll(ids);
+    }
   }
 
   @override
@@ -44,6 +65,7 @@ class _FilePickerScreenState extends State<FilePickerScreen>
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
+    final connections = ref.watch(multiDeviceConnectionProvider);
 
     return Scaffold(
       appBar: AppBar(
@@ -59,6 +81,7 @@ class _FilePickerScreenState extends State<FilePickerScreen>
       ),
       body: Column(
         children: [
+          _buildRecipientSelector(theme, connections),
           if (_selected.isNotEmpty)
             Container(
               width: double.infinity,
@@ -113,6 +136,57 @@ class _FilePickerScreenState extends State<FilePickerScreen>
     );
   }
 
+  Widget _buildRecipientSelector(
+      ThemeData theme, MultiDeviceConnectionState connections) {
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.fromLTRB(16, 12, 16, 10),
+      decoration: BoxDecoration(
+        color: theme.colorScheme.surfaceContainerHighest.withOpacity(0.35),
+        border: Border(bottom: BorderSide(color: theme.dividerColor)),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(
+            '发送到（可多选）',
+            style: theme.textTheme.labelLarge,
+          ),
+          const SizedBox(height: 8),
+          if (_devices.isEmpty)
+            const Text('暂无已配对设备')
+          else
+            Wrap(
+              spacing: 8,
+              runSpacing: 6,
+              children: _devices.map((device) {
+                final connected =
+                    connections.peer(device.id)?.isConnected ?? false;
+                return FilterChip(
+                  selected: _selectedDeviceIds.contains(device.id),
+                  onSelected: connected
+                      ? (selected) => setState(() {
+                            if (selected) {
+                              _selectedDeviceIds.add(device.id);
+                            } else {
+                              _selectedDeviceIds.remove(device.id);
+                            }
+                          })
+                      : null,
+                  avatar: Icon(
+                    connected ? Icons.circle : Icons.circle_outlined,
+                    size: 10,
+                    color: connected ? Colors.green : Colors.grey,
+                  ),
+                  label: Text(connected ? device.name : '${device.name}（离线）'),
+                );
+              }).toList(),
+            ),
+        ],
+      ),
+    );
+  }
+
   Widget _buildCategoryTab(
     ThemeData theme,
     String label,
@@ -124,7 +198,8 @@ class _FilePickerScreenState extends State<FilePickerScreen>
       child: Column(
         mainAxisSize: MainAxisSize.min,
         children: [
-          Icon(icon, size: 64, color: theme.colorScheme.primary.withOpacity(0.5)),
+          Icon(icon,
+              size: 64, color: theme.colorScheme.primary.withOpacity(0.5)),
           const SizedBox(height: 16),
           Text(hint, style: theme.textTheme.bodyLarge),
           const SizedBox(height: 24),
@@ -154,13 +229,13 @@ class _FilePickerScreenState extends State<FilePickerScreen>
         itemCount: _selected.length,
         itemBuilder: (context, index) {
           final file = _selected[index];
-          final ext = file.name.contains('.')
-              ? file.name.split('.').last
-              : null;
+          final ext =
+              file.name.contains('.') ? file.name.split('.').last : null;
 
           return ListTile(
             leading: file.platformFile.path != null &&
-                    ['jpg', 'jpeg', 'png', 'gif', 'webp'].contains(ext?.toLowerCase())
+                    ['jpg', 'jpeg', 'png', 'gif', 'webp']
+                        .contains(ext?.toLowerCase())
                 ? ClipRRect(
                     borderRadius: BorderRadius.circular(4),
                     child: Image.file(
@@ -212,7 +287,8 @@ class _FilePickerScreenState extends State<FilePickerScreen>
       setState(() {
         for (final pf in relocated) {
           // Avoid duplicates by path.
-          final alreadyIn = _selected.any((s) => s.platformFile.path == pf.path);
+          final alreadyIn =
+              _selected.any((s) => s.platformFile.path == pf.path);
           if (!alreadyIn && pf.path != null) {
             _selected.add(_SelectedFile(
               name: pf.name,
@@ -230,13 +306,24 @@ class _FilePickerScreenState extends State<FilePickerScreen>
     }
   }
 
-  void _onSend() {
+  Future<void> _onSend() async {
     if (_selected.isEmpty) return;
 
-    final paths = _selected
-        .map((f) => f.platformFile.path)
-        .whereType<String>()
-        .toList();
+    final connectedIds = ref
+        .read(multiDeviceConnectionProvider)
+        .connectedDevices
+        .map((device) => device.id)
+        .toSet();
+    final targets = _selectedDeviceIds.intersection(connectedIds).toList();
+    if (targets.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('请至少选择一个在线接收设备')),
+      );
+      return;
+    }
+
+    final paths =
+        _selected.map((f) => f.platformFile.path).whereType<String>().toList();
 
     if (paths.isEmpty) return;
 
@@ -251,8 +338,22 @@ class _FilePickerScreenState extends State<FilePickerScreen>
 
     Navigator.of(context).pushNamed(
       '/transfer',
-      arguments: {'filePaths': paths},
+      arguments: {
+        'filePaths': paths,
+        'targetDeviceIds': targets,
+      },
     );
+  }
+
+  Future<void> _loadDevices() async {
+    final devices = await ref.read(deviceStoreProvider).loadDevices();
+    if (!mounted) return;
+    setState(() {
+      _devices = devices;
+      _selectedDeviceIds.removeWhere(
+        (id) => !devices.any((device) => device.id == id),
+      );
+    });
   }
 
   // ---------------------------------------------------------------------------
@@ -270,7 +371,8 @@ class _FilePickerScreenState extends State<FilePickerScreen>
     // cache files at any time — a 200 MB upload takes ~30 s and the cache
     // copy gets yanked mid-read (FileSystemException errno 0).
     final tempBase = await getApplicationSupportDirectory();
-    final uploadDir = Directory('${tempBase.path}${Platform.pathSeparator}fastdrop_upload');
+    final uploadDir =
+        Directory('${tempBase.path}${Platform.pathSeparator}fastdrop_upload');
     if (!uploadDir.existsSync()) {
       uploadDir.createSync(recursive: true);
     }
@@ -293,7 +395,6 @@ class _FilePickerScreenState extends State<FilePickerScreen>
         final src = File(pf.path!);
         final destPath =
             '${uploadDir.path}${Platform.pathSeparator}${DateTime.now().millisecondsSinceEpoch}_${pf.name}';
-        final dest = File(destPath);
         await src.copy(destPath);
         // Delete the file_picker cache copy immediately.
         try {

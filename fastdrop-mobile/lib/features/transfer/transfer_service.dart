@@ -24,6 +24,8 @@ typedef TransferStateCallback = void Function(
   String? errorMessage,
 });
 
+typedef TransferReadyCallback = Future<void> Function(String transferId);
+
 /// Core business logic for file transfers between the phone and the PC.
 ///
 /// Handles chunk splitting, concurrent upload with spec limits
@@ -35,6 +37,9 @@ class TransferService {
     this.wsClient,
     this.onProgress,
     this.onStateChange,
+    this.waitForReady,
+    this.cleanupSourceFiles = true,
+    this.fileLimiter,
   });
 
   final FastDropHttpClient httpClient;
@@ -46,20 +51,30 @@ class TransferService {
   /// Called when a transfer batch reaches a terminal state.
   final TransferStateCallback? onStateChange;
 
+  /// Waits for receivers that require explicit user acceptance before their
+  /// first chunk can be uploaded. Desktop receivers leave this null.
+  final TransferReadyCallback? waitForReady;
+
+  /// Fan-out disables per-service cleanup because all recipients read the
+  /// same private picker copy. The pool removes it once every send settles.
+  final bool cleanupSourceFiles;
+
+  /// Shared by the M:N pool so the two-file ceiling applies across all
+  /// recipients, not once per peer.
+  final HttpRequestLimiter? fileLimiter;
+
   // ---------------------------------------------------------------------------
   // Concurrency limits (matching Go backend spec)
   // ---------------------------------------------------------------------------
 
   static const int _maxChunksPerFile = 3;
   static const int _maxConcurrentFiles = 2;
-  static const int _maxGlobalHttp = 6;
 
   // ---------------------------------------------------------------------------
   // Internal state
   // ---------------------------------------------------------------------------
 
   final Map<String, _FileUploadState> _uploadStates = {};
-  bool _disposed = false;
 
   // Token for cancelling an in-flight transfer, keyed by offerId.
   final Map<String, CancelToken> _cancelTokens = {};
@@ -89,6 +104,7 @@ class TransferService {
     final batchOfferId = offerId ?? _generateOfferId();
     final cancelToken = CancelToken();
     _cancelTokens[batchOfferId] = cancelToken;
+    var callbackTransferId = batchOfferId;
 
     // Declared outside try so the finally block can clean up temp copies.
     final fileInfos = <_FileInfo>[];
@@ -137,6 +153,7 @@ class TransferService {
       final createResult = CreateTransferResult.fromJson(
         jsonDecode(createResponse.body) as Map<String, dynamic>,
       );
+      callbackTransferId = createResult.transferId;
       debugPrint('[TransferService] transferId=${createResult.transferId} '
           'files=${createResult.files.map((f) => f.fileId).toList()}');
 
@@ -144,6 +161,11 @@ class TransferService {
 
       // Store mapping so cancel-by-transferId works.
       _transferIdToOfferId[createResult.transferId] = batchOfferId;
+
+      if (waitForReady != null) {
+        onStateChange?.call(createResult.transferId, 'waiting_accept');
+        await waitForReady!(createResult.transferId);
+      }
 
       // 3. Build the chunk plan for each file.
       final chunkSize = FileUtils.chunkSize;
@@ -170,11 +192,12 @@ class TransferService {
     } catch (e) {
       debugPrint('[TransferService] uploadFiles error: $e');
       if (cancelToken.isCancelled) {
-        onStateChange?.call(batchOfferId, 'cancelled');
+        onStateChange?.call(callbackTransferId, 'cancelled');
       } else {
-        final code = e is ChunkUploadException ? 'TRANSFER_FAILED' : 'INTERNAL_ERROR';
+        final code =
+            e is ChunkUploadException ? 'TRANSFER_FAILED' : 'INTERNAL_ERROR';
         onStateChange?.call(
-          batchOfferId,
+          callbackTransferId,
           'failed',
           errorCode: code,
           errorMessage: e.toString(),
@@ -188,7 +211,9 @@ class TransferService {
       for (final fi in fileInfos) {
         try {
           final cached = File(fi.path);
-          if (fi.path.contains('fastdrop_upload') && await cached.exists()) {
+          if (cleanupSourceFiles &&
+              fi.path.contains('fastdrop_upload') &&
+              await cached.exists()) {
             await cached.delete();
           }
         } catch (_) {
@@ -196,8 +221,7 @@ class TransferService {
         }
       }
       _cancelTokens.remove(batchOfferId);
-      _transferIdToOfferId
-          .removeWhere((_, offerId) => offerId == batchOfferId);
+      _transferIdToOfferId.removeWhere((_, offerId) => offerId == batchOfferId);
     }
   }
 
@@ -323,7 +347,6 @@ class TransferService {
 
   /// Release resources held by this service.
   void dispose() {
-    _disposed = true;
     for (final token in _cancelTokens.values) {
       token.cancel();
     }
@@ -347,11 +370,14 @@ class TransferService {
 
       final group = fileTasks.skip(i).take(_maxConcurrentFiles).toList();
       await Future.wait(
-        group.map((task) => _uploadFile(
-              transferId: transferId,
-              task: task,
-              cancelToken: cancelToken,
-            )),
+        group.map((task) {
+          Future<void> upload() => _uploadFile(
+                transferId: transferId,
+                task: task,
+                cancelToken: cancelToken,
+              );
+          return fileLimiter?.run(upload) ?? upload();
+        }),
       );
     }
   }

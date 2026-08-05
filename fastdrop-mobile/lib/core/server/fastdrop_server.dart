@@ -19,6 +19,7 @@ import 'package:shelf_router/shelf_router.dart';
 class FastDropServer {
   FastDropServer({
     required DeviceInfo localDevice,
+    bool requirePairConfirmation = false,
     PairRequestCallback? onPairRequest,
     TransferRequestCallback? onTransferRequest,
   }) : _localDevice = localDevice {
@@ -26,6 +27,7 @@ class FastDropServer {
     pairingHandler = PairingHandler(
       sessionManager: sessionManager,
       localDevice: localDevice,
+      requireConfirmation: requirePairConfirmation,
       onPairRequest: onPairRequest,
     );
     transferReceiver = TransferReceiver(
@@ -70,7 +72,10 @@ class FastDropServer {
     // Wire transfer requests → WS notifications.
     final origOnTransferRequest = transferReceiver.onTransferRequest;
     transferReceiver.onTransferRequest = (transfer) {
-      wsServer.notifyTransferOffer(transfer.transferId, transfer.toJson());
+      // The authenticated peer created this transfer and already owns its
+      // metadata. The local receive-confirmation UI is driven directly by
+      // onTransferRequest; echoing file.offer over WS would make the sender
+      // display its own upload as an incoming file.
       origOnTransferRequest?.call(transfer);
     };
 
@@ -122,6 +127,7 @@ class FastDropServer {
       return Response.ok(
         jsonEncode({
           'status': 'ok',
+          'deviceId': _localDevice.deviceId,
           'deviceName': _localDevice.deviceName,
           'platform': _localDevice.platform,
           'appVersion': _localDevice.appVersion ?? '1.0.0',
