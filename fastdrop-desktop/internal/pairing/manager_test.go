@@ -114,6 +114,34 @@ func TestRequestAcceptFlow(t *testing.T) {
 	}
 }
 
+func TestListActiveRequestsIncludesAcceptedResultCopy(t *testing.T) {
+	m := newManager()
+	request, err := m.CreateDirectRequest(ClientDevice{
+		DeviceID: "phone-1", DeviceName: "FastDrop-PHONE1", Platform: "android",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := m.Accept(request.RequestID, AcceptResult{
+		SessionID: "session-1", SessionToken: "secret-token",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	active := m.ListActiveRequests()
+	if len(active) != 1 || active[0].Status != StatusAccepted || active[0].Result == nil {
+		t.Fatalf("active requests=%+v", active)
+	}
+	if active[0].Result.SessionToken != "secret-token" {
+		t.Fatalf("accepted result missing token: %+v", active[0].Result)
+	}
+	active[0].Result.SessionToken = "mutated"
+	stored, _ := m.GetRequest(request.RequestID)
+	if stored.Result.SessionToken != "secret-token" {
+		t.Fatal("ListActiveRequests leaked mutable manager state")
+	}
+}
+
 func TestRequestReject(t *testing.T) {
 	m := newManager()
 	pt, _ := m.Issue("PC", "")

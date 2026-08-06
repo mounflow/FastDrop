@@ -53,10 +53,10 @@ func New(s *Server) http.Handler {
 	// --- pairing ---
 	mux.HandleFunc("POST /api/v1/pair/request", s.withSizeLimit(64*1024, s.withPairRateLimit(s.handlePairRequest)))
 	mux.HandleFunc("POST /api/v1/pair/discover", s.withSizeLimit(64*1024, s.withPairRateLimit(s.handlePairDiscover)))
-	mux.HandleFunc("GET /api/v1/pair/requests", s.handleListPairRequests)
+	mux.HandleFunc("GET /api/v1/pair/requests", withLocalDesktop(s.handleListPairRequests))
 	mux.HandleFunc("GET /api/v1/pair/requests/{requestId}", s.handlePairStatus)
-	mux.HandleFunc("POST /api/v1/pair/requests/{requestId}/accept", s.withPairRateLimit(s.handlePairAccept))
-	mux.HandleFunc("POST /api/v1/pair/requests/{requestId}/reject", s.withPairRateLimit(s.handlePairReject))
+	mux.HandleFunc("POST /api/v1/pair/requests/{requestId}/accept", withLocalDesktop(s.withPairRateLimit(s.handlePairAccept)))
+	mux.HandleFunc("POST /api/v1/pair/requests/{requestId}/reject", withLocalDesktop(s.withPairRateLimit(s.handlePairReject)))
 	mux.HandleFunc("POST /api/v1/pair/token/refresh", s.withAuth(s.handlePairTokenRefresh))
 
 	// --- session ---
@@ -102,7 +102,7 @@ func withLANPeerCORS(next http.Handler) http.Handler {
 			isWebOrigin := err == nil &&
 				(parsed.Scheme == "http" || parsed.Scheme == "https") &&
 				parsed.Host != ""
-			isDesktopOrigin := origin == "wails://wails" || origin == "null"
+			isDesktopOrigin := origin == "http://wails.localhost" || origin == "wails://wails" || origin == "null"
 			if isWebOrigin || isDesktopOrigin {
 				w.Header().Set("Access-Control-Allow-Origin", origin)
 				w.Header().Set("Vary", "Origin")

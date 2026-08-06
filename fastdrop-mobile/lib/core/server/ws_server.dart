@@ -14,11 +14,29 @@ class _WsConnection {
   _WsConnection(this.channel, this.sessionId);
 
   final WebSocketChannel channel;
-  final String sessionId;
+  String sessionId;
   Timer? heartbeatTimer;
   int missedPongs = 0;
   bool authenticated = false;
 }
+
+/// Public, token-free view of a device connected to the embedded server.
+class AuthenticatedPeer {
+  const AuthenticatedPeer({
+    required this.sessionId,
+    required this.deviceId,
+    required this.deviceName,
+    required this.platform,
+  });
+
+  final String sessionId;
+  final String deviceId;
+  final String deviceName;
+  final String platform;
+}
+
+typedef PeerConnectedCallback = void Function(AuthenticatedPeer peer);
+typedef PeerDisconnectedCallback = void Function(String sessionId);
 
 /// WebSocket hub for the embedded FastDrop server.
 ///
@@ -29,11 +47,15 @@ class WsServer {
   WsServer({
     required SessionManager sessionManager,
     TransferReceiver? transferReceiver,
+    this.onPeerConnected,
+    this.onPeerDisconnected,
   })  : _sessionManager = sessionManager,
         _transferReceiver = transferReceiver;
 
   final SessionManager _sessionManager;
   final TransferReceiver? _transferReceiver;
+  final PeerConnectedCallback? onPeerConnected;
+  final PeerDisconnectedCallback? onPeerDisconnected;
 
   final HashMap<String, _WsConnection> _connections = HashMap();
 
@@ -169,7 +191,18 @@ class WsServer {
       return;
     }
 
-    // Authenticated!
+    final session = _sessionManager.get(sessionId);
+    if (session == null) {
+      _send(conn, {
+        'type': 'auth.result',
+        'payload': {'ok': false, 'message': 'Invalid session'},
+      });
+      return;
+    }
+
+    // Authenticated. Keep the original connection object because the stream
+    // listener closes over it; replacing it would make heartbeat pongs update
+    // a stale object while the watchdog increments a different one.
     authTimeout.cancel();
     conn.authenticated = true;
 
@@ -183,17 +216,23 @@ class WsServer {
         .sink
         .close(4002, 'Replaced by new connection');
 
-    final newConn = _WsConnection(conn.channel, sessionId)
-      ..authenticated = true;
-    _connections[sessionId] = newConn;
+    conn.sessionId = sessionId;
+    _connections[sessionId] = conn;
 
     // Start heartbeat for this connection.
-    _startHeartbeat(newConn);
+    _startHeartbeat(conn);
 
-    _send(newConn, {
+    _send(conn, {
       'type': 'auth.result',
       'payload': {'ok': true},
     });
+
+    onPeerConnected?.call(AuthenticatedPeer(
+      sessionId: session.sessionId,
+      deviceId: session.deviceId,
+      deviceName: session.deviceName,
+      platform: session.platform,
+    ));
 
     debugPrint(
         '[WsServer] Session authenticated: ${sessionId.substring(0, 8)}...');
@@ -214,7 +253,11 @@ class WsServer {
 
   void _handleDisconnect(_WsConnection conn) {
     conn.heartbeatTimer?.cancel();
+    if (!identical(_connections[conn.sessionId], conn)) return;
     _connections.remove(conn.sessionId);
+    if (conn.authenticated) {
+      onPeerDisconnected?.call(conn.sessionId);
+    }
     debugPrint('[WsServer] Disconnected: ${conn.sessionId}');
   }
 
@@ -282,11 +325,15 @@ class WsServer {
 
   /// Close all connections (server shutdown).
   void closeAll() {
-    for (final conn in _connections.values) {
+    final connections = _connections.values.toList(growable: false);
+    _connections.clear();
+    for (final conn in connections) {
       conn.heartbeatTimer?.cancel();
       conn.channel.sink.close(1001, 'Server shutting down');
+      if (conn.authenticated) {
+        onPeerDisconnected?.call(conn.sessionId);
+      }
     }
-    _connections.clear();
   }
 
   void _send(_WsConnection conn, Map<String, dynamic> msg) {

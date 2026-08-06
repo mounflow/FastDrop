@@ -1,8 +1,15 @@
 const SESSION_KEY = 'fastdrop_session';
-function localUrl(path) {
+export function localServiceOrigin() {
+    const isWails = location.hostname === 'wails.localhost' || location.protocol === 'wails:';
+    if (isWails)
+        return 'http://127.0.0.1:9527';
     if (location.protocol === 'http:' || location.protocol === 'https:')
-        return path;
-    return `http://127.0.0.1:9527${path}`;
+        return location.origin;
+    return 'http://127.0.0.1:9527';
+}
+function localUrl(path) {
+    const origin = localServiceOrigin();
+    return origin === location.origin ? path : `${origin}${path}`;
 }
 let cachedSession = null;
 export function setSession(s) {
@@ -84,8 +91,13 @@ export async function listPairRequests() {
             platform: request.platform || request.device?.platform || 'unknown',
             status: request.status,
             createdAt: request.createdAt,
+            session: request.session,
+            server: request.server,
         })),
     };
+}
+export async function getHealth() {
+    return asJson(await fetch(localUrl('/api/v1/health')));
 }
 export async function listTransfers(target) {
     const data = await asJson(await fetch(targetUrl('/api/v1/transfers', target), { headers: authHeaders(target) }));

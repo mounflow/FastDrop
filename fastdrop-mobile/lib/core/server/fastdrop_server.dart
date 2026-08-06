@@ -22,6 +22,8 @@ class FastDropServer {
     bool requirePairConfirmation = false,
     PairRequestCallback? onPairRequest,
     TransferRequestCallback? onTransferRequest,
+    PeerConnectedCallback? onPeerConnected,
+    PeerDisconnectedCallback? onPeerDisconnected,
   }) : _localDevice = localDevice {
     sessionManager = SessionManager();
     pairingHandler = PairingHandler(
@@ -37,6 +39,8 @@ class FastDropServer {
     wsServer = WsServer(
       sessionManager: sessionManager,
       transferReceiver: transferReceiver,
+      onPeerConnected: onPeerConnected,
+      onPeerDisconnected: onPeerDisconnected,
     );
   }
 

@@ -12,9 +12,16 @@ import type {
 
 const SESSION_KEY = 'fastdrop_session'
 
+export function localServiceOrigin(): string {
+  const isWails = location.hostname === 'wails.localhost' || location.protocol === 'wails:'
+  if (isWails) return 'http://127.0.0.1:9527'
+  if (location.protocol === 'http:' || location.protocol === 'https:') return location.origin
+  return 'http://127.0.0.1:9527'
+}
+
 function localUrl(path: string): string {
-  if (location.protocol === 'http:' || location.protocol === 'https:') return path
-  return `http://127.0.0.1:9527${path}`
+  const origin = localServiceOrigin()
+  return origin === location.origin ? path : `${origin}${path}`
 }
 
 export interface ApiTarget {
@@ -106,6 +113,8 @@ export interface PendingPairRequest {
   platform: string
   status: string
   createdAt: number
+  session?: PairAccepted['session']
+  server?: PairAccepted['server']
 }
 
 export async function listPairRequests(): Promise<{ requests: PendingPairRequest[] }> {
@@ -120,8 +129,23 @@ export async function listPairRequests(): Promise<{ requests: PendingPairRequest
       platform: request.platform || request.device?.platform || 'unknown',
       status: request.status,
       createdAt: request.createdAt,
+      session: request.session,
+      server: request.server,
     })),
   }
+}
+
+export interface HealthInfo {
+  status: string
+  deviceId: string
+  deviceName: string
+  platform: string
+  protocol: number
+  version: string
+}
+
+export async function getHealth(): Promise<HealthInfo> {
+  return asJson(await fetch(localUrl('/api/v1/health')))
 }
 
 export async function listTransfers(target?: ApiTarget): Promise<TransferRow[]> {
@@ -194,6 +218,9 @@ export interface Settings {
   mdnsEnabled: boolean
   requirePairConfirmation: boolean
   requireReceiveConfirmation: boolean
+  networkName: string
+  networkType: string
+  localAddresses: string[]
 }
 
 export async function getSettings(): Promise<Settings> {

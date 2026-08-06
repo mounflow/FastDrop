@@ -6,6 +6,7 @@ import AppIcon from './components/AppIcon.vue'
 import {
   acceptPair,
   fetchQR,
+  getHealth,
   getServerInfo,
   getSettings,
   getTransfer,
@@ -13,6 +14,7 @@ import {
   pollPairStatus,
   rejectPair,
   requestDiscoverPair,
+  localServiceOrigin,
   updateSettings,
   type PendingPairRequest,
 } from './api'
@@ -89,6 +91,9 @@ const settingsConflictPolicy = ref('rename')
 const settingsMdnsEnabled = ref(false)
 const settingsRequirePairConfirmation = ref(false)
 const settingsRequireReceiveConfirmation = ref(false)
+const settingsNetworkName = ref('局域网')
+const settingsNetworkType = ref('lan')
+const settingsLocalAddresses = ref<string[]>([])
 const settingsSaving = ref(false)
 const settingsSaved = ref(false)
 const settingsError = ref<string | null>(null)
@@ -96,6 +101,7 @@ const settingsError = ref<string | null>(null)
 let pairPollTimer: ReturnType<typeof setInterval> | null = null
 let qrTimer: ReturnType<typeof setInterval> | null = null
 let countdownTimer: ReturnType<typeof setInterval> | null = null
+let healthTimer: ReturnType<typeof setInterval> | null = null
 
 const peerPool = usePeerPool({
   onMessage: (peerId, message) => handleWSMessage(peerId, message),
@@ -125,7 +131,17 @@ const serviceAddress = computed(() => {
   if (qrPayload.value) return `${qrPayload.value.host}:${qrPayload.value.port}`
   return '127.0.0.1:9527'
 })
-const serviceOnline = computed(() => !qrError.value)
+const serviceOnline = ref(false)
+const desktopNetworkLabel = computed(() => {
+  const name = settingsNetworkName.value || (settingsNetworkType.value === 'wifi' ? 'Wi-Fi' : '局域网')
+  return name || serviceAddress.value.split(':')[0]
+})
+const desktopNetworkTitle = computed(() => {
+  const addresses = settingsLocalAddresses.value.length
+    ? settingsLocalAddresses.value.join(' / ')
+    : serviceAddress.value.split(':')[0]
+  return `${desktopNetworkLabel.value} · ${addresses}`
+})
 
 const navItems: Array<{ id: DesktopPage; label: string; icon: string }> = [
   { id: 'home', label: '首页', icon: 'home' },
@@ -134,9 +150,14 @@ const navItems: Array<{ id: DesktopPage; label: string; icon: string }> = [
   { id: 'settings', label: '设置', icon: 'settings' },
 ]
 
-function localServiceOrigin(): string {
-  if (location.protocol === 'http:' || location.protocol === 'https:') return location.origin
-  return 'http://127.0.0.1:9527'
+async function checkServiceHealth() {
+  try {
+    const health = await getHealth()
+    serviceOnline.value = health.status === 'ok'
+    serverName.value = health.deviceName || serverName.value
+  } catch {
+    serviceOnline.value = false
+  }
 }
 
 function selectPage(page: DesktopPage) {
@@ -382,6 +403,21 @@ function rejectOffer(offer: IncomingOffer) {
 async function pollPairRequests() {
   try {
     const result = await listPairRequests()
+    for (const request of result.requests || []) {
+      if (request.status !== 'accepted' || !request.session) continue
+      const peerId = `${request.deviceId}::${request.session.sessionId}`
+      if (peerViews.value.some((peer) => peer.id === peerId)) continue
+      peerPool.addPeer({
+        id: peerId,
+        name: request.deviceName || '新设备',
+        platform: request.platform || 'unknown',
+        baseUrl: localServiceOrigin(),
+        sessionId: request.session.sessionId,
+        accessToken: request.session.accessToken,
+        websocketUrl: request.session.websocketUrl,
+        role: 'local-session',
+      })
+    }
     pendingRequests.value = (result.requests || []).filter((item) => item.status === 'waiting_confirmation')
     showPairDialog.value = pendingRequests.value.length > 0
   } catch {
@@ -480,6 +516,9 @@ async function loadSettings() {
     settingsMdnsEnabled.value = settings.mdnsEnabled
     settingsRequirePairConfirmation.value = settings.requirePairConfirmation
     settingsRequireReceiveConfirmation.value = settings.requireReceiveConfirmation
+    settingsNetworkName.value = settings.networkName
+    settingsNetworkType.value = settings.networkType
+    settingsLocalAddresses.value = settings.localAddresses || []
     serverName.value = settings.deviceName
   } catch (error) {
     settingsError.value = readableError(error)
@@ -517,6 +556,11 @@ async function copyDownloadPath() {
   await navigator.clipboard.writeText(settingsDownloadDir.value)
   settingsSaved.value = true
   window.setTimeout(() => { settingsSaved.value = false }, 1200)
+}
+
+async function refreshDesktopState() {
+  await Promise.all([checkServiceHealth(), pollPairRequests(), loadHistory(), loadSettings()])
+  if (serviceOnline.value) await refreshQR()
 }
 
 function normalizePeerUrl(input: string): string {
@@ -585,18 +629,20 @@ function readableError(error: unknown): string {
 }
 
 onMounted(async () => {
-  await loadSettings()
   peerPool.restore()
+  await Promise.all([loadSettings(), checkServiceHealth()])
   await Promise.all([refreshQR(), loadHistory(), pollPairRequests()])
   pairPollTimer = setInterval(pollPairRequests, 2000)
   qrTimer = setInterval(refreshQR, 50_000)
   countdownTimer = setInterval(tickCountdown, 1000)
+  healthTimer = setInterval(checkServiceHealth, 5000)
 })
 
 onUnmounted(() => {
   if (pairPollTimer) clearInterval(pairPollTimer)
   if (qrTimer) clearInterval(qrTimer)
   if (countdownTimer) clearInterval(countdownTimer)
+  if (healthTimer) clearInterval(healthTimer)
   peerPool.close()
 })
 </script>
@@ -628,7 +674,7 @@ onUnmounted(() => {
       <div class="sidebar-status">
         <div class="service-line">
           <span :class="['status-dot', { online: serviceOnline }]"></span>
-          <div><strong>{{ serviceOnline ? '服务运行中' : '服务不可用' }}</strong><small>{{ serviceAddress }}</small></div>
+          <div><strong>{{ serviceOnline ? '服务运行中' : '服务不可用' }}</strong><small>{{ serviceAddress }}</small><small :title="desktopNetworkTitle">{{ desktopNetworkLabel }}</small></div>
         </div>
         <div class="version-line"><span>FastDrop 1.0.0</span><span>局域网模式</span></div>
       </div>
@@ -645,7 +691,7 @@ onUnmounted(() => {
         </div>
         <div class="topbar-actions">
           <span class="online-pill"><span class="status-dot online"></span>{{ connectedPeers.length }} 台设备在线</span>
-          <button class="icon-button" title="刷新" @click="loadHistory"><AppIcon name="refresh" :size="19" /></button>
+          <button class="icon-button" title="刷新" @click="refreshDesktopState"><AppIcon name="refresh" :size="19" /></button>
         </div>
       </header>
 
@@ -783,6 +829,8 @@ onUnmounted(() => {
             <div class="settings-card-heading"><div class="setting-icon"><AppIcon name="wifi" :size="20" /></div><div><h2>连接与发现</h2><p>FastDrop 只在当前局域网内广播设备信息。</p></div></div>
             <label class="toggle-row"><div><strong>mDNS 自动发现</strong><span>允许附近设备免扫码发现本机。</span></div><input v-model="settingsMdnsEnabled" type="checkbox" role="switch" /></label>
             <label class="toggle-row"><div><strong>配对时需要确认</strong><span>默认关闭；开启后需在本机同意新的配对请求。</span></div><input v-model="settingsRequirePairConfirmation" type="checkbox" role="switch" /></label>
+            <div class="setting-detail"><span>当前网络</span><strong>{{ settingsNetworkName || '局域网' }}</strong></div>
+            <div class="setting-detail"><span>本机地址</span><code>{{ settingsLocalAddresses.join(' / ') || '未检测到局域网地址' }}</code></div>
             <div class="setting-detail"><span>监听端口</span><code>9527</code></div>
           </section>
 

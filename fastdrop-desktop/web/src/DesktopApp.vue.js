@@ -1,7 +1,7 @@
 import { computed, onMounted, onUnmounted, ref } from 'vue';
 import QRCode from 'qrcode';
 import AppIcon from './components/AppIcon.vue';
-import { acceptPair, fetchQR, getServerInfo, getSettings, getTransfer, listPairRequests, pollPairStatus, rejectPair, requestDiscoverPair, updateSettings, } from './api';
+import { acceptPair, fetchQR, getHealth, getServerInfo, getSettings, getTransfer, listPairRequests, pollPairStatus, rejectPair, requestDiscoverPair, localServiceOrigin, updateSettings, } from './api';
 import { usePeerPool, } from './composables/usePeerPool';
 const activePage = ref('home');
 const dragOver = ref(false);
@@ -32,12 +32,16 @@ const settingsConflictPolicy = ref('rename');
 const settingsMdnsEnabled = ref(false);
 const settingsRequirePairConfirmation = ref(false);
 const settingsRequireReceiveConfirmation = ref(false);
+const settingsNetworkName = ref('局域网');
+const settingsNetworkType = ref('lan');
+const settingsLocalAddresses = ref([]);
 const settingsSaving = ref(false);
 const settingsSaved = ref(false);
 const settingsError = ref(null);
 let pairPollTimer = null;
 let qrTimer = null;
 let countdownTimer = null;
+let healthTimer = null;
 const peerPool = usePeerPool({
     onMessage: (peerId, message) => handleWSMessage(peerId, message),
     onProgress: handlePoolProgress,
@@ -67,17 +71,32 @@ const serviceAddress = computed(() => {
         return `${qrPayload.value.host}:${qrPayload.value.port}`;
     return '127.0.0.1:9527';
 });
-const serviceOnline = computed(() => !qrError.value);
+const serviceOnline = ref(false);
+const desktopNetworkLabel = computed(() => {
+    const name = settingsNetworkName.value || (settingsNetworkType.value === 'wifi' ? 'Wi-Fi' : '局域网');
+    return name || serviceAddress.value.split(':')[0];
+});
+const desktopNetworkTitle = computed(() => {
+    const addresses = settingsLocalAddresses.value.length
+        ? settingsLocalAddresses.value.join(' / ')
+        : serviceAddress.value.split(':')[0];
+    return `${desktopNetworkLabel.value} · ${addresses}`;
+});
 const navItems = [
     { id: 'home', label: '首页', icon: 'home' },
     { id: 'history', label: '传输记录', icon: 'history' },
     { id: 'received', label: '接收文件', icon: 'inbox' },
     { id: 'settings', label: '设置', icon: 'settings' },
 ];
-function localServiceOrigin() {
-    if (location.protocol === 'http:' || location.protocol === 'https:')
-        return location.origin;
-    return 'http://127.0.0.1:9527';
+async function checkServiceHealth() {
+    try {
+        const health = await getHealth();
+        serviceOnline.value = health.status === 'ok';
+        serverName.value = health.deviceName || serverName.value;
+    }
+    catch {
+        serviceOnline.value = false;
+    }
 }
 function selectPage(page) {
     activePage.value = page;
@@ -313,6 +332,23 @@ function rejectOffer(offer) {
 async function pollPairRequests() {
     try {
         const result = await listPairRequests();
+        for (const request of result.requests || []) {
+            if (request.status !== 'accepted' || !request.session)
+                continue;
+            const peerId = `${request.deviceId}::${request.session.sessionId}`;
+            if (peerViews.value.some((peer) => peer.id === peerId))
+                continue;
+            peerPool.addPeer({
+                id: peerId,
+                name: request.deviceName || '新设备',
+                platform: request.platform || 'unknown',
+                baseUrl: localServiceOrigin(),
+                sessionId: request.session.sessionId,
+                accessToken: request.session.accessToken,
+                websocketUrl: request.session.websocketUrl,
+                role: 'local-session',
+            });
+        }
         pendingRequests.value = (result.requests || []).filter((item) => item.status === 'waiting_confirmation');
         showPairDialog.value = pendingRequests.value.length > 0;
     }
@@ -412,6 +448,9 @@ async function loadSettings() {
         settingsMdnsEnabled.value = settings.mdnsEnabled;
         settingsRequirePairConfirmation.value = settings.requirePairConfirmation;
         settingsRequireReceiveConfirmation.value = settings.requireReceiveConfirmation;
+        settingsNetworkName.value = settings.networkName;
+        settingsNetworkType.value = settings.networkType;
+        settingsLocalAddresses.value = settings.localAddresses || [];
         serverName.value = settings.deviceName;
     }
     catch (error) {
@@ -451,6 +490,11 @@ async function copyDownloadPath() {
     await navigator.clipboard.writeText(settingsDownloadDir.value);
     settingsSaved.value = true;
     window.setTimeout(() => { settingsSaved.value = false; }, 1200);
+}
+async function refreshDesktopState() {
+    await Promise.all([checkServiceHealth(), pollPairRequests(), loadHistory(), loadSettings()]);
+    if (serviceOnline.value)
+        await refreshQR();
 }
 function normalizePeerUrl(input) {
     const withScheme = /^https?:\/\//i.test(input) ? input : `http://${input}`;
@@ -514,12 +558,13 @@ function readableError(error) {
     return labels[message] || message || '操作失败，请重试';
 }
 onMounted(async () => {
-    await loadSettings();
     peerPool.restore();
+    await Promise.all([loadSettings(), checkServiceHealth()]);
     await Promise.all([refreshQR(), loadHistory(), pollPairRequests()]);
     pairPollTimer = setInterval(pollPairRequests, 2000);
     qrTimer = setInterval(refreshQR, 50_000);
     countdownTimer = setInterval(tickCountdown, 1000);
+    healthTimer = setInterval(checkServiceHealth, 5000);
 });
 onUnmounted(() => {
     if (pairPollTimer)
@@ -528,6 +573,8 @@ onUnmounted(() => {
         clearInterval(qrTimer);
     if (countdownTimer)
         clearInterval(countdownTimer);
+    if (healthTimer)
+        clearInterval(healthTimer);
     peerPool.close();
 });
 debugger; /* PartiallyEnd: #3632/scriptSetup.vue */
@@ -598,6 +645,10 @@ __VLS_asFunctionalElement(__VLS_intrinsicElements.strong, __VLS_intrinsicElement
 (__VLS_ctx.serviceOnline ? '服务运行中' : '服务不可用');
 __VLS_asFunctionalElement(__VLS_intrinsicElements.small, __VLS_intrinsicElements.small)({});
 (__VLS_ctx.serviceAddress);
+__VLS_asFunctionalElement(__VLS_intrinsicElements.small, __VLS_intrinsicElements.small)({
+    title: (__VLS_ctx.desktopNetworkTitle),
+});
+(__VLS_ctx.desktopNetworkLabel);
 __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
     ...{ class: "version-line" },
 });
@@ -637,7 +688,7 @@ __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.
 });
 (__VLS_ctx.connectedPeers.length);
 __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
-    ...{ onClick: (__VLS_ctx.loadHistory) },
+    ...{ onClick: (__VLS_ctx.refreshDesktopState) },
     ...{ class: "icon-button" },
     title: "刷新",
 });
@@ -1376,6 +1427,18 @@ else {
         ...{ class: "setting-detail" },
     });
     __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.strong, __VLS_intrinsicElements.strong)({});
+    (__VLS_ctx.settingsNetworkName || '局域网');
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+        ...{ class: "setting-detail" },
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.code, __VLS_intrinsicElements.code)({});
+    (__VLS_ctx.settingsLocalAddresses.join(' / ') || '未检测到局域网地址');
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+        ...{ class: "setting-detail" },
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
     __VLS_asFunctionalElement(__VLS_intrinsicElements.code, __VLS_intrinsicElements.code)({});
     __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
         ...{ class: "settings-actions" },
@@ -1734,6 +1797,8 @@ var __VLS_72;
 /** @type {__VLS_StyleScopedClasses['toggle-row']} */ ;
 /** @type {__VLS_StyleScopedClasses['toggle-row']} */ ;
 /** @type {__VLS_StyleScopedClasses['setting-detail']} */ ;
+/** @type {__VLS_StyleScopedClasses['setting-detail']} */ ;
+/** @type {__VLS_StyleScopedClasses['setting-detail']} */ ;
 /** @type {__VLS_StyleScopedClasses['settings-actions']} */ ;
 /** @type {__VLS_StyleScopedClasses['error-text']} */ ;
 /** @type {__VLS_StyleScopedClasses['success-text']} */ ;
@@ -1804,6 +1869,8 @@ const __VLS_self = (await import('vue')).defineComponent({
             settingsMdnsEnabled: settingsMdnsEnabled,
             settingsRequirePairConfirmation: settingsRequirePairConfirmation,
             settingsRequireReceiveConfirmation: settingsRequireReceiveConfirmation,
+            settingsNetworkName: settingsNetworkName,
+            settingsLocalAddresses: settingsLocalAddresses,
             settingsSaving: settingsSaving,
             settingsSaved: settingsSaved,
             settingsError: settingsError,
@@ -1817,6 +1884,8 @@ const __VLS_self = (await import('vue')).defineComponent({
             displayedHistory: displayedHistory,
             serviceAddress: serviceAddress,
             serviceOnline: serviceOnline,
+            desktopNetworkLabel: desktopNetworkLabel,
+            desktopNetworkTitle: desktopNetworkTitle,
             navItems: navItems,
             selectPage: selectPage,
             openFilePicker: openFilePicker,
@@ -1834,9 +1903,9 @@ const __VLS_self = (await import('vue')).defineComponent({
             handleAccept: handleAccept,
             handleReject: handleReject,
             connectRemotePeer: connectRemotePeer,
-            loadHistory: loadHistory,
             saveSettings: saveSettings,
             copyDownloadPath: copyDownloadPath,
+            refreshDesktopState: refreshDesktopState,
             isTerminal: isTerminal,
             progressPercent: progressPercent,
             formatSize: formatSize,

@@ -9,6 +9,7 @@ import (
 	"unicode"
 
 	"fastdrop-desktop/internal/config"
+	"fastdrop-desktop/internal/netutil"
 )
 
 // saveCfg persists the config to disk.
@@ -18,12 +19,15 @@ func saveCfg(cfg *config.Config) error {
 
 // settingsResponse is the JSON shape returned by GET /api/v1/settings.
 type settingsResponse struct {
-	DownloadDirectory          string `json:"downloadDirectory"`
-	ConflictPolicy             string `json:"conflictPolicy"`
-	DeviceName                 string `json:"deviceName"`
-	MdnsEnabled                bool   `json:"mdnsEnabled"`
-	RequirePairConfirmation    bool   `json:"requirePairConfirmation"`
-	RequireReceiveConfirmation bool   `json:"requireReceiveConfirmation"`
+	DownloadDirectory          string   `json:"downloadDirectory"`
+	ConflictPolicy             string   `json:"conflictPolicy"`
+	DeviceName                 string   `json:"deviceName"`
+	MdnsEnabled                bool     `json:"mdnsEnabled"`
+	RequirePairConfirmation    bool     `json:"requirePairConfirmation"`
+	RequireReceiveConfirmation bool     `json:"requireReceiveConfirmation"`
+	NetworkName                string   `json:"networkName"`
+	NetworkType                string   `json:"networkType"`
+	LocalAddresses             []string `json:"localAddresses"`
 }
 
 // updateSettingsRequest is the JSON body for PUT /api/v1/settings.
@@ -47,6 +51,7 @@ func (s *Server) handleGetSettings(w http.ResponseWriter, r *http.Request) {
 		// since SetEnabled persists below, but defensive).
 		mdnsEnabled = s.Discovery.IsEnabled()
 	}
+	network := netutil.CurrentNetworkInfo()
 	writeJSON(w, http.StatusOK, settingsResponse{
 		DownloadDirectory:          s.Storage.DownloadDir(),
 		ConflictPolicy:             s.Cfg.Storage.ConflictPolicy,
@@ -54,6 +59,9 @@ func (s *Server) handleGetSettings(w http.ResponseWriter, r *http.Request) {
 		MdnsEnabled:                mdnsEnabled,
 		RequirePairConfirmation:    s.Cfg.Security.RequirePairConfirmation,
 		RequireReceiveConfirmation: s.Cfg.Security.RequireReceiveConfirmation,
+		NetworkName:                network.Name,
+		NetworkType:                network.Type,
+		LocalAddresses:             network.LocalAddresses,
 	})
 }
 
@@ -159,6 +167,7 @@ func (s *Server) handleUpdateSettings(w http.ResponseWriter, r *http.Request) {
 	if s.Discovery != nil {
 		mdnsEnabled = s.Discovery.IsEnabled()
 	}
+	network := netutil.CurrentNetworkInfo()
 	writeJSON(w, http.StatusOK, settingsResponse{
 		DownloadDirectory:          s.Storage.DownloadDir(),
 		ConflictPolicy:             s.Cfg.Storage.ConflictPolicy,
@@ -166,5 +175,8 @@ func (s *Server) handleUpdateSettings(w http.ResponseWriter, r *http.Request) {
 		MdnsEnabled:                mdnsEnabled,
 		RequirePairConfirmation:    s.Cfg.Security.RequirePairConfirmation,
 		RequireReceiveConfirmation: s.Cfg.Security.RequireReceiveConfirmation,
+		NetworkName:                network.Name,
+		NetworkType:                network.Type,
+		LocalAddresses:             network.LocalAddresses,
 	})
 }

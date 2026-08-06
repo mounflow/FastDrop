@@ -166,6 +166,14 @@ class FastDropServerNotifier extends StateNotifier<ServerState> {
             Future.microtask(() => acceptTransfer(transfer.transferId));
           }
         },
+        onPeerConnected: (peer) {
+          ref.read(incomingPeerConnectionsProvider.notifier).connected(peer);
+        },
+        onPeerDisconnected: (sessionId) {
+          ref
+              .read(incomingPeerConnectionsProvider.notifier)
+              .disconnected(sessionId);
+        },
       );
 
       await server.start();
@@ -217,6 +225,7 @@ class FastDropServerNotifier extends StateNotifier<ServerState> {
 
     // Clear pending UI state.
     ref.read(pendingPairRequestsProvider.notifier).clear();
+    ref.read(incomingPeerConnectionsProvider.notifier).clear();
     ref.read(incomingTransfersProvider.notifier).clear();
     ref.read(activeServerTransfersProvider.notifier).clear();
 

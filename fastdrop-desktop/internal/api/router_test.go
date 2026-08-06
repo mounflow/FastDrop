@@ -111,22 +111,26 @@ func TestWailsDesktopCORSUsesConcreteOrigin(t *testing.T) {
 	ts := httptest.NewServer(New(srv))
 	defer ts.Close()
 
-	req, err := http.NewRequest(http.MethodOptions, ts.URL+"/api/v1/settings", nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	req.Header.Set("Origin", "wails://wails")
-	req.Header.Set("Access-Control-Request-Method", "GET")
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusNoContent {
-		t.Fatalf("preflight status=%d", resp.StatusCode)
-	}
-	if got := resp.Header.Get("Access-Control-Allow-Origin"); got != "wails://wails" {
-		t.Fatalf("allow-origin=%q", got)
+	for _, origin := range []string{"http://wails.localhost", "wails://wails"} {
+		req, err := http.NewRequest(http.MethodOptions, ts.URL+"/api/v1/settings", nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		req.Header.Set("Origin", origin)
+		req.Header.Set("Access-Control-Request-Method", "GET")
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if resp.StatusCode != http.StatusNoContent {
+			resp.Body.Close()
+			t.Fatalf("origin=%s preflight status=%d", origin, resp.StatusCode)
+		}
+		if got := resp.Header.Get("Access-Control-Allow-Origin"); got != origin {
+			resp.Body.Close()
+			t.Fatalf("origin=%s allow-origin=%q", origin, got)
+		}
+		resp.Body.Close()
 	}
 }
 
@@ -147,6 +151,9 @@ func TestSettingsAreDesktopOnly(t *testing.T) {
 	}
 	if got.DeviceName != cfg.Server.DeviceName || !got.RequirePairConfirmation || got.RequireReceiveConfirmation {
 		t.Fatalf("unexpected settings response: %+v", got)
+	}
+	if got.LocalAddresses == nil || got.NetworkName == "" || got.NetworkType == "" {
+		t.Fatalf("settings missing local network information: %+v", got)
 	}
 
 	lanReq := httptest.NewRequest(http.MethodGet, "/api/v1/settings", nil)
@@ -286,6 +293,28 @@ func TestPairDiscoverAutoAcceptsWhenConfirmationDisabled(t *testing.T) {
 	}
 	if !strings.Contains(body, `"session"`) {
 		t.Fatalf("accepted response has no session: %s", body)
+	}
+
+	resp, body = doReq(t, ts, http.MethodGet, "/api/v1/pair/requests", nil, "")
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("desktop pair list status=%d body=%s", resp.StatusCode, body)
+	}
+	if !strings.Contains(body, `"deviceId":"android-auto"`) ||
+		!strings.Contains(body, `"accessToken"`) ||
+		!strings.Contains(body, `"status":"accepted"`) {
+		t.Fatalf("desktop pair list missing accepted session: %s", body)
+	}
+}
+
+func TestPairManagementListIsDesktopOnly(t *testing.T) {
+	srv, _ := newTestServer(t)
+	h := New(srv)
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/pair/requests", nil)
+	req.RemoteAddr = "192.168.137.50:49152"
+	res := httptest.NewRecorder()
+	h.ServeHTTP(res, req)
+	if res.Code != http.StatusForbidden {
+		t.Fatalf("LAN pair list status=%d body=%s", res.Code, res.Body.String())
 	}
 }
 

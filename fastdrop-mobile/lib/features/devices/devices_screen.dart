@@ -4,7 +4,10 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:fastdrop_mobile/app/theme.dart';
 import 'package:fastdrop_mobile/core/discovery/device_discovery.dart';
 import 'package:fastdrop_mobile/core/discovery/discovery_providers.dart';
+import 'package:fastdrop_mobile/core/network/local_network_info.dart';
 import 'package:fastdrop_mobile/core/server/server_providers.dart';
+import 'package:fastdrop_mobile/core/server/pairing_providers.dart';
+import 'package:fastdrop_mobile/core/server/ws_server.dart';
 import 'package:fastdrop_mobile/core/storage/session_store.dart';
 import 'package:fastdrop_mobile/core/providers.dart';
 import 'package:fastdrop_mobile/features/devices/nearby_devices_sheet.dart';
@@ -616,6 +619,7 @@ class _DevicesScreenState extends ConsumerState<DevicesScreen>
   }
 
   Future<void> _loadDevices({int preferredIndex = -1}) async {
+    ref.invalidate(localNetworkInfoProvider);
     final store = ref.read(deviceStoreProvider);
     final devices = await store.loadDevices();
     if (!mounted) return;
@@ -937,7 +941,21 @@ class _DevicesScreenState extends ConsumerState<DevicesScreen>
     final serverState = ref.watch(fastdropServerProvider);
     final nearby = ref.watch(nearbyDevicesProvider);
     final connected = connState.connectedDevices;
+    final incomingPeers =
+        ref.watch(incomingPeerConnectionsProvider).values.toList();
+    final incomingByName = {
+      for (final peer in incomingPeers) peer.deviceName: peer,
+    };
+    final onlineNames = <String>{
+      ...connected.map((device) => device.name),
+      ...incomingPeers.map((peer) => peer.deviceName),
+    };
+    final standaloneIncoming = incomingPeers
+        .where(
+            (peer) => !_devices.any((device) => device.name == peer.deviceName))
+        .toList(growable: false);
     final selectedPeer = connState.selectedPeer;
+    final networkInfo = ref.watch(localNetworkInfoProvider);
 
     return RefreshIndicator(
       onRefresh: _loadDevices,
@@ -995,6 +1013,41 @@ class _DevicesScreenState extends ConsumerState<DevicesScreen>
                           fontSize: 12,
                         ),
                       ),
+                      const SizedBox(height: 3),
+                      networkInfo.when(
+                        data: (network) => InkWell(
+                          onTap: network.permissionRequired
+                              ? _requestWifiNamePermission
+                              : null,
+                          borderRadius: BorderRadius.circular(6),
+                          child: Padding(
+                            padding: const EdgeInsets.symmetric(vertical: 2),
+                            child: Text(
+                              network.displayLabel,
+                              maxLines: 2,
+                              overflow: TextOverflow.ellipsis,
+                              style: const TextStyle(
+                                color: Color(0xFFDCE2FF),
+                                fontSize: 11,
+                              ),
+                            ),
+                          ),
+                        ),
+                        loading: () => const Text(
+                          '正在读取当前网络…',
+                          style: TextStyle(
+                            color: Color(0xFFDCE2FF),
+                            fontSize: 11,
+                          ),
+                        ),
+                        error: (_, __) => const Text(
+                          '当前网络信息不可用',
+                          style: TextStyle(
+                            color: Color(0xFFDCE2FF),
+                            fontSize: 11,
+                          ),
+                        ),
+                      ),
                     ],
                   ),
                 ),
@@ -1034,7 +1087,7 @@ class _DevicesScreenState extends ConsumerState<DevicesScreen>
                     ),
                     const SizedBox(height: 3),
                     Text(
-                      '${connected.length} 台在线 · ${nearby.length} 台可发现',
+                      '${onlineNames.length} 台在线 · ${nearby.length} 台可发现',
                       style: Theme.of(context).textTheme.bodySmall,
                     ),
                   ],
@@ -1048,12 +1101,15 @@ class _DevicesScreenState extends ConsumerState<DevicesScreen>
             ],
           ),
           const SizedBox(height: 10),
-          if (_devices.isEmpty)
+          if (_devices.isEmpty && standaloneIncoming.isEmpty)
             _buildOverviewEmptyState()
-          else
+          else ...[
             ..._devices.map((device) {
               final peer = connState.peer(device.id);
-              final status = peer?.status ?? MultiConnectionStatus.idle;
+              final incoming = incomingByName[device.name];
+              final status = incoming != null
+                  ? MultiConnectionStatus.connected
+                  : peer?.status ?? MultiConnectionStatus.idle;
               final selected = connState.selectedDeviceId == device.id;
               return Padding(
                 padding: const EdgeInsets.only(bottom: 10),
@@ -1061,10 +1117,18 @@ class _DevicesScreenState extends ConsumerState<DevicesScreen>
                   device,
                   status,
                   selected: selected,
-                  errorMessage: peer?.errorMessage,
+                  errorMessage: incoming == null ? peer?.errorMessage : null,
+                  subtitle: incoming != null && peer?.isConnected != true
+                      ? '对方已连接到本机'
+                      : null,
                 ),
               );
             }),
+            ...standaloneIncoming.map((peer) => Padding(
+                  padding: const EdgeInsets.only(bottom: 10),
+                  child: _buildIncomingPeerCard(peer),
+                )),
+          ],
           if (connected.isNotEmpty) ...[
             const SizedBox(height: 8),
             SizedBox(
@@ -1101,6 +1165,16 @@ class _DevicesScreenState extends ConsumerState<DevicesScreen>
         ],
       ),
     );
+  }
+
+  Future<void> _requestWifiNamePermission() async {
+    try {
+      await ref
+          .read(localNetworkInfoServiceProvider)
+          .requestWifiNamePermission();
+    } finally {
+      ref.invalidate(localNetworkInfoProvider);
+    }
   }
 
   Widget _buildOverviewEmptyState() {
@@ -1149,6 +1223,7 @@ class _DevicesScreenState extends ConsumerState<DevicesScreen>
     MultiConnectionStatus status, {
     required bool selected,
     String? errorMessage,
+    String? subtitle,
   }) {
     final connected = status == MultiConnectionStatus.connected;
     final connecting = status == MultiConnectionStatus.connecting;
@@ -1194,7 +1269,7 @@ class _DevicesScreenState extends ConsumerState<DevicesScreen>
                     ),
                     const SizedBox(height: 4),
                     Text(
-                      errorMessage ?? device.serverBaseUrl,
+                      errorMessage ?? subtitle ?? device.serverBaseUrl,
                       maxLines: 1,
                       overflow: TextOverflow.ellipsis,
                       style: Theme.of(context).textTheme.bodySmall?.copyWith(
@@ -1269,6 +1344,70 @@ class _DevicesScreenState extends ConsumerState<DevicesScreen>
               ),
             ],
           ),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildIncomingPeerCard(AuthenticatedPeer peer) {
+    final isPhone = peer.platform == 'android' || peer.platform == 'ios';
+    return Material(
+      color: Colors.white,
+      shape: RoundedRectangleBorder(
+        borderRadius: BorderRadius.circular(16),
+        side: const BorderSide(color: AppTheme.border),
+      ),
+      child: Padding(
+        padding: const EdgeInsets.all(16),
+        child: Row(
+          children: [
+            Container(
+              width: 48,
+              height: 48,
+              decoration: BoxDecoration(
+                color: AppTheme.primaryLight,
+                borderRadius: BorderRadius.circular(15),
+              ),
+              child: Icon(
+                isPhone ? Icons.phone_android_rounded : Icons.computer_rounded,
+                color: AppTheme.primaryDark,
+              ),
+            ),
+            const SizedBox(width: 14),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    peer.deviceName,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: Theme.of(context).textTheme.titleSmall,
+                  ),
+                  const SizedBox(height: 4),
+                  Text(
+                    '对方已连接到本机',
+                    style: Theme.of(context).textTheme.bodySmall,
+                  ),
+                ],
+              ),
+            ),
+            Container(
+              padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 5),
+              decoration: BoxDecoration(
+                color: const Color(0xFFD6F2E3),
+                borderRadius: BorderRadius.circular(999),
+              ),
+              child: const Text(
+                '已连接',
+                style: TextStyle(
+                  color: Color(0xFF176F4A),
+                  fontSize: 11,
+                  fontWeight: FontWeight.w600,
+                ),
+              ),
+            ),
+          ],
         ),
       ),
     );

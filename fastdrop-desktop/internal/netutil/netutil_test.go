@@ -106,3 +106,20 @@ func TestPreferLANIPv4(t *testing.T) {
 		t.Errorf("PreferLANIPv4 returned invalid IP: %q", ip)
 	}
 }
+
+func TestBuildNetworkInfo(t *testing.T) {
+	wifi := buildNetworkInfo([]string{"192.168.1.19"}, "Office Wi-Fi")
+	if wifi.Name != "Office Wi-Fi" || wifi.Type != "wifi" || len(wifi.LocalAddresses) != 1 {
+		t.Fatalf("wifi info=%+v", wifi)
+	}
+
+	hotspot := buildNetworkInfo([]string{"192.168.1.19", "192.168.137.1"}, "")
+	if hotspot.Name != "Windows 热点" || hotspot.Type != "hotspot" {
+		t.Fatalf("hotspot info=%+v", hotspot)
+	}
+
+	offline := buildNetworkInfo(nil, "")
+	if offline.Name != "未连接局域网" || offline.Type != "offline" || offline.LocalAddresses == nil {
+		t.Fatalf("offline info=%+v", offline)
+	}
+}

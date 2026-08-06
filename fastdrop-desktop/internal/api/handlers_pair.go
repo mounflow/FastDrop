@@ -212,19 +212,35 @@ func (s *Server) handlePairTokenRefresh(w http.ResponseWriter, r *http.Request) 
 	writeJSON(w, http.StatusOK, s.qrPayload(pt))
 }
 
-// handleListPairRequests returns all pending pair requests for the PC UI.
+// handleListPairRequests returns waiting and recently accepted requests to
+// the local desktop UI. Accepted session credentials are memory-only and let
+// an auto-accepted phone connection be adopted by the Wails window.
 func (s *Server) handleListPairRequests(w http.ResponseWriter, r *http.Request) {
-	requests := s.Pairing.ListPendingRequests()
+	requests := s.Pairing.ListActiveRequests()
 	out := make([]map[string]any, 0, len(requests))
 	for _, req := range requests {
-		out = append(out, map[string]any{
+		item := map[string]any{
 			"requestId": req.RequestID,
 			"pairId":    req.PairID,
 			"status":    string(req.Status),
 			"device":    req.Device,
 			"expiresIn": int(timeUntil(req.ExpiresAt).Seconds()),
 			"createdAt": req.CreatedAt.UnixMilli(),
-		})
+		}
+		if req.Status == pairing.StatusAccepted && req.Result != nil {
+			item["session"] = map[string]any{
+				"sessionId":    req.Result.SessionID,
+				"accessToken":  req.Result.SessionToken,
+				"expiresIn":    req.Result.ExpiresIn,
+				"websocketUrl": req.Result.WebsocketURL,
+			}
+			item["server"] = map[string]any{
+				"deviceId":   req.Result.ServerDevice.DeviceID,
+				"deviceName": req.Result.ServerDevice.DeviceName,
+				"platform":   req.Result.ServerDevice.Platform,
+			}
+		}
+		out = append(out, item)
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"requests": out})
 }

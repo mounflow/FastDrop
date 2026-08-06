@@ -6,6 +6,7 @@ import (
 	"crypto/subtle"
 	"errors"
 	"fmt"
+	"sort"
 	"sync"
 	"time"
 
@@ -314,6 +315,35 @@ func (m *Manager) ListPendingRequests() []*PairRequest {
 			out = append(out, r)
 		}
 	}
+	return out
+}
+
+// ListActiveRequests returns waiting and recently accepted requests for the
+// local desktop UI. Accepted results remain memory-only and are evicted by
+// Cleanup; this lets an auto-accepted phone session reach the Wails window
+// without ever persisting its plaintext token.
+func (m *Manager) ListActiveRequests() []*PairRequest {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	now := m.now()
+	out := make([]*PairRequest, 0)
+	for _, request := range m.requests {
+		if request.Status == StatusWaitingConfirmation && now.After(request.ExpiresAt) {
+			request.Status = StatusExpired
+		}
+		if request.Status != StatusWaitingConfirmation && request.Status != StatusAccepted {
+			continue
+		}
+		clone := *request
+		if request.Result != nil {
+			result := *request.Result
+			clone.Result = &result
+		}
+		out = append(out, &clone)
+	}
+	sort.Slice(out, func(i, j int) bool {
+		return out[i].CreatedAt.Before(out[j].CreatedAt)
+	})
 	return out
 }
 
