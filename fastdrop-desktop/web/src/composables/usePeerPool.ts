@@ -41,6 +41,12 @@ export interface PeerTransferProgress {
   error?: string
 }
 
+export interface PeerHistoryRow extends TransferRow {
+  peerId: string
+  peerName: string
+  peerRole: PeerSession['role']
+}
+
 interface WSEnvelope {
   type?: string
   payload?: Record<string, unknown>
@@ -108,7 +114,7 @@ export interface PeerPool {
   send: (peerId: string, message: unknown) => void
   acceptOffer: (offer: PeerIncomingOffer) => Promise<void>
   rejectOffer: (offer: PeerIncomingOffer) => void
-  loadHistory: () => Promise<Array<TransferRow & { peerId: string; peerName: string }>>
+  loadHistory: () => Promise<PeerHistoryRow[]>
 }
 
 export function usePeerPool(handlers: PeerPoolHandlers = {}): PeerPool {
@@ -418,7 +424,12 @@ export function usePeerPool(handlers: PeerPoolHandlers = {}): PeerPool {
     const rows = await Promise.all(peers.value.map(async (peer) => {
       try {
         const history = await listTransfers(peer)
-        return history.map((row) => ({ ...row, peerId: peer.id, peerName: peer.name }))
+        return history.map((row) => ({
+          ...row,
+          peerId: peer.id,
+          peerName: peer.name,
+          peerRole: peer.role,
+        }))
       } catch {
         return []
       }

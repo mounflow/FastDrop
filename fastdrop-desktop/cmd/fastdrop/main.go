@@ -258,6 +258,9 @@ func main() {
 		AssetServer: &assetserver.Options{
 			Assets: desktopAssets,
 		},
+		Bind: []interface{}{
+			newDesktopBridge(db),
+		},
 	}); err != nil {
 		log.Printf("[desktop] window failed: %v", err)
 	}

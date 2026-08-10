@@ -20,10 +20,11 @@ import {
 } from './api'
 import {
   usePeerPool,
+  type PeerHistoryRow,
   type PeerIncomingOffer,
   type PeerTransferProgress,
 } from './composables/usePeerPool'
-import type { PairAccepted, QRPayload, TransferRow } from './types'
+import type { PairAccepted, QRPayload } from './types'
 
 type DesktopPage = 'home' | 'history' | 'received' | 'settings'
 
@@ -66,10 +67,11 @@ const fileInput = ref<HTMLInputElement | null>(null)
 const folderInput = ref<HTMLInputElement | null>(null)
 const activeTransfers = ref<ActiveTransfer[]>([])
 const incomingOffers = ref<IncomingOffer[]>([])
-const transfers = ref<Array<TransferRow & { peerId?: string; peerName?: string }>>([])
+const transfers = ref<PeerHistoryRow[]>([])
 const historyLoading = ref(false)
 const historyFilter = ref('all')
 const historySearch = ref('')
+const historyActionError = ref('')
 
 const pendingRequests = ref<PendingPairRequest[]>([])
 const showPairDialog = ref(false)
@@ -507,6 +509,27 @@ async function loadHistory() {
   }
 }
 
+function canRevealTransfer(item: PeerHistoryRow): boolean {
+  return item.peerRole === 'local-session'
+    && item.direction === 'client_to_server'
+    && item.status === 'completed'
+    && Boolean(window.go?.main?.DesktopBridge)
+}
+
+async function revealTransfer(item: PeerHistoryRow) {
+  const bridge = window.go?.main?.DesktopBridge
+  if (!bridge) {
+    historyActionError.value = '请在 FastDrop Windows 桌面应用中打开文件位置。'
+    return
+  }
+  historyActionError.value = ''
+  try {
+    await bridge.RevealTransfer(item.id)
+  } catch (error) {
+    historyActionError.value = readableError(error)
+  }
+}
+
 async function loadSettings() {
   try {
     const settings = await getSettings()
@@ -775,6 +798,7 @@ onUnmounted(() => {
           </div>
           <input v-model="historySearch" class="search-input" placeholder="搜索设备或任务编号" />
         </div>
+        <p v-if="historyActionError" class="history-action-error">{{ historyActionError }}</p>
         <div v-if="historyLoading" class="loading-state">正在加载传输记录…</div>
         <div v-else-if="displayedHistory.length" class="history-list">
           <article v-for="item in displayedHistory" :key="`${item.peerId}:${item.id}`" class="history-row">
@@ -782,6 +806,7 @@ onUnmounted(() => {
             <div class="history-main"><strong>{{ item.totalFiles }} 个文件</strong><span>{{ item.direction === 'client_to_server' ? `来自 ${item.peerName || '设备'}` : `发送到 ${item.peerName || '设备'}` }}</span></div>
             <div class="history-size"><strong>{{ formatSize(item.totalBytes) }}</strong><span>{{ formatDate(item.createdAt) }}</span></div>
             <span :class="['status-badge', item.status]">{{ statusLabel(item.status) }}</span>
+            <button v-if="canRevealTransfer(item)" class="history-action-button" title="在资源管理器中显示" @click="revealTransfer(item)"><AppIcon name="folder" :size="15" />打开位置</button>
           </article>
         </div>
         <div v-else class="empty-state page-empty">
@@ -797,12 +822,14 @@ onUnmounted(() => {
           <div><span>默认接收位置</span><strong>{{ settingsDownloadDir }}</strong></div>
           <button class="secondary-button" @click="copyDownloadPath"><AppIcon name="copy" :size="16" />复制路径</button>
         </div>
+        <p v-if="historyActionError" class="history-action-error">{{ historyActionError }}</p>
         <div v-if="receivedTransfers.length" class="history-list">
           <article v-for="item in receivedTransfers" :key="`${item.peerId}:${item.id}`" class="history-row">
             <div class="history-direction received"><AppIcon name="inbox" :size="20" /></div>
             <div class="history-main"><strong>{{ item.totalFiles }} 个接收文件</strong><span>来自 {{ item.peerName || '已配对设备' }}</span></div>
             <div class="history-size"><strong>{{ formatSize(item.totalBytes) }}</strong><span>{{ formatDate(item.createdAt) }}</span></div>
             <span :class="['status-badge', item.status]">{{ statusLabel(item.status) }}</span>
+            <button v-if="canRevealTransfer(item)" class="history-action-button" title="在资源管理器中显示" @click="revealTransfer(item)"><AppIcon name="folder" :size="15" />打开位置</button>
           </article>
         </div>
         <div v-else class="empty-state page-empty">

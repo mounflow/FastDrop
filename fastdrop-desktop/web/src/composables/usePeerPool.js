@@ -285,7 +285,12 @@ export function usePeerPool(handlers = {}) {
         const rows = await Promise.all(peers.value.map(async (peer) => {
             try {
                 const history = await listTransfers(peer);
-                return history.map((row) => ({ ...row, peerId: peer.id, peerName: peer.name }));
+                return history.map((row) => ({
+                    ...row,
+                    peerId: peer.id,
+                    peerName: peer.name,
+                    peerRole: peer.role,
+                }));
             }
             catch {
                 return [];

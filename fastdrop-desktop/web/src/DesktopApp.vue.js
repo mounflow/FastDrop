@@ -14,6 +14,7 @@ const transfers = ref([]);
 const historyLoading = ref(false);
 const historyFilter = ref('all');
 const historySearch = ref('');
+const historyActionError = ref('');
 const pendingRequests = ref([]);
 const showPairDialog = ref(false);
 const showConnectPanel = ref(false);
@@ -437,6 +438,26 @@ async function loadHistory() {
     }
     finally {
         historyLoading.value = false;
+    }
+}
+function canRevealTransfer(item) {
+    return item.peerRole === 'local-session'
+        && item.direction === 'client_to_server'
+        && item.status === 'completed'
+        && Boolean(window.go?.main?.DesktopBridge);
+}
+async function revealTransfer(item) {
+    const bridge = window.go?.main?.DesktopBridge;
+    if (!bridge) {
+        historyActionError.value = '请在 FastDrop Windows 桌面应用中打开文件位置。';
+        return;
+    }
+    historyActionError.value = '';
+    try {
+        await bridge.RevealTransfer(item.id);
+    }
+    catch (error) {
+        historyActionError.value = readableError(error);
     }
 }
 async function loadSettings() {
@@ -1084,6 +1105,12 @@ else if (__VLS_ctx.activePage === 'history') {
         placeholder: "搜索设备或任务编号",
     });
     (__VLS_ctx.historySearch);
+    if (__VLS_ctx.historyActionError) {
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.p, __VLS_intrinsicElements.p)({
+            ...{ class: "history-action-error" },
+        });
+        (__VLS_ctx.historyActionError);
+    }
     if (__VLS_ctx.historyLoading) {
         __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
             ...{ class: "loading-state" },
@@ -1129,6 +1156,35 @@ else if (__VLS_ctx.activePage === 'history') {
                 ...{ class: (['status-badge', item.status]) },
             });
             (__VLS_ctx.statusLabel(item.status));
+            if (__VLS_ctx.canRevealTransfer(item)) {
+                __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
+                    ...{ onClick: (...[$event]) => {
+                            if (!!(__VLS_ctx.activePage === 'home'))
+                                return;
+                            if (!(__VLS_ctx.activePage === 'history'))
+                                return;
+                            if (!!(__VLS_ctx.historyLoading))
+                                return;
+                            if (!(__VLS_ctx.displayedHistory.length))
+                                return;
+                            if (!(__VLS_ctx.canRevealTransfer(item)))
+                                return;
+                            __VLS_ctx.revealTransfer(item);
+                        } },
+                    ...{ class: "history-action-button" },
+                    title: "在资源管理器中显示",
+                });
+                /** @type {[typeof AppIcon, ]} */ ;
+                // @ts-ignore
+                const __VLS_42 = __VLS_asFunctionalComponent(AppIcon, new AppIcon({
+                    name: "folder",
+                    size: (15),
+                }));
+                const __VLS_43 = __VLS_42({
+                    name: "folder",
+                    size: (15),
+                }, ...__VLS_functionalComponentArgsRest(__VLS_42));
+            }
         }
     }
     else {
@@ -1140,14 +1196,14 @@ else if (__VLS_ctx.activePage === 'history') {
         });
         /** @type {[typeof AppIcon, ]} */ ;
         // @ts-ignore
-        const __VLS_42 = __VLS_asFunctionalComponent(AppIcon, new AppIcon({
+        const __VLS_45 = __VLS_asFunctionalComponent(AppIcon, new AppIcon({
             name: "history",
             size: (30),
         }));
-        const __VLS_43 = __VLS_42({
+        const __VLS_46 = __VLS_45({
             name: "history",
             size: (30),
-        }, ...__VLS_functionalComponentArgsRest(__VLS_42));
+        }, ...__VLS_functionalComponentArgsRest(__VLS_45));
         __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({});
         __VLS_asFunctionalElement(__VLS_intrinsicElements.h3, __VLS_intrinsicElements.h3)({});
         __VLS_asFunctionalElement(__VLS_intrinsicElements.p, __VLS_intrinsicElements.p)({});
@@ -1179,14 +1235,14 @@ else if (__VLS_ctx.activePage === 'received') {
     });
     /** @type {[typeof AppIcon, ]} */ ;
     // @ts-ignore
-    const __VLS_45 = __VLS_asFunctionalComponent(AppIcon, new AppIcon({
+    const __VLS_48 = __VLS_asFunctionalComponent(AppIcon, new AppIcon({
         name: "folder",
         size: (28),
     }));
-    const __VLS_46 = __VLS_45({
+    const __VLS_49 = __VLS_48({
         name: "folder",
         size: (28),
-    }, ...__VLS_functionalComponentArgsRest(__VLS_45));
+    }, ...__VLS_functionalComponentArgsRest(__VLS_48));
     __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({});
     __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
     __VLS_asFunctionalElement(__VLS_intrinsicElements.strong, __VLS_intrinsicElements.strong)({});
@@ -1197,14 +1253,20 @@ else if (__VLS_ctx.activePage === 'received') {
     });
     /** @type {[typeof AppIcon, ]} */ ;
     // @ts-ignore
-    const __VLS_48 = __VLS_asFunctionalComponent(AppIcon, new AppIcon({
+    const __VLS_51 = __VLS_asFunctionalComponent(AppIcon, new AppIcon({
         name: "copy",
         size: (16),
     }));
-    const __VLS_49 = __VLS_48({
+    const __VLS_52 = __VLS_51({
         name: "copy",
         size: (16),
-    }, ...__VLS_functionalComponentArgsRest(__VLS_48));
+    }, ...__VLS_functionalComponentArgsRest(__VLS_51));
+    if (__VLS_ctx.historyActionError) {
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.p, __VLS_intrinsicElements.p)({
+            ...{ class: "history-action-error" },
+        });
+        (__VLS_ctx.historyActionError);
+    }
     if (__VLS_ctx.receivedTransfers.length) {
         __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
             ...{ class: "history-list" },
@@ -1219,14 +1281,14 @@ else if (__VLS_ctx.activePage === 'received') {
             });
             /** @type {[typeof AppIcon, ]} */ ;
             // @ts-ignore
-            const __VLS_51 = __VLS_asFunctionalComponent(AppIcon, new AppIcon({
+            const __VLS_54 = __VLS_asFunctionalComponent(AppIcon, new AppIcon({
                 name: "inbox",
                 size: (20),
             }));
-            const __VLS_52 = __VLS_51({
+            const __VLS_55 = __VLS_54({
                 name: "inbox",
                 size: (20),
-            }, ...__VLS_functionalComponentArgsRest(__VLS_51));
+            }, ...__VLS_functionalComponentArgsRest(__VLS_54));
             __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
                 ...{ class: "history-main" },
             });
@@ -1245,6 +1307,35 @@ else if (__VLS_ctx.activePage === 'received') {
                 ...{ class: (['status-badge', item.status]) },
             });
             (__VLS_ctx.statusLabel(item.status));
+            if (__VLS_ctx.canRevealTransfer(item)) {
+                __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
+                    ...{ onClick: (...[$event]) => {
+                            if (!!(__VLS_ctx.activePage === 'home'))
+                                return;
+                            if (!!(__VLS_ctx.activePage === 'history'))
+                                return;
+                            if (!(__VLS_ctx.activePage === 'received'))
+                                return;
+                            if (!(__VLS_ctx.receivedTransfers.length))
+                                return;
+                            if (!(__VLS_ctx.canRevealTransfer(item)))
+                                return;
+                            __VLS_ctx.revealTransfer(item);
+                        } },
+                    ...{ class: "history-action-button" },
+                    title: "在资源管理器中显示",
+                });
+                /** @type {[typeof AppIcon, ]} */ ;
+                // @ts-ignore
+                const __VLS_57 = __VLS_asFunctionalComponent(AppIcon, new AppIcon({
+                    name: "folder",
+                    size: (15),
+                }));
+                const __VLS_58 = __VLS_57({
+                    name: "folder",
+                    size: (15),
+                }, ...__VLS_functionalComponentArgsRest(__VLS_57));
+            }
         }
     }
     else {
@@ -1256,14 +1347,14 @@ else if (__VLS_ctx.activePage === 'received') {
         });
         /** @type {[typeof AppIcon, ]} */ ;
         // @ts-ignore
-        const __VLS_54 = __VLS_asFunctionalComponent(AppIcon, new AppIcon({
+        const __VLS_60 = __VLS_asFunctionalComponent(AppIcon, new AppIcon({
             name: "inbox",
             size: (30),
         }));
-        const __VLS_55 = __VLS_54({
+        const __VLS_61 = __VLS_60({
             name: "inbox",
             size: (30),
-        }, ...__VLS_functionalComponentArgsRest(__VLS_54));
+        }, ...__VLS_functionalComponentArgsRest(__VLS_60));
         __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({});
         __VLS_asFunctionalElement(__VLS_intrinsicElements.h3, __VLS_intrinsicElements.h3)({});
         __VLS_asFunctionalElement(__VLS_intrinsicElements.p, __VLS_intrinsicElements.p)({});
@@ -1287,14 +1378,14 @@ else {
     });
     /** @type {[typeof AppIcon, ]} */ ;
     // @ts-ignore
-    const __VLS_57 = __VLS_asFunctionalComponent(AppIcon, new AppIcon({
+    const __VLS_63 = __VLS_asFunctionalComponent(AppIcon, new AppIcon({
         name: "computer",
         size: (20),
     }));
-    const __VLS_58 = __VLS_57({
+    const __VLS_64 = __VLS_63({
         name: "computer",
         size: (20),
-    }, ...__VLS_functionalComponentArgsRest(__VLS_57));
+    }, ...__VLS_functionalComponentArgsRest(__VLS_63));
     __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({});
     __VLS_asFunctionalElement(__VLS_intrinsicElements.h2, __VLS_intrinsicElements.h2)({});
     __VLS_asFunctionalElement(__VLS_intrinsicElements.p, __VLS_intrinsicElements.p)({});
@@ -1317,14 +1408,14 @@ else {
     });
     /** @type {[typeof AppIcon, ]} */ ;
     // @ts-ignore
-    const __VLS_60 = __VLS_asFunctionalComponent(AppIcon, new AppIcon({
+    const __VLS_66 = __VLS_asFunctionalComponent(AppIcon, new AppIcon({
         name: "inbox",
         size: (20),
     }));
-    const __VLS_61 = __VLS_60({
+    const __VLS_67 = __VLS_66({
         name: "inbox",
         size: (20),
-    }, ...__VLS_functionalComponentArgsRest(__VLS_60));
+    }, ...__VLS_functionalComponentArgsRest(__VLS_66));
     __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({});
     __VLS_asFunctionalElement(__VLS_intrinsicElements.h2, __VLS_intrinsicElements.h2)({});
     __VLS_asFunctionalElement(__VLS_intrinsicElements.p, __VLS_intrinsicElements.p)({});
@@ -1344,14 +1435,14 @@ else {
     });
     /** @type {[typeof AppIcon, ]} */ ;
     // @ts-ignore
-    const __VLS_63 = __VLS_asFunctionalComponent(AppIcon, new AppIcon({
+    const __VLS_69 = __VLS_asFunctionalComponent(AppIcon, new AppIcon({
         name: "copy",
         size: (17),
     }));
-    const __VLS_64 = __VLS_63({
+    const __VLS_70 = __VLS_69({
         name: "copy",
         size: (17),
-    }, ...__VLS_functionalComponentArgsRest(__VLS_63));
+    }, ...__VLS_functionalComponentArgsRest(__VLS_69));
     __VLS_asFunctionalElement(__VLS_intrinsicElements.label, __VLS_intrinsicElements.label)({
         ...{ class: "field" },
     });
@@ -1390,14 +1481,14 @@ else {
     });
     /** @type {[typeof AppIcon, ]} */ ;
     // @ts-ignore
-    const __VLS_66 = __VLS_asFunctionalComponent(AppIcon, new AppIcon({
+    const __VLS_72 = __VLS_asFunctionalComponent(AppIcon, new AppIcon({
         name: "wifi",
         size: (20),
     }));
-    const __VLS_67 = __VLS_66({
+    const __VLS_73 = __VLS_72({
         name: "wifi",
         size: (20),
-    }, ...__VLS_functionalComponentArgsRest(__VLS_66));
+    }, ...__VLS_functionalComponentArgsRest(__VLS_72));
     __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({});
     __VLS_asFunctionalElement(__VLS_intrinsicElements.h2, __VLS_intrinsicElements.h2)({});
     __VLS_asFunctionalElement(__VLS_intrinsicElements.p, __VLS_intrinsicElements.p)({});
@@ -1461,16 +1552,16 @@ else {
     });
     (__VLS_ctx.settingsSaving ? '保存中…' : '保存设置');
 }
-const __VLS_69 = {}.Teleport;
+const __VLS_75 = {}.Teleport;
 /** @type {[typeof __VLS_components.Teleport, typeof __VLS_components.Teleport, ]} */ ;
 // @ts-ignore
-const __VLS_70 = __VLS_asFunctionalComponent(__VLS_69, new __VLS_69({
+const __VLS_76 = __VLS_asFunctionalComponent(__VLS_75, new __VLS_75({
     to: "body",
 }));
-const __VLS_71 = __VLS_70({
+const __VLS_77 = __VLS_76({
     to: "body",
-}, ...__VLS_functionalComponentArgsRest(__VLS_70));
-__VLS_72.slots.default;
+}, ...__VLS_functionalComponentArgsRest(__VLS_76));
+__VLS_78.slots.default;
 if (__VLS_ctx.showConnectPanel) {
     __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
         ...{ onClick: (...[$event]) => {
@@ -1504,14 +1595,14 @@ if (__VLS_ctx.showConnectPanel) {
     });
     /** @type {[typeof AppIcon, ]} */ ;
     // @ts-ignore
-    const __VLS_73 = __VLS_asFunctionalComponent(AppIcon, new AppIcon({
+    const __VLS_79 = __VLS_asFunctionalComponent(AppIcon, new AppIcon({
         name: "x",
         size: (19),
     }));
-    const __VLS_74 = __VLS_73({
+    const __VLS_80 = __VLS_79({
         name: "x",
         size: (19),
-    }, ...__VLS_functionalComponentArgsRest(__VLS_73));
+    }, ...__VLS_functionalComponentArgsRest(__VLS_79));
     __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
         ...{ class: "connect-grid" },
     });
@@ -1546,14 +1637,14 @@ if (__VLS_ctx.showConnectPanel) {
     });
     /** @type {[typeof AppIcon, ]} */ ;
     // @ts-ignore
-    const __VLS_76 = __VLS_asFunctionalComponent(AppIcon, new AppIcon({
+    const __VLS_82 = __VLS_asFunctionalComponent(AppIcon, new AppIcon({
         name: "wifi",
         size: (24),
     }));
-    const __VLS_77 = __VLS_76({
+    const __VLS_83 = __VLS_82({
         name: "wifi",
         size: (24),
-    }, ...__VLS_functionalComponentArgsRest(__VLS_76));
+    }, ...__VLS_functionalComponentArgsRest(__VLS_82));
     __VLS_asFunctionalElement(__VLS_intrinsicElements.h3, __VLS_intrinsicElements.h3)({});
     __VLS_asFunctionalElement(__VLS_intrinsicElements.p, __VLS_intrinsicElements.p)({});
     __VLS_asFunctionalElement(__VLS_intrinsicElements.input)({
@@ -1602,14 +1693,14 @@ if (__VLS_ctx.showPairDialog && __VLS_ctx.pendingRequests.length) {
         });
         /** @type {[typeof AppIcon, ]} */ ;
         // @ts-ignore
-        const __VLS_79 = __VLS_asFunctionalComponent(AppIcon, new AppIcon({
+        const __VLS_85 = __VLS_asFunctionalComponent(AppIcon, new AppIcon({
             name: (request.platform === 'windows' ? 'computer' : 'phone'),
             size: (25),
         }));
-        const __VLS_80 = __VLS_79({
+        const __VLS_86 = __VLS_85({
             name: (request.platform === 'windows' ? 'computer' : 'phone'),
             size: (25),
-        }, ...__VLS_functionalComponentArgsRest(__VLS_79));
+        }, ...__VLS_functionalComponentArgsRest(__VLS_85));
         __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({});
         __VLS_asFunctionalElement(__VLS_intrinsicElements.strong, __VLS_intrinsicElements.strong)({});
         (request.deviceName);
@@ -1664,14 +1755,14 @@ if (__VLS_ctx.incomingOffers.length) {
         });
         /** @type {[typeof AppIcon, ]} */ ;
         // @ts-ignore
-        const __VLS_82 = __VLS_asFunctionalComponent(AppIcon, new AppIcon({
+        const __VLS_88 = __VLS_asFunctionalComponent(AppIcon, new AppIcon({
             name: "file",
             size: (18),
         }));
-        const __VLS_83 = __VLS_82({
+        const __VLS_89 = __VLS_88({
             name: "file",
             size: (18),
-        }, ...__VLS_functionalComponentArgsRest(__VLS_82));
+        }, ...__VLS_functionalComponentArgsRest(__VLS_88));
         __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
         (file.name);
         __VLS_asFunctionalElement(__VLS_intrinsicElements.small, __VLS_intrinsicElements.small)({});
@@ -1697,7 +1788,7 @@ if (__VLS_ctx.incomingOffers.length) {
         ...{ class: "primary-button" },
     });
 }
-var __VLS_72;
+var __VLS_78;
 /** @type {__VLS_StyleScopedClasses['desktop-shell']} */ ;
 /** @type {__VLS_StyleScopedClasses['sidebar']} */ ;
 /** @type {__VLS_StyleScopedClasses['brand']} */ ;
@@ -1754,11 +1845,13 @@ var __VLS_72;
 /** @type {__VLS_StyleScopedClasses['toolbar']} */ ;
 /** @type {__VLS_StyleScopedClasses['segmented-control']} */ ;
 /** @type {__VLS_StyleScopedClasses['search-input']} */ ;
+/** @type {__VLS_StyleScopedClasses['history-action-error']} */ ;
 /** @type {__VLS_StyleScopedClasses['loading-state']} */ ;
 /** @type {__VLS_StyleScopedClasses['history-list']} */ ;
 /** @type {__VLS_StyleScopedClasses['history-row']} */ ;
 /** @type {__VLS_StyleScopedClasses['history-main']} */ ;
 /** @type {__VLS_StyleScopedClasses['history-size']} */ ;
+/** @type {__VLS_StyleScopedClasses['history-action-button']} */ ;
 /** @type {__VLS_StyleScopedClasses['empty-state']} */ ;
 /** @type {__VLS_StyleScopedClasses['page-empty']} */ ;
 /** @type {__VLS_StyleScopedClasses['empty-icon']} */ ;
@@ -1767,12 +1860,14 @@ var __VLS_72;
 /** @type {__VLS_StyleScopedClasses['received-hero']} */ ;
 /** @type {__VLS_StyleScopedClasses['received-icon']} */ ;
 /** @type {__VLS_StyleScopedClasses['secondary-button']} */ ;
+/** @type {__VLS_StyleScopedClasses['history-action-error']} */ ;
 /** @type {__VLS_StyleScopedClasses['history-list']} */ ;
 /** @type {__VLS_StyleScopedClasses['history-row']} */ ;
 /** @type {__VLS_StyleScopedClasses['history-direction']} */ ;
 /** @type {__VLS_StyleScopedClasses['received']} */ ;
 /** @type {__VLS_StyleScopedClasses['history-main']} */ ;
 /** @type {__VLS_StyleScopedClasses['history-size']} */ ;
+/** @type {__VLS_StyleScopedClasses['history-action-button']} */ ;
 /** @type {__VLS_StyleScopedClasses['empty-state']} */ ;
 /** @type {__VLS_StyleScopedClasses['page-empty']} */ ;
 /** @type {__VLS_StyleScopedClasses['empty-icon']} */ ;
@@ -1852,6 +1947,7 @@ const __VLS_self = (await import('vue')).defineComponent({
             historyLoading: historyLoading,
             historyFilter: historyFilter,
             historySearch: historySearch,
+            historyActionError: historyActionError,
             pendingRequests: pendingRequests,
             showPairDialog: showPairDialog,
             showConnectPanel: showConnectPanel,
@@ -1903,6 +1999,8 @@ const __VLS_self = (await import('vue')).defineComponent({
             handleAccept: handleAccept,
             handleReject: handleReject,
             connectRemotePeer: connectRemotePeer,
+            canRevealTransfer: canRevealTransfer,
+            revealTransfer: revealTransfer,
             saveSettings: saveSettings,
             copyDownloadPath: copyDownloadPath,
             refreshDesktopState: refreshDesktopState,

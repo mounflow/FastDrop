@@ -1,0 +1,5 @@
+#define FASTDROP_ICON 3
+#define FASTDROP_MANIFEST 1
+
+FASTDROP_ICON ICON "fastdrop.ico"
+FASTDROP_MANIFEST 24 "fastdrop.exe.manifest"
