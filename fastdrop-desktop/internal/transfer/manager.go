@@ -155,7 +155,7 @@ func (m *Manager) MarkChunkComplete(ctx context.Context, transferID, fileID stri
 	if err != nil {
 		return 0, false, err
 	}
-	// In-memory progress (atomic enough for our purposes).
+	// In-memory progress, guarded by m.mu.
 	m.mu.Lock()
 	fp, ok := m.progress[fileID]
 	if !ok {
@@ -180,11 +180,14 @@ func (m *Manager) MarkChunkComplete(ctx context.Context, transferID, fileID stri
 		m.throttle[transferID] = throttle
 	}
 	cb := m.cb
+	// Snapshot under the lock: fp is shared across concurrent chunk PUTs,
+	// so reading fp.transferred/fp.total after Unlock would race.
+	transferred, total := fp.transferred, fp.total
 	m.mu.Unlock()
 
 	// Persist progress to DB at a coarse cadence; we always persist the chunk
 	// completion count but only the actual byte counter (cheap upserts).
-	if err := m.db.UpdateTransferFileProgress(ctx, fileID, fp.transferred, count, string(StatusTransferring)); err != nil {
+	if err := m.db.UpdateTransferFileProgress(ctx, fileID, transferred, count, string(StatusTransferring)); err != nil {
 		return count, false, err
 	}
 
@@ -193,7 +196,7 @@ func (m *Manager) MarkChunkComplete(ctx context.Context, transferID, fileID stri
 	justStarted, _ := m.db.MarkTransferStarted(ctx, transferID, database.Now())
 
 	if cb != nil && throttle.Allow(now) {
-		cb(transferID, fileID, fp.transferred, fp.total, speed)
+		cb(transferID, fileID, transferred, total, speed)
 	}
 	return count, justStarted, nil
 }
