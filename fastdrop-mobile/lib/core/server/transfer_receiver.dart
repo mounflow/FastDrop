@@ -2,10 +2,10 @@ import 'dart:async';
 import 'dart:collection';
 import 'dart:convert';
 import 'dart:io';
-import 'dart:typed_data';
 
 import 'package:flutter/foundation.dart';
 import 'package:fastdrop_mobile/core/security/token.dart';
+import 'package:fastdrop_mobile/core/server/request_reader.dart';
 import 'package:fastdrop_mobile/core/server/session_manager.dart';
 import 'package:fastdrop_mobile/core/utils/file_utils.dart';
 import 'package:shelf/shelf.dart';
@@ -121,6 +121,12 @@ typedef ProgressCallback = void Function(TransferProgressEvent event);
 /// Callback when a new transfer arrives and needs user confirmation.
 typedef TransferRequestCallback = void Function(ServerTransfer transfer);
 
+/// Called for durable local-history snapshots at lifecycle boundaries.
+typedef TransferChangedCallback = void Function(
+  ServerTransfer transfer,
+  ServerSession? peer,
+);
+
 /// Receives incoming file transfers on the embedded server.
 ///
 /// Implements the Go `transfer.Manager` receive-side subset: offer handling,
@@ -131,10 +137,18 @@ class TransferReceiver {
     required SessionManager sessionManager,
     this.onTransferRequest,
     this.onProgress,
-  });
+    this.onTransferChanged,
+    Future<int> Function()? availableSpaceProvider,
+  })  : _sessionManager = sessionManager,
+        _availableSpaceProvider =
+            availableSpaceProvider ?? FileUtils.availableSpace;
 
   TransferRequestCallback? onTransferRequest;
   ProgressCallback? onProgress;
+  TransferChangedCallback? onTransferChanged;
+
+  final SessionManager _sessionManager;
+  final Future<int> Function() _availableSpaceProvider;
 
   final HashMap<String, ServerTransfer> _transfers = HashMap();
 
@@ -143,6 +157,8 @@ class TransferReceiver {
   final HashMap<String, Semaphore> _fileSems = HashMap();
   final HashMap<String, int> _fileInFlight = HashMap();
   static const _maxActiveFiles = 2;
+  static const _maxJsonBytes = 1024 * 1024;
+  static const _chunkBodySlack = 1024;
 
   // -- Progress throttle -------------------------------------------------------
   final HashMap<String, DateTime> _lastProgressPush = HashMap();
@@ -172,6 +188,7 @@ class TransferReceiver {
     }
 
     transfer.status = 'transferring';
+    _notifyChanged(transfer);
   }
 
   /// Reject a pending transfer.
@@ -179,6 +196,7 @@ class TransferReceiver {
     final transfer = _transfers[transferId];
     if (transfer == null || transfer.status != 'waiting_accept') return;
     transfer.status = 'rejected';
+    _notifyChanged(transfer);
   }
 
   /// Cancel an active transfer.
@@ -192,6 +210,28 @@ class TransferReceiver {
       }
     }
     _cleanupTempFiles(transfer);
+    _notifyChanged(transfer);
+  }
+
+  /// Pause an active transfer owned by [sessionId]. Chunks already accepted
+  /// by the HTTP server may finish, but senders stop scheduling new chunks.
+  bool pauseTransfer(String transferId, String sessionId) {
+    final transfer = _transfers[transferId];
+    if (transfer == null || transfer.sessionId != sessionId) return false;
+    if (transfer.status != 'transferring') return false;
+    transfer.status = 'paused';
+    _notifyChanged(transfer);
+    return true;
+  }
+
+  /// Resume a previously paused transfer owned by [sessionId].
+  bool resumeTransfer(String transferId, String sessionId) {
+    final transfer = _transfers[transferId];
+    if (transfer == null || transfer.sessionId != sessionId) return false;
+    if (transfer.status != 'paused') return false;
+    transfer.status = 'transferring';
+    _notifyChanged(transfer);
+    return true;
   }
 
   ServerTransfer? getTransfer(String transferId) => _transfers[transferId];
@@ -199,6 +239,7 @@ class TransferReceiver {
   List<ServerTransfer> get activeTransfers => _transfers.values
       .where((t) =>
           t.status == 'transferring' ||
+          t.status == 'paused' ||
           t.status == 'preparing' ||
           t.status == 'verifying' ||
           t.status == 'waiting_accept')
@@ -215,27 +256,67 @@ class TransferReceiver {
     final sessionId = request.context['fastdrop.sessionId'] as String?;
     if (sessionId == null) return _error(401, 'UNAUTHORIZED', 'No session');
 
-    final body = await _readJson(request);
-    if (body == null) return _error(400, 'INVALID_REQUEST', 'Invalid JSON');
+    final Map<String, dynamic> body;
+    try {
+      body = await readJsonObjectLimited(request, maxBytes: _maxJsonBytes);
+    } on RequestBodyTooLargeException {
+      return _error(413, 'INVALID_REQUEST', 'JSON body is too large');
+    } catch (_) {
+      return _error(400, 'INVALID_REQUEST', 'Invalid JSON');
+    }
 
-    final direction = body['direction'] as String? ?? 'client_to_server';
-    final filesJson = body['files'] as List<dynamic>?;
-    if (filesJson == null || filesJson.isEmpty) {
+    final requestedDirection = body['direction'];
+    final direction = requestedDirection is String &&
+            requestedDirection.toLowerCase() == 'server_to_client'
+        ? 'server_to_client'
+        : 'client_to_server';
+    final rawFiles = body['files'];
+    if (rawFiles is! List<dynamic> || rawFiles.isEmpty) {
       return _error(400, 'INVALID_REQUEST', 'No files in offer');
     }
+    final filesJson = rawFiles;
 
     final transferId = TokenManager.generateToken();
     final files = <ServerFileTask>[];
+    var totalBytes = 0;
 
     for (final fj in filesJson) {
-      final fm = fj as Map<String, dynamic>;
+      if (fj is! Map<String, dynamic>) {
+        return _error(400, 'INVALID_REQUEST', 'Invalid file entry');
+      }
+      final fm = fj;
+      final rawSize = fm['size'];
+      if (rawSize is! int || rawSize < 0) {
+        return _error(
+          400,
+          'INVALID_REQUEST',
+          'File size must be a non-negative integer',
+        );
+      }
+      final size = rawSize;
+      totalBytes += size;
       files.add(ServerFileTask(
         fileId: TokenManager.generateToken(),
         clientFileId: (fm['clientFileId'] as String?) ?? '',
         name: FileUtils.sanitizeFileName(fm['name'] as String? ?? 'unnamed'),
-        size: fm['size'] as int? ?? 0,
+        size: size,
         sha256: fm['sha256'] as String?,
       ));
+    }
+
+    if (direction == 'client_to_server') {
+      final availableBytes = await _availableSpaceProvider();
+      if (availableBytes >= 0 && availableBytes < totalBytes) {
+        return _error(
+          507,
+          'INSUFFICIENT_STORAGE',
+          '接收设备存储空间不足',
+          details: {
+            'requiredBytes': totalBytes,
+            'availableBytes': availableBytes,
+          },
+        );
+      }
     }
 
     final transfer = ServerTransfer(
@@ -246,6 +327,7 @@ class TransferReceiver {
       createdAt: DateTime.now(),
     );
     _transfers[transferId] = transfer;
+    _notifyChanged(transfer);
 
     // Notify UI for user confirmation.
     onTransferRequest?.call(transfer);
@@ -282,7 +364,7 @@ class TransferReceiver {
       return _error(
           403, 'SESSION_INVALID', 'Transfer belongs to another session');
     }
-    if (transfer.status != 'transferring') {
+    if (transfer.status != 'transferring' && transfer.status != 'paused') {
       return _error(
           409, 'INVALID_REQUEST', 'Transfer is not in transferring state');
     }
@@ -302,7 +384,12 @@ class TransferReceiver {
     // Read the chunk body.
     Uint8List bytes;
     try {
-      bytes = await _readBytes(request);
+      bytes = await readBodyLimited(
+        request,
+        maxBytes: FileUtils.chunkSize + _chunkBodySlack,
+      );
+    } on RequestBodyTooLargeException {
+      return _error(413, 'INVALID_REQUEST', 'Chunk body is too large');
     } catch (e) {
       debugPrint('[Transfer] Failed to read chunk body: $e');
       return _error(400, 'INVALID_REQUEST', 'Failed to read chunk body: $e');
@@ -310,7 +397,6 @@ class TransferReceiver {
     if (bytes.isEmpty) {
       return _error(400, 'INVALID_REQUEST', 'Empty chunk body');
     }
-
     // Reserve one of the two distinct-file slots before the first await.
     // Multiple chunks of the same file share that slot; they must not each be
     // counted as a separate active file.
@@ -377,6 +463,9 @@ class TransferReceiver {
       return _error(
           403, 'SESSION_INVALID', 'Transfer belongs to another session');
     }
+    if (transfer.status == 'paused') {
+      return _error(409, 'INVALID_REQUEST', 'Transfer is paused');
+    }
 
     final file = transfer.files.where((f) => f.fileId == fileId).firstOrNull;
     if (file == null) {
@@ -400,6 +489,7 @@ class TransferReceiver {
           actualSha.toLowerCase() != file.sha256!.toLowerCase()) {
         file.status = 'failed';
         transfer.status = 'failed';
+        _notifyChanged(transfer);
         return _error(400, 'FILE_HASH_MISMATCH',
             'SHA-256 mismatch: expected ${file.sha256}, got $actualSha');
       }
@@ -418,6 +508,7 @@ class TransferReceiver {
       } else {
         transfer.status = 'transferring';
       }
+      _notifyChanged(transfer);
 
       // Push final progress.
       onProgress?.call(TransferProgressEvent(
@@ -439,6 +530,7 @@ class TransferReceiver {
       debugPrint('[Transfer] Stack: $s');
       file.status = 'failed';
       transfer.status = 'failed';
+      _notifyChanged(transfer);
       return _error(500, 'INTERNAL_ERROR', 'File completion failed: $e');
     }
   }
@@ -568,8 +660,15 @@ class TransferReceiver {
       transferredBytes: file.receivedBytes,
       totalBytes: file.size,
       fileName: file.name,
-      status: 'transferring',
+      status: transfer.status,
     ));
+  }
+
+  void _notifyChanged(ServerTransfer transfer) {
+    onTransferChanged?.call(
+      transfer,
+      _sessionManager.get(transfer.sessionId),
+    );
   }
 
   void _cleanupTempFiles(ServerTransfer transfer) {
@@ -593,23 +692,6 @@ class TransferReceiver {
     }
   }
 
-  static Future<Map<String, dynamic>?> _readJson(Request request) async {
-    try {
-      final raw = await request.readAsString();
-      return jsonDecode(raw) as Map<String, dynamic>;
-    } catch (_) {
-      return null;
-    }
-  }
-
-  static Future<Uint8List> _readBytes(Request request) async {
-    final builder = BytesBuilder(copy: false);
-    await for (final chunk in request.read()) {
-      builder.add(chunk);
-    }
-    return builder.takeBytes();
-  }
-
   static bool _isOwnedByRequest(Request request, ServerTransfer transfer) {
     return request.context['fastdrop.sessionId'] == transfer.sessionId;
   }
@@ -622,11 +704,20 @@ class TransferReceiver {
     );
   }
 
-  static Response _error(int status, String code, String message) {
+  static Response _error(
+    int status,
+    String code,
+    String message, {
+    Map<String, dynamic>? details,
+  }) {
     return Response(
       status,
       body: jsonEncode({
-        'error': {'code': code, 'message': message},
+        'error': {
+          'code': code,
+          'message': message,
+          if (details != null) 'details': details,
+        },
       }),
       headers: {'content-type': 'application/json'},
     );

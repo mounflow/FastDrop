@@ -217,8 +217,9 @@ class FileUtils {
 
   /// Return available free space in bytes at the downloads directory.
   ///
-  /// On Android, queries StatFs via a platform channel. Falls back to 1 GB
-  /// if the channel is unavailable (e.g. running on desktop or in tests).
+  /// On Android, queries StatFs via a platform channel. Returns -1 when the
+  /// platform cannot determine the value so callers do not reject valid large
+  /// transfers based on a fabricated fallback.
   static Future<int> availableSpace() async {
     final dir = await getDownloadsDir();
     try {
@@ -232,7 +233,7 @@ class FileUtils {
     } on MissingPluginException {
       // Channel not registered — fall through to default.
     }
-    return 1024 * 1024 * 1024; // Fallback: assume 1 GB.
+    return -1;
   }
 }
 

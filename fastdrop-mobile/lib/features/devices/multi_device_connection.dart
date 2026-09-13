@@ -7,6 +7,7 @@ import 'package:fastdrop_mobile/core/network/http_client.dart';
 import 'package:fastdrop_mobile/core/network/ws_client.dart';
 import 'package:fastdrop_mobile/core/providers.dart';
 import 'package:fastdrop_mobile/core/storage/session_store.dart';
+import 'package:fastdrop_mobile/core/storage/transfer_history_store.dart';
 import 'package:fastdrop_mobile/features/transfer/transfer_service.dart';
 import 'package:fastdrop_mobile/shared/models/transfer.dart';
 
@@ -212,6 +213,8 @@ class MultiDeviceConnectionNotifier
   final Ref _ref;
   final HttpRequestLimiter _globalHttpLimiter = HttpRequestLimiter(6);
   final HttpRequestLimiter _globalFileLimiter = HttpRequestLimiter(2);
+  final TransferHistoryStore _historyStore = TransferHistoryStore();
+  final Map<String, int> _historyCreatedAt = {};
   final Map<String, _PeerRuntime> _runtimes = {};
 
   Future<void> connectAll(List<Device> devices) async {
@@ -343,6 +346,15 @@ class MultiDeviceConnectionNotifier
   }) async {
     if (deviceIds.isEmpty || filePaths.isEmpty) return;
 
+    var totalBytes = 0;
+    for (final path in filePaths) {
+      try {
+        totalBytes += await File(path).length();
+      } catch (_) {
+        // TransferService reports the actual file error to the caller.
+      }
+    }
+    final createdAt = DateTime.now().millisecondsSinceEpoch ~/ 1000;
     final futures = <Future<void>>[];
     for (final deviceId in deviceIds.toSet()) {
       final runtime = _runtimes[deviceId];
@@ -359,6 +371,7 @@ class MultiDeviceConnectionNotifier
 
       final waitsForAcceptance = const {'android', 'ios', 'macos'}
           .contains(runtime.device.platform.toLowerCase());
+      final transferredByFile = <String, int>{};
       late final TransferService service;
       service = TransferService(
         httpClient: runtime.httpClient,
@@ -368,16 +381,43 @@ class MultiDeviceConnectionNotifier
         waitForReady: waitsForAcceptance
             ? (transferId) => _waitForTransferReady(deviceId, transferId)
             : null,
-        onProgress: (transferId, fileId, progress) =>
-            onProgress?.call(deviceId, transferId, fileId, progress),
-        onStateChange: (transferId, status, {errorCode, errorMessage}) =>
-            onStateChange?.call(
-          deviceId,
-          transferId,
-          status,
-          errorCode: errorCode,
-          errorMessage: errorMessage,
-        ),
+        onProgress: (transferId, fileId, progress) {
+          transferredByFile[fileId] = progress.bytesTransferred;
+          onProgress?.call(deviceId, transferId, fileId, progress);
+        },
+        onStateChange: (transferId, status, {errorCode, errorMessage}) {
+          final isTerminal = const {
+            'completed',
+            'failed',
+            'cancelled',
+            'rejected',
+          }.contains(status);
+          unawaited(_historyStore.upsert(TransferRow(
+            id: transferId,
+            sessionId: runtime.device.sessionId,
+            peerDeviceId: runtime.device.id,
+            direction: 'client_to_server',
+            status: status,
+            totalFiles: filePaths.length,
+            totalBytes: totalBytes,
+            transferredBytes: status == 'completed'
+                ? totalBytes
+                : transferredByFile.values.fold(0, (sum, value) => sum + value),
+            createdAt: createdAt,
+            completedAt: isTerminal
+                ? DateTime.now().millisecondsSinceEpoch ~/ 1000
+                : null,
+            errorCode: errorCode,
+            errorMessage: errorMessage,
+          )));
+          onStateChange?.call(
+            deviceId,
+            transferId,
+            status,
+            errorCode: errorCode,
+            errorMessage: errorMessage,
+          );
+        },
       );
       runtime.uploadServices.add(service);
       futures.add(service.uploadFiles(filePaths).whenComplete(() {
@@ -403,10 +443,22 @@ class MultiDeviceConnectionNotifier
   }
 
   void pauseTransfer(String deviceId, String transferId) {
+    final runtime = _runtimes[deviceId];
+    runtime?.downloadService.pauseTransfer(transferId);
+    for (final service
+        in runtime?.uploadServices ?? const <TransferService>{}) {
+      service.pauseTransfer(transferId);
+    }
     _sendTransferCommand(deviceId, 'transfer.pause', transferId);
   }
 
   void resumeTransfer(String deviceId, String transferId) {
+    final runtime = _runtimes[deviceId];
+    runtime?.downloadService.resumeTransfer(transferId);
+    for (final service
+        in runtime?.uploadServices ?? const <TransferService>{}) {
+      service.resumeTransfer(transferId);
+    }
     _sendTransferCommand(deviceId, 'transfer.resume', transferId);
   }
 
@@ -423,6 +475,7 @@ class MultiDeviceConnectionNotifier
 
     final peer = state.peer(offer.deviceId);
     if (peer == null) return;
+    _recordIncomingOffer(runtime, offer, 'transferring');
     final downloads = [...peer.activeDownloads];
     for (final file in offer.files) {
       downloads.add(MultiActiveDownload(
@@ -463,6 +516,12 @@ class MultiDeviceConnectionNotifier
         if (!allSucceeded) 'reason': 'download_failed',
       },
     });
+    _recordIncomingOffer(
+      runtime,
+      offer,
+      allSucceeded ? 'completed' : 'failed',
+      errorCode: allSucceeded ? null : 'INTERNAL_ERROR',
+    );
   }
 
   void rejectOffer(MultiIncomingOffer offer) {
@@ -474,6 +533,9 @@ class MultiDeviceConnectionNotifier
       'timestamp': DateTime.now().millisecondsSinceEpoch,
       'payload': {'offerId': offer.offerId, 'reason': 'user_rejected'},
     });
+    if (runtime != null) {
+      _recordIncomingOffer(runtime, offer, 'rejected');
+    }
   }
 
   void cancelDownload(String deviceId, String transferId) {
@@ -709,6 +771,39 @@ class MultiDeviceConnectionNotifier
       'timestamp': DateTime.now().millisecondsSinceEpoch,
       'payload': {'transferId': transferId},
     });
+  }
+
+  void _recordIncomingOffer(
+    _PeerRuntime runtime,
+    MultiIncomingOffer offer,
+    String status, {
+    String? errorCode,
+  }) {
+    final terminal = const {
+      'completed',
+      'failed',
+      'cancelled',
+      'rejected',
+    }.contains(status);
+    final createdAt = _historyCreatedAt.putIfAbsent(
+      offer.transferId,
+      () => DateTime.now().millisecondsSinceEpoch ~/ 1000,
+    );
+    if (terminal) _historyCreatedAt.remove(offer.transferId);
+    unawaited(_historyStore.upsert(TransferRow(
+      id: offer.transferId,
+      sessionId: runtime.device.sessionId,
+      peerDeviceId: runtime.device.id,
+      direction: 'server_to_client',
+      status: status,
+      totalFiles: offer.files.length,
+      totalBytes: offer.totalBytes,
+      transferredBytes: status == 'completed' ? offer.totalBytes : 0,
+      createdAt: createdAt,
+      completedAt:
+          terminal ? DateTime.now().millisecondsSinceEpoch ~/ 1000 : null,
+      errorCode: errorCode,
+    )));
   }
 
   void _setPeer(String deviceId, PeerConnectionView peer) {

@@ -8,9 +8,14 @@
     <uses-permission android:name="android.permission.CHANGE_WIFI_MULTICAST_STATE" />
     <!-- Optional, requested only when the user taps "显示 Wi-Fi 名称". -->
     <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
 
     <application
         android:label="FastDrop"
+        android:icon="@mipmap/ic_launcher"
+        android:roundIcon="@mipmap/ic_launcher_round"
         android:name="${applicationName}"
         android:usesCleartextTraffic="true">
         <activity
@@ -29,6 +34,10 @@
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
+        <service
+            android:name=".FastDropKeepAliveService"
+            android:exported="false"
+            android:foregroundServiceType="dataSync" />
         <meta-data
             android:name="flutterEmbedding"
             android:value="2" />

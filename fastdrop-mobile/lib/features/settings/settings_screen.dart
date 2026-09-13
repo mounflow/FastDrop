@@ -5,6 +5,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import 'package:fastdrop_mobile/core/discovery/device_discovery.dart';
 import 'package:fastdrop_mobile/core/discovery/discovery_providers.dart';
+import 'package:fastdrop_mobile/core/app_info.dart';
 import 'package:fastdrop_mobile/core/server/server_providers.dart';
 import 'package:fastdrop_mobile/core/storage/session_store.dart';
 import 'package:fastdrop_mobile/core/providers.dart';
@@ -286,7 +287,7 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
           ListTile(
             leading: const Icon(Icons.tag),
             title: const Text('Version'),
-            subtitle: const Text('1.0.0'),
+            subtitle: const Text(fastDropAppVersion),
           ),
           ListTile(
             leading: const Icon(Icons.description_outlined),

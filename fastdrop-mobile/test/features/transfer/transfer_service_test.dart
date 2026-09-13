@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 import 'dart:typed_data';
@@ -26,6 +27,9 @@ class _MockTransferServer {
   String? expectedSha256;
   int fileSize = 0;
   String fileName = 'test.bin';
+  Duration chunkDelay = Duration.zero;
+  int chunkRequestCount = 0;
+  final Completer<void> firstChunkReceived = Completer<void>();
   late HttpServer server;
 
   String get baseUrl => 'http://${server.address.address}:${server.port}';
@@ -57,6 +61,9 @@ class _MockTransferServer {
           ],
         }));
       } else if (request.method == 'PUT' && path.contains('/chunks/')) {
+        chunkRequestCount++;
+        if (!firstChunkReceived.isCompleted) firstChunkReceived.complete();
+        if (chunkDelay > Duration.zero) await Future<void>.delayed(chunkDelay);
         final chunkIndex = int.parse(request.uri.pathSegments.last);
         final bytes = await request.fold<List<int>>(
           <int>[],
@@ -206,7 +213,6 @@ void main() {
   test('chunk payload matches source file content', () async {
     // Write a file with recognisable per-chunk patterns so we can verify
     // that each chunk carries the correct slice of the source.
-    final size = FileUtils.chunkSize * 2 + 512;
     final sourceFile =
         File('${tempDir.path}${Platform.pathSeparator}pattern.bin');
     final handle = await sourceFile.open(mode: FileMode.write);
@@ -300,6 +306,36 @@ void main() {
     // The key assertion: NOT all 20 chunks should have been uploaded.
     expect(mock.chunkSizes.length, lessThan(20),
         reason: 'Cancellation should stop the upload before all chunks land');
+  });
+
+  test('pause stops scheduling new chunks until resume', () async {
+    const size = FileUtils.chunkSize * 5 + 1;
+    final sourceFile = await _createSparseFile(tempDir, 'pause.bin', size);
+    final mock = _MockTransferServer(6)
+      ..chunkDelay = const Duration(milliseconds: 60);
+    await mock.start();
+    addTearDown(mock.stop);
+
+    final service = TransferService(
+      httpClient: FastDropHttpClient(baseUrl: mock.baseUrl),
+    );
+    addTearDown(service.dispose);
+
+    final upload = service.uploadFiles([sourceFile.path], offerId: 'pause-1');
+    await mock.firstChunkReceived.future;
+    service.pauseTransfer('pause-1');
+
+    // The first batch (at most three chunks) is allowed to drain. No later
+    // batch may start while the local pause gate is closed.
+    await Future<void>.delayed(const Duration(milliseconds: 180));
+    final countWhilePaused = mock.chunkRequestCount;
+    await Future<void>.delayed(const Duration(milliseconds: 180));
+    expect(mock.chunkRequestCount, countWhilePaused);
+    expect(countWhilePaused, lessThanOrEqualTo(3));
+
+    service.resumeTransfer('pause-1');
+    await upload;
+    expect(mock.chunkRequestCount, 6);
   });
 
   // ---------------------------------------------------------------------------

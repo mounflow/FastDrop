@@ -5,6 +5,7 @@ import 'package:flutter/material.dart';
 
 import 'package:fastdrop_mobile/core/network/http_client.dart';
 import 'package:fastdrop_mobile/core/storage/session_store.dart';
+import 'package:fastdrop_mobile/core/storage/transfer_history_store.dart';
 import 'package:fastdrop_mobile/shared/models/transfer.dart';
 
 /// Displays historical transfers fetched from the backend via
@@ -26,6 +27,7 @@ class _HistoryScreenState extends State<HistoryScreen> {
   String? _error;
 
   final List<FastDropHttpClient> _httpClients = [];
+  final TransferHistoryStore _historyStore = TransferHistoryStore();
   Timer? _autoRefreshTimer;
 
   @override
@@ -40,14 +42,6 @@ class _HistoryScreenState extends State<HistoryScreen> {
 
   Future<void> _initClientAndLoad() async {
     final devices = await DeviceStore().loadDevices();
-    if (devices.isEmpty) {
-      setState(() {
-        _loading = false;
-        _error = 'No paired devices.';
-      });
-      return;
-    }
-
     for (final device in devices.where((device) => !device.isExpired)) {
       final client = FastDropHttpClient(baseUrl: device.serverBaseUrl)
         ..setSession(device.sessionId, device.accessToken);
@@ -236,8 +230,8 @@ class _HistoryScreenState extends State<HistoryScreen> {
                 _detailRow(
                     'Direction',
                     transfer.direction == 'client_to_server'
-                        ? 'Phone to PC'
-                        : 'PC to Phone'),
+                        ? 'Sent'
+                        : 'Received'),
                 _detailRow('Status', transfer.status),
                 _detailRow('Files', '${transfer.totalFiles}'),
                 _detailRow('Size', _formatBytes(transfer.totalBytes)),
@@ -273,31 +267,21 @@ class _HistoryScreenState extends State<HistoryScreen> {
   // ---------------------------------------------------------------------------
 
   Future<void> _loadTransfers() async {
-    if (_httpClients.isEmpty) return;
-
     setState(() {
       _loading = true;
       _error = null;
     });
 
     try {
-      final queryParams = <String, String>{};
-      if (_statusFilter != 'all') {
-        queryParams['status'] = _statusFilter;
-      }
-
       final responses = await Future.wait(_httpClients.map((client) async {
         try {
-          return await client.get(
-            '/api/v1/transfers',
-            queryParams: queryParams.isNotEmpty ? queryParams : null,
-          );
+          return await client.get('/api/v1/transfers');
         } catch (_) {
           return null;
         }
       }));
 
-      final transfers = <TransferRow>[];
+      final remoteTransfers = <TransferRow>[];
       for (final response in responses) {
         if (response == null) continue;
         final body = jsonDecode(response.body);
@@ -309,15 +293,27 @@ class _HistoryScreenState extends State<HistoryScreen> {
         } else {
           items = const [];
         }
-        transfers.addAll(items.map(
+        remoteTransfers.addAll(items.map(
           (item) => TransferRow.fromJson(item as Map<String, dynamic>),
         ));
       }
-      transfers.sort((a, b) => b.createdAt.compareTo(a.createdAt));
+      await _historyStore.upsertAll(remoteTransfers);
+
+      final merged = <String, TransferRow>{
+        for (final transfer in await _historyStore.load())
+          transfer.id: transfer,
+        for (final transfer in remoteTransfers) transfer.id: transfer,
+      };
+      final transfers = merged.values
+          .where((transfer) =>
+              _statusFilter == 'all' || transfer.status == _statusFilter)
+          .toList()
+        ..sort((a, b) => b.createdAt.compareTo(a.createdAt));
 
       setState(() {
         _transfers = transfers;
         _loading = false;
+        _error = null;
       });
     } catch (e) {
       setState(() {

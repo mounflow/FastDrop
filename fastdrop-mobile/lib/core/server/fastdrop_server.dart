@@ -2,6 +2,7 @@ import 'dart:convert';
 import 'dart:io';
 
 import 'package:fastdrop_mobile/core/server/pairing_handler.dart';
+import 'package:fastdrop_mobile/core/app_info.dart';
 import 'package:fastdrop_mobile/core/server/session_manager.dart';
 import 'package:fastdrop_mobile/core/server/transfer_receiver.dart';
 import 'package:fastdrop_mobile/core/server/ws_server.dart';
@@ -22,6 +23,7 @@ class FastDropServer {
     bool requirePairConfirmation = false,
     PairRequestCallback? onPairRequest,
     TransferRequestCallback? onTransferRequest,
+    TransferChangedCallback? onTransferChanged,
     PeerConnectedCallback? onPeerConnected,
     PeerDisconnectedCallback? onPeerDisconnected,
   }) : _localDevice = localDevice {
@@ -35,6 +37,7 @@ class FastDropServer {
     transferReceiver = TransferReceiver(
       sessionManager: sessionManager,
       onTransferRequest: onTransferRequest,
+      onTransferChanged: onTransferChanged,
     );
     wsServer = WsServer(
       sessionManager: sessionManager,
@@ -134,7 +137,7 @@ class FastDropServer {
           'deviceId': _localDevice.deviceId,
           'deviceName': _localDevice.deviceName,
           'platform': _localDevice.platform,
-          'appVersion': _localDevice.appVersion ?? '1.0.0',
+          'appVersion': _localDevice.appVersion ?? fastDropAppVersion,
           'protocol': 1,
         }),
         headers: {'content-type': 'application/json'},

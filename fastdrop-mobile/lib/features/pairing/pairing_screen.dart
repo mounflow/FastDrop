@@ -7,6 +7,7 @@ import 'package:mobile_scanner/mobile_scanner.dart';
 
 import 'package:fastdrop_mobile/core/discovery/device_discovery.dart';
 import 'package:fastdrop_mobile/core/discovery/discovery_providers.dart';
+import 'package:fastdrop_mobile/core/app_info.dart';
 import 'package:fastdrop_mobile/core/providers.dart';
 import 'package:fastdrop_mobile/core/storage/session_store.dart';
 import 'package:fastdrop_mobile/shared/models/qr_payload.dart';
@@ -152,7 +153,7 @@ class PairingNotifier extends StateNotifier<PairingState> {
           deviceId: deviceId,
           deviceName: deviceName,
           platform: 'android',
-          appVersion: '1.0.0',
+          appVersion: fastDropAppVersion,
         ),
       );
 
@@ -356,7 +357,7 @@ class PairingNotifier extends StateNotifier<PairingState> {
             deviceId: deviceId,
             deviceName: deviceName,
             platform: 'android',
-            appVersion: '1.0.0',
+            appVersion: fastDropAppVersion,
           ).toJson(),
         },
       );

@@ -22,6 +22,25 @@ if (flutterVersionName == null) {
     flutterVersionName = '1.0'
 }
 
+def keystoreProperties = new Properties()
+def keystorePropertiesFile = rootProject.file('key.properties')
+if (keystorePropertiesFile.exists()) {
+    keystorePropertiesFile.withInputStream { stream ->
+        keystoreProperties.load(stream)
+    }
+}
+
+def releaseStoreFile = keystoreProperties.getProperty('storeFile') ?: System.getenv('FASTDROP_KEYSTORE_FILE')
+def releaseStorePassword = keystoreProperties.getProperty('storePassword') ?: System.getenv('FASTDROP_KEYSTORE_PASSWORD')
+def releaseKeyAlias = keystoreProperties.getProperty('keyAlias') ?: System.getenv('FASTDROP_KEY_ALIAS')
+def releaseKeyPassword = keystoreProperties.getProperty('keyPassword') ?: System.getenv('FASTDROP_KEY_PASSWORD')
+def hasReleaseSigning = [releaseStoreFile, releaseStorePassword, releaseKeyAlias, releaseKeyPassword]
+    .every { it != null && !it.toString().trim().isEmpty() }
+def requireReleaseSigning = project.findProperty('fastdrop.requireReleaseSigning')?.toString()?.toBoolean() ?: false
+if (requireReleaseSigning && !hasReleaseSigning) {
+    throw new GradleException('FastDrop release signing is required but key.properties or FASTDROP_KEY_* is incomplete.')
+}
+
 android {
     namespace "com.fastdrop.fastdrop_mobile"
     compileSdk 36
@@ -49,9 +68,27 @@ android {
         versionName flutterVersionName
     }
 
+    signingConfigs {
+        if (hasReleaseSigning) {
+            release {
+                storeFile rootProject.file(releaseStoreFile)
+                storePassword releaseStorePassword
+                keyAlias releaseKeyAlias
+                keyPassword releaseKeyPassword
+            }
+        }
+    }
+
     buildTypes {
         release {
-            signingConfig signingConfigs.debug
+            if (hasReleaseSigning) {
+                signingConfig signingConfigs.release
+            } else {
+                // Local acceptance builds remain installable. Production CI
+                // must pass -Pfastdrop.requireReleaseSigning=true.
+                signingConfig signingConfigs.debug
+                logger.warn('FastDrop release APK is debug-signed; configure key.properties before distribution.')
+            }
         }
     }
 }

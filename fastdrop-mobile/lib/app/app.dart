@@ -1,8 +1,11 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import 'package:fastdrop_mobile/app/routes.dart';
 import 'package:fastdrop_mobile/app/theme.dart';
+import 'package:fastdrop_mobile/core/platform/background_receive_service.dart';
 import 'package:fastdrop_mobile/core/server/server_providers.dart';
 import 'package:fastdrop_mobile/features/pairing/pair_confirm_dialog.dart';
 import 'package:fastdrop_mobile/features/transfer/receive_confirm_dialog.dart';
@@ -44,11 +47,18 @@ class _FastDropAppState extends ConsumerState<FastDropApp>
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
     if (state == AppLifecycleState.resumed) {
+      unawaited(BackgroundReceiveService.stop());
       // Ensure the embedded server is running when the app comes back.
       ref.read(fastdropServerProvider.notifier).ensureRunning();
+    } else if (state == AppLifecycleState.inactive ||
+        state == AppLifecycleState.paused ||
+        state == AppLifecycleState.hidden) {
+      if (ref.read(fastdropServerProvider).isRunning) {
+        unawaited(BackgroundReceiveService.start());
+      }
+    } else if (state == AppLifecycleState.detached) {
+      unawaited(BackgroundReceiveService.stop());
     }
-    // On paused: keep the server running for background transfers.
-    // On detach: the server will be stopped via dispose.
   }
 
   @override

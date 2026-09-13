@@ -74,8 +74,7 @@ class CreateTransferResult {
     return CreateTransferResult(
       transferId: json['transferId'] as String,
       files: (json['files'] as List<dynamic>)
-          .map((f) =>
-              TransferFileResult.fromJson(f as Map<String, dynamic>))
+          .map((f) => TransferFileResult.fromJson(f as Map<String, dynamic>))
           .toList(),
     );
   }
@@ -153,7 +152,8 @@ class TransferProgress {
     return TransferProgress(
       transferId: json['transferId'] as String,
       fileId: json['fileId'] as String,
-      bytesTransferred: (json['transferredBytes'] ?? json['bytesTransferred'] ?? 0) as int,
+      bytesTransferred:
+          (json['transferredBytes'] ?? json['bytesTransferred'] ?? 0) as int,
       totalBytes: json['totalBytes'] as int,
       fileName: json['fileName'] as String?,
       status: json['status'] as String?,
@@ -173,8 +173,7 @@ class TransferProgress {
     };
   }
 
-  double get progress =>
-      totalBytes > 0 ? bytesTransferred / totalBytes : 0.0;
+  double get progress => totalBytes > 0 ? bytesTransferred / totalBytes : 0.0;
 }
 
 /// File completion confirmation: `POST .../complete` response.
@@ -255,6 +254,43 @@ class TransferRow {
     );
   }
 
-  double get progress =>
-      totalBytes > 0 ? transferredBytes / totalBytes : 0.0;
+  TransferRow copyWith({
+    String? status,
+    int? transferredBytes,
+    int? completedAt,
+    String? errorCode,
+    String? errorMessage,
+  }) {
+    return TransferRow(
+      id: id,
+      sessionId: sessionId,
+      peerDeviceId: peerDeviceId,
+      direction: direction,
+      status: status ?? this.status,
+      totalFiles: totalFiles,
+      totalBytes: totalBytes,
+      transferredBytes: transferredBytes ?? this.transferredBytes,
+      createdAt: createdAt,
+      completedAt: completedAt ?? this.completedAt,
+      errorCode: errorCode ?? this.errorCode,
+      errorMessage: errorMessage ?? this.errorMessage,
+    );
+  }
+
+  Map<String, dynamic> toJson() => {
+        'id': id,
+        'sessionId': sessionId,
+        'peerDeviceId': peerDeviceId,
+        'direction': direction,
+        'status': status,
+        'totalFiles': totalFiles,
+        'totalBytes': totalBytes,
+        'transferredBytes': transferredBytes,
+        'createdAt': createdAt,
+        if (completedAt != null) 'completedAt': completedAt,
+        if (errorCode != null) 'errorCode': errorCode,
+        if (errorMessage != null) 'errorMessage': errorMessage,
+      };
+
+  double get progress => totalBytes > 0 ? transferredBytes / totalBytes : 0.0;
 }

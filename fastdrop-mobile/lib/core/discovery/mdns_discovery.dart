@@ -5,6 +5,8 @@ import 'dart:io';
 import 'package:bonsoir/bonsoir.dart';
 import 'package:flutter/foundation.dart';
 
+import 'package:fastdrop_mobile/core/app_info.dart';
+
 import 'device_discovery.dart';
 
 /// Discovers FastDrop peers over mDNS and verifies every result against the
@@ -75,6 +77,11 @@ class MdnsDiscovery implements DeviceDiscovery {
       (_) => unawaited(_revalidateKnownDevices()),
     );
 
+    // Run the verified LAN fallback independently of Android NSD readiness.
+    // Some devices never complete Bonsoir's ready/start sequence even though
+    // direct LAN HTTP is available.
+    _scheduleSubnetScan(force: true);
+
     _bonsoir = BonsoirDiscovery(type: _serviceType);
     _bonsoir!.ready.then((_) async {
       if (_bonsoir == null) return;
@@ -103,6 +110,12 @@ class MdnsDiscovery implements DeviceDiscovery {
     _bonsoir = null;
     _httpClient?.close(force: true);
     _httpClient = null;
+  }
+
+  /// Force a fresh verified LAN probe when the user opens the device picker.
+  Future<void> refresh() async {
+    if (_controller == null) start();
+    await _subnetScan(force: true);
   }
 
   void _handleEvent(BonsoirDiscoveryEvent event) {
@@ -161,20 +174,27 @@ class MdnsDiscovery implements DeviceDiscovery {
     _addVerifiedDevice(device, serviceName: service.name);
   }
 
-  void _scheduleSubnetScan() {
+  void _scheduleSubnetScan({bool force = false}) {
     if (_subnetScanInProgress) return;
     final now = DateTime.now();
-    if (_lastSubnetScan != null &&
+    if (!force &&
+        _lastSubnetScan != null &&
         now.difference(_lastSubnetScan!) < _subnetScanCooldown) {
       return;
     }
-    unawaited(_subnetScan());
+    unawaited(_subnetScan(force: force));
   }
 
-  Future<void> _subnetScan() async {
+  Future<void> _subnetScan({bool force = false}) async {
     if (_subnetScanInProgress) return;
+    final now = DateTime.now();
+    if (!force &&
+        _lastSubnetScan != null &&
+        now.difference(_lastSubnetScan!) < _subnetScanCooldown) {
+      return;
+    }
     _subnetScanInProgress = true;
-    _lastSubnetScan = DateTime.now();
+    _lastSubnetScan = now;
     try {
       final localIP = await _findLocalLANIPv4();
       if (localIP == null) {
@@ -385,7 +405,7 @@ class MdnsDiscovery implements DeviceDiscovery {
         attributes: {
           'id': deviceId,
           'name': deviceName,
-          'version': '1',
+          'version': fastDropAppVersion,
           'protocol': '1',
           'platform': platform,
           'pairing': 'required',

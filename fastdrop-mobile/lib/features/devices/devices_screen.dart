@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
@@ -733,6 +735,7 @@ class _DevicesScreenState extends ConsumerState<DevicesScreen>
 
   Future<void> _showAddDeviceSheet() async {
     ref.invalidate(pairedDevicesProvider);
+    unawaited(ref.read(nearbyDevicesProvider.notifier).refresh());
     final discovered = await NearbyDevicesSheet.show(context);
     if (discovered == null || !mounted) return;
     await _onNearbyDeviceSelected(discovered);

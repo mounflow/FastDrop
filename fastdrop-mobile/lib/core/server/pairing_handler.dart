@@ -4,6 +4,7 @@ import 'dart:convert';
 import 'dart:io';
 
 import 'package:fastdrop_mobile/core/security/token.dart';
+import 'package:fastdrop_mobile/core/server/request_reader.dart';
 import 'package:fastdrop_mobile/core/server/session_manager.dart';
 import 'package:fastdrop_mobile/shared/models/device_info.dart';
 import 'package:fastdrop_mobile/shared/models/pair_request.dart';
@@ -94,6 +95,7 @@ class PairingHandler {
   int _tokenFailCount = 0;
   static const _tokenTtl = Duration(seconds: 60);
   static const _maxFailures = 5;
+  static const _maxPairRequestBytes = 64 * 1024;
 
   // -- Pending pair requests ---------------------------------------------------
 
@@ -261,8 +263,15 @@ class PairingHandler {
 
   /// POST /api/v1/pair/request — QR-based pair request.
   Future<Response> handlePairRequest(Request request) async {
-    final body = await _readJson(request);
-    if (body == null) {
+    final Map<String, dynamic> body;
+    try {
+      body = await readJsonObjectLimited(
+        request,
+        maxBytes: _maxPairRequestBytes,
+      );
+    } on RequestBodyTooLargeException {
+      return _error(413, 'INVALID_REQUEST', 'Pair request body is too large');
+    } catch (_) {
       return _error(400, 'INVALID_REQUEST', 'Invalid JSON body');
     }
 
@@ -294,8 +303,15 @@ class PairingHandler {
 
   /// POST /api/v1/pair/discover — mDNS-based pair request (no token needed).
   Future<Response> handlePairDiscover(Request request) async {
-    final body = await _readJson(request);
-    if (body == null) {
+    final Map<String, dynamic> body;
+    try {
+      body = await readJsonObjectLimited(
+        request,
+        maxBytes: _maxPairRequestBytes,
+      );
+    } on RequestBodyTooLargeException {
+      return _error(413, 'INVALID_REQUEST', 'Pair request body is too large');
+    } catch (_) {
       return _error(400, 'INVALID_REQUEST', 'Invalid JSON body');
     }
 
@@ -360,15 +376,6 @@ class PairingHandler {
   // ---------------------------------------------------------------------------
   // Helpers
   // ---------------------------------------------------------------------------
-
-  static Future<Map<String, dynamic>?> _readJson(Request request) async {
-    try {
-      final raw = await request.readAsString();
-      return jsonDecode(raw) as Map<String, dynamic>;
-    } catch (_) {
-      return null;
-    }
-  }
 
   static Response _json(int status, Map<String, dynamic> body) {
     return Response(

@@ -1,11 +1,16 @@
 import 'dart:io';
+import 'dart:async';
 
 import 'package:fastdrop_mobile/core/discovery/discovery_providers.dart';
+import 'package:fastdrop_mobile/core/app_info.dart';
 import 'package:fastdrop_mobile/core/providers.dart';
+import 'package:fastdrop_mobile/core/platform/background_receive_service.dart';
 import 'package:fastdrop_mobile/core/server/fastdrop_server.dart';
 import 'package:fastdrop_mobile/core/server/pairing_providers.dart';
 import 'package:fastdrop_mobile/core/server/transfer_providers.dart';
+import 'package:fastdrop_mobile/core/storage/transfer_history_store.dart';
 import 'package:fastdrop_mobile/shared/models/device_info.dart';
+import 'package:fastdrop_mobile/shared/models/transfer.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:shared_preferences/shared_preferences.dart';
@@ -78,6 +83,7 @@ class FastDropServerNotifier extends StateNotifier<ServerState> {
   bool get isEnabled => _enabled;
 
   Future<void> _loadEnabled() async {
+    await TransferHistoryStore().markInterruptedTransfersFailed();
     final prefs = await SharedPreferences.getInstance();
     _enabled = prefs.getBool(_enabledKey) ?? true;
     _requirePairConfirmation =
@@ -148,8 +154,9 @@ class FastDropServerNotifier extends StateNotifier<ServerState> {
         deviceId: deviceId,
         deviceName: deviceName,
         platform: _getPlatform(),
-        appVersion: '1.0.0',
+        appVersion: fastDropAppVersion,
       );
+      final historyStore = TransferHistoryStore();
 
       final server = FastDropServer(
         localDevice: localDevice,
@@ -165,6 +172,33 @@ class FastDropServerNotifier extends StateNotifier<ServerState> {
           } else {
             Future.microtask(() => acceptTransfer(transfer.transferId));
           }
+        },
+        onTransferChanged: (transfer, peer) {
+          final isTerminal = const {
+            'completed',
+            'failed',
+            'cancelled',
+            'rejected',
+          }.contains(transfer.status);
+          unawaited(historyStore.upsert(TransferRow(
+            id: transfer.transferId,
+            sessionId: transfer.sessionId,
+            peerDeviceId: peer?.deviceId ?? '',
+            // The protocol direction is from the remote client's viewpoint;
+            // history is presented from this phone's viewpoint.
+            direction: transfer.direction == 'client_to_server'
+                ? 'server_to_client'
+                : 'client_to_server',
+            status: transfer.status,
+            totalFiles: transfer.totalFiles,
+            totalBytes: transfer.totalBytes,
+            transferredBytes: transfer.transferredBytes,
+            createdAt: transfer.createdAt.millisecondsSinceEpoch ~/ 1000,
+            completedAt: isTerminal
+                ? DateTime.now().millisecondsSinceEpoch ~/ 1000
+                : null,
+            errorCode: transfer.status == 'failed' ? 'INTERNAL_ERROR' : null,
+          )));
         },
         onPeerConnected: (peer) {
           ref.read(incomingPeerConnectionsProvider.notifier).connected(peer);
@@ -222,6 +256,9 @@ class FastDropServerNotifier extends StateNotifier<ServerState> {
 
     await _server!.stop();
     _server = null;
+    try {
+      await BackgroundReceiveService.stop();
+    } catch (_) {}
 
     // Clear pending UI state.
     ref.read(pendingPairRequestsProvider.notifier).clear();
@@ -292,6 +329,7 @@ class FastDropServerNotifier extends StateNotifier<ServerState> {
   @override
   void dispose() {
     _server?.stop();
+    unawaited(BackgroundReceiveService.stop());
     super.dispose();
   }
 }

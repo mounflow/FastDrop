@@ -161,6 +161,56 @@ class WsServer {
         }
         break;
 
+      case 'transfer.pause':
+        final payload = msg['payload'] as Map<String, dynamic>?;
+        final transferId = payload?['transferId'] as String?;
+        if (transferId == null ||
+            !(_transferReceiver?.pauseTransfer(
+                  transferId,
+                  conn.sessionId,
+                ) ??
+                false)) {
+          _send(conn, {
+            'type': 'error',
+            'payload': {
+              'code': 'INVALID_REQUEST',
+              'message': 'Transfer cannot be paused',
+            },
+          });
+          break;
+        }
+        sendToSession(
+          conn.sessionId,
+          'transfer.paused',
+          {'transferId': transferId},
+        );
+        break;
+
+      case 'transfer.resume':
+        final payload = msg['payload'] as Map<String, dynamic>?;
+        final transferId = payload?['transferId'] as String?;
+        if (transferId == null ||
+            !(_transferReceiver?.resumeTransfer(
+                  transferId,
+                  conn.sessionId,
+                ) ??
+                false)) {
+          _send(conn, {
+            'type': 'error',
+            'payload': {
+              'code': 'INVALID_REQUEST',
+              'message': 'Transfer cannot be resumed',
+            },
+          });
+          break;
+        }
+        sendToSession(
+          conn.sessionId,
+          'transfer.resume',
+          {'transferId': transferId},
+        );
+        break;
+
       default:
         debugPrint('[WsServer] Unknown message type: $type');
     }

@@ -24,7 +24,7 @@ class MdnsEnabledNotifier extends StateNotifier<bool> {
 
   Future<void> _load() async {
     final prefs = await SharedPreferences.getInstance();
-    state = prefs.getBool(_key) ?? false;
+    state = prefs.getBool(_key) ?? true;
   }
 
   /// 切换开关并持久化。
@@ -103,6 +103,16 @@ class NearbyDevicesNotifier extends StateNotifier<List<DiscoveredDevice>> {
     _sub = null;
     await _ref.read(mdnsDiscoveryProvider).stop();
     if (mounted) state = [];
+  }
+
+  /// Explicit user refresh. Restart the stream if necessary and force the
+  /// verified LAN fallback even when Android emitted no new mDNS event.
+  Future<void> refresh() async {
+    if (!_ref.read(mdnsEnabledProvider)) {
+      await _ref.read(mdnsEnabledProvider.notifier).setEnabled(true);
+    }
+    if (_sub == null) _startDiscovery();
+    await _ref.read(mdnsDiscoveryProvider).refresh();
   }
 
   @override

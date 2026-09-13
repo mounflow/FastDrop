@@ -68,6 +68,12 @@ class NearbyDevicesSheet extends ConsumerWidget {
                     style: theme.textTheme.titleMedium,
                   ),
                   const Spacer(),
+                  IconButton(
+                    tooltip: '重新扫描',
+                    onPressed: () =>
+                        ref.read(nearbyDevicesProvider.notifier).refresh(),
+                    icon: const Icon(Icons.refresh_rounded, size: 20),
+                  ),
                   if (devices.isEmpty)
                     const SizedBox(
                       width: 16,

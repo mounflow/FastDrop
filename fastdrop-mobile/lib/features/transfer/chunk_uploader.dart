@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:math';
 import 'dart:typed_data';
 
+import 'package:fastdrop_mobile/core/errors/app_error.dart';
 import 'package:fastdrop_mobile/core/network/http_client.dart';
 
 /// Uploads a single chunk to the FastDrop backend with retry logic.
@@ -25,6 +26,9 @@ class ChunkUploader {
     required int chunkIndex,
     required Uint8List data,
     int maxRetries = _maxRetries,
+    Future<void> Function()? beforeAttempt,
+    Future<void> Function(Duration duration)? delay,
+    Random? random,
   }) async {
     final path =
         '/api/v1/transfers/$transferId/files/$fileId/chunks/$chunkIndex';
@@ -33,19 +37,23 @@ class ChunkUploader {
     Exception? lastError;
 
     while (attempt <= maxRetries) {
+      // Pause/cancel gates run outside the retry catch so their exceptions do
+      // not consume a network retry attempt.
+      await beforeAttempt?.call();
       try {
         await client.putBytes(path, data);
         return; // success
       } on Exception catch (e) {
         lastError = e;
         attempt++;
-        if (attempt > maxRetries) break;
+        if (attempt > maxRetries || !_isRetryable(e)) break;
 
         // Exponential backoff with jitter.
         final backoffIndex = (attempt - 1).clamp(0, _backoffMs.length - 1);
         final backoff = _backoffMs[backoffIndex];
-        final jitter = Random().nextInt(backoff ~/ 2 + 1);
-        await Future.delayed(Duration(milliseconds: backoff + jitter));
+        final jitter = (random ?? Random()).nextInt(backoff ~/ 2 + 1);
+        final duration = Duration(milliseconds: backoff + jitter);
+        await (delay ?? Future<void>.delayed)(duration);
       }
     }
 
@@ -56,6 +64,17 @@ class ChunkUploader {
       attempts: attempt,
       cause: lastError,
     );
+  }
+
+  static bool _isRetryable(Exception error) {
+    if (error is! AppError) return true;
+    final status = error.statusCode;
+    if (status == 408 || status == 429 || (status != null && status >= 500)) {
+      return true;
+    }
+    return error.code == 'CHUNK_HASH_MISMATCH' ||
+        error.code == 'TOO_MANY_REQUESTS' ||
+        error.code == ErrorCodes.internalError;
   }
 }
 

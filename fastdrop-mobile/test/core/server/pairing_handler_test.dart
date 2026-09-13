@@ -73,4 +73,24 @@ void main() {
     expect(created['status'], 'waiting_confirmation');
     expect(confirmationCount, 1);
   });
+
+  test('pair request rejects bodies larger than 64 KB', () async {
+    final handler = PairingHandler(
+      sessionManager: SessionManager(),
+      localDevice: localDevice,
+    );
+
+    final response = await handler.handlePairDiscover(
+      Request(
+        'POST',
+        Uri.parse('http://localhost/api/v1/pair/discover'),
+        body: List<int>.filled(64 * 1024 + 1, 1),
+      ),
+    );
+    final body =
+        jsonDecode(await response.readAsString()) as Map<String, dynamic>;
+
+    expect(response.statusCode, 413);
+    expect((body['error'] as Map<String, dynamic>)['code'], 'INVALID_REQUEST');
+  });
 }

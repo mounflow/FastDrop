@@ -7,6 +7,7 @@ import android.net.ConnectivityManager
 import android.net.NetworkCapabilities
 import android.net.wifi.WifiInfo
 import android.net.wifi.WifiManager
+import android.os.StatFs
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
 import io.flutter.embedding.engine.FlutterEngine
@@ -15,17 +16,44 @@ import io.flutter.plugin.common.MethodChannel
 import java.net.Inet4Address
 
 class MainActivity : FlutterActivity() {
-    private val channelName = "fastdrop/network_info"
+    private val networkInfoChannelName = "fastdrop/network_info"
+    private val platformChannelName = "fastdrop/platform"
     private val wifiNamePermissionRequest = 9527
     private var pendingPermissionResult: MethodChannel.Result? = null
 
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
-        MethodChannel(flutterEngine.dartExecutor.binaryMessenger, channelName)
+        MethodChannel(flutterEngine.dartExecutor.binaryMessenger, networkInfoChannelName)
             .setMethodCallHandler { call, result ->
                 when (call.method) {
                     "getCurrentNetwork" -> result.success(currentNetworkInfo())
                     "requestWifiNamePermission" -> requestWifiNamePermission(result)
+                    else -> result.notImplemented()
+                }
+            }
+        MethodChannel(flutterEngine.dartExecutor.binaryMessenger, platformChannelName)
+            .setMethodCallHandler { call, result ->
+                when (call.method) {
+                    "startKeepAlive" -> {
+                        FastDropKeepAliveService.start(applicationContext)
+                        result.success(null)
+                    }
+                    "stopKeepAlive" -> {
+                        FastDropKeepAliveService.stop(applicationContext)
+                        result.success(null)
+                    }
+                    "getAvailableSpace" -> {
+                        val path = call.argument<String>("path")
+                        if (path.isNullOrBlank()) {
+                            result.error("INVALID_PATH", "Storage path is required", null)
+                        } else {
+                            try {
+                                result.success(StatFs(path).availableBytes)
+                            } catch (error: IllegalArgumentException) {
+                                result.error("INVALID_PATH", error.message, null)
+                            }
+                        }
+                    }
                     else -> result.notImplemented()
                 }
             }

@@ -76,6 +76,10 @@ class TransferService {
 
   final Map<String, _FileUploadState> _uploadStates = {};
 
+  // Pause gates are keyed by the local offerId. Server transferIds are
+  // resolved through [_transferIdToOfferId].
+  final Map<String, _PauseController> _pauseControllers = {};
+
   // Token for cancelling an in-flight transfer, keyed by offerId.
   final Map<String, CancelToken> _cancelTokens = {};
 
@@ -103,7 +107,9 @@ class TransferService {
 
     final batchOfferId = offerId ?? _generateOfferId();
     final cancelToken = CancelToken();
+    final pauseController = _PauseController();
     _cancelTokens[batchOfferId] = cancelToken;
+    _pauseControllers[batchOfferId] = pauseController;
     var callbackTransferId = batchOfferId;
 
     // Declared outside try so the finally block can clean up temp copies.
@@ -166,6 +172,7 @@ class TransferService {
         onStateChange?.call(createResult.transferId, 'waiting_accept');
         await waitForReady!(createResult.transferId);
       }
+      onStateChange?.call(createResult.transferId, 'transferring');
 
       // 3. Build the chunk plan for each file.
       final chunkSize = FileUtils.chunkSize;
@@ -186,7 +193,13 @@ class TransferService {
         transferId: createResult.transferId,
         fileTasks: fileTasks,
         cancelToken: cancelToken,
+        pauseController: pauseController,
       );
+
+      if (cancelToken.isCancelled) {
+        onStateChange?.call(createResult.transferId, 'cancelled');
+        return;
+      }
 
       onStateChange?.call(createResult.transferId, 'completed');
     } catch (e) {
@@ -221,6 +234,7 @@ class TransferService {
         }
       }
       _cancelTokens.remove(batchOfferId);
+      _pauseControllers.remove(batchOfferId)?.resume();
       _transferIdToOfferId.removeWhere((_, offerId) => offerId == batchOfferId);
     }
   }
@@ -237,6 +251,8 @@ class TransferService {
     required String expectedSha256,
   }) async {
     final partPath = await FileUtils.partFilePath(transferId, fileId);
+    final pauseController =
+        _pauseControllers.putIfAbsent(transferId, _PauseController.new);
 
     try {
       final chunkSize = FileUtils.chunkSize;
@@ -248,6 +264,7 @@ class TransferService {
 
       try {
         for (int i = 0; i < totalChunks; i++) {
+          await pauseController.waitWhilePaused();
           final start = i * chunkSize;
           final end = ((start + chunkSize - 1) < (totalBytes - 1))
               ? (start + chunkSize - 1)
@@ -300,7 +317,21 @@ class TransferService {
         await partFile.delete();
       }
       rethrow;
+    } finally {
+      if (identical(_pauseControllers[transferId], pauseController)) {
+        _pauseControllers.remove(transferId)?.resume();
+      }
     }
+  }
+
+  /// Stop scheduling new chunks for an active upload or download.
+  void pauseTransfer(String identifier) {
+    _pauseControllerFor(identifier)?.pause();
+  }
+
+  /// Release a paused upload or download so it continues from its next chunk.
+  void resumeTransfer(String identifier) {
+    _pauseControllerFor(identifier)?.resume();
   }
 
   /// Cancel an active transfer and clean up any temp files.
@@ -315,6 +346,7 @@ class TransferService {
     if (mappedOfferId != null) {
       _cancelTokens[mappedOfferId]?.cancel();
     }
+    _pauseControllerFor(identifier)?.resume();
 
     // Notify the server via HTTP.
     try {
@@ -351,6 +383,10 @@ class TransferService {
       token.cancel();
     }
     _cancelTokens.clear();
+    for (final controller in _pauseControllers.values) {
+      controller.resume();
+    }
+    _pauseControllers.clear();
     _transferIdToOfferId.clear();
   }
 
@@ -363,9 +399,12 @@ class TransferService {
     required String transferId,
     required List<_FileUploadTask> fileTasks,
     required CancelToken cancelToken,
+    required _PauseController pauseController,
   }) async {
     // Process files in groups of up to _maxConcurrentFiles.
     for (int i = 0; i < fileTasks.length; i += _maxConcurrentFiles) {
+      if (cancelToken.isCancelled) return;
+      await pauseController.waitWhilePaused();
       if (cancelToken.isCancelled) return;
 
       final group = fileTasks.skip(i).take(_maxConcurrentFiles).toList();
@@ -375,6 +414,7 @@ class TransferService {
                 transferId: transferId,
                 task: task,
                 cancelToken: cancelToken,
+                pauseController: pauseController,
               );
           return fileLimiter?.run(upload) ?? upload();
         }),
@@ -388,6 +428,7 @@ class TransferService {
     required String transferId,
     required _FileUploadTask task,
     required CancelToken cancelToken,
+    required _PauseController pauseController,
   }) async {
     final fi = task.fileInfo;
     final fr = task.fileResult;
@@ -405,6 +446,8 @@ class TransferService {
       int chunkIndex = 0;
 
       while (chunkIndex < totalChunks) {
+        if (cancelToken.isCancelled) break;
+        await pauseController.waitWhilePaused();
         if (cancelToken.isCancelled) break;
 
         // Determine how many chunks we can launch this round.
@@ -437,44 +480,55 @@ class TransferService {
           await raf.close();
 
           state.inFlight++;
-          final f = ChunkUploader.upload(
-            client: httpClient,
-            transferId: transferId,
-            fileId: fr.fileId,
-            chunkIndex: idx,
-            data: data,
-          ).then((_) {
-            debugPrint('[TransferService] chunk $idx uploaded OK '
-                '(${data.length} bytes)');
-            state.bytesUploaded += data.length;
-            state.inFlight--;
-            state._slotCompleter?.complete();
-            state._slotCompleter = null;
-
-            // Emit progress at reasonable intervals.
-            final now = DateTime.now();
-            if (state.lastProgressUpdate == null ||
-                now.difference(state.lastProgressUpdate!).inMilliseconds >=
-                    200) {
-              state.lastProgressUpdate = now;
-              onProgress?.call(
-                transferId,
-                fr.fileId,
-                TransferProgress(
-                  transferId: transferId,
-                  fileId: fr.fileId,
-                  bytesTransferred: state.bytesUploaded,
-                  totalBytes: fi.size,
-                  fileName: fi.name,
-                  speed: state.currentSpeed,
-                ),
+          final f = () async {
+            try {
+              await ChunkUploader.upload(
+                client: httpClient,
+                transferId: transferId,
+                fileId: fr.fileId,
+                chunkIndex: idx,
+                data: data,
+                beforeAttempt: () async {
+                  await pauseController.waitWhilePaused();
+                  if (cancelToken.isCancelled) {
+                    throw const _TransferCancelledException();
+                  }
+                },
               );
+              debugPrint('[TransferService] chunk $idx uploaded OK '
+                  '(${data.length} bytes)');
+              state.bytesUploaded += data.length;
+
+              // Emit progress at reasonable intervals.
+              final now = DateTime.now();
+              if (state.lastProgressUpdate == null ||
+                  now.difference(state.lastProgressUpdate!).inMilliseconds >=
+                      200) {
+                state.lastProgressUpdate = now;
+                onProgress?.call(
+                  transferId,
+                  fr.fileId,
+                  TransferProgress(
+                    transferId: transferId,
+                    fileId: fr.fileId,
+                    bytesTransferred: state.bytesUploaded,
+                    totalBytes: fi.size,
+                    fileName: fi.name,
+                    speed: state.currentSpeed,
+                    status:
+                        pauseController.isPaused ? 'paused' : 'transferring',
+                  ),
+                );
+              }
+            } catch (e) {
+              debugPrint('[TransferService] chunk $idx FAILED: $e');
+              rethrow;
+            } finally {
+              state.inFlight--;
+              state._slotCompleter?.complete();
+              state._slotCompleter = null;
             }
-          }).catchError((Object e) {
-            debugPrint('[TransferService] chunk $idx FAILED: $e');
-            state.inFlight--;
-            throw e;
-          });
+          }();
 
           futures.add(f);
           chunkIndex++;
@@ -485,6 +539,9 @@ class TransferService {
             'chunkIndex=$chunkIndex/$totalChunks');
       }
 
+      if (cancelToken.isCancelled) return;
+
+      await pauseController.waitWhilePaused();
       if (cancelToken.isCancelled) return;
 
       // All chunks uploaded — call complete.
@@ -586,6 +643,11 @@ class TransferService {
         return 'application/octet-stream';
     }
   }
+
+  _PauseController? _pauseControllerFor(String identifier) {
+    final offerId = _transferIdToOfferId[identifier] ?? identifier;
+    return _pauseControllers[offerId] ?? _pauseControllers[identifier];
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -659,4 +721,35 @@ class CancelToken {
   void cancel() {
     _cancelled = true;
   }
+}
+
+class _PauseController {
+  bool _paused = false;
+  Completer<void>? _resumeCompleter;
+
+  bool get isPaused => _paused;
+
+  void pause() {
+    if (_paused) return;
+    _paused = true;
+    _resumeCompleter = Completer<void>();
+  }
+
+  void resume() {
+    if (!_paused) return;
+    _paused = false;
+    final completer = _resumeCompleter;
+    _resumeCompleter = null;
+    if (completer != null && !completer.isCompleted) completer.complete();
+  }
+
+  Future<void> waitWhilePaused() async {
+    while (_paused) {
+      await _resumeCompleter!.future;
+    }
+  }
+}
+
+class _TransferCancelledException implements Exception {
+  const _TransferCancelledException();
 }
