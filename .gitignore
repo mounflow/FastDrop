@@ -42,3 +42,25 @@ ENV_LOCAL.md
 Thumbs.db
 .DS_Store
 *.tmp
+
+# Local dev/debug scripts and artifacts (machine-specific, never commit)
+/_*
+/check_*.ps1
+/clean_restart.ps1
+/full_deploy.ps1
+/git_push.ps1
+/install_apk.ps1
+/start_server.ps1
+/analyze-temp.cmd
+/analyze.bat
+/build_apk.bat
+/deploy-fastdrop.cmd
+/deploy-temp.cmd
+/fix_and_build.bat
+/test.bat
+/mdns_on.json
+/test_discover.json
+/NUL
+
+# Wails build output
+fastdrop-desktop/build/
