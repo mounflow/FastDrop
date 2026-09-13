@@ -89,7 +89,7 @@ func Default() *Config {
 		Security: SecurityConfig{
 			PairTokenTTLSeconds:        DefaultPairTokenTTL,
 			SessionTTLSeconds:          DefaultSessionTTL,
-			RequirePairConfirmation:    true,
+			RequirePairConfirmation:    false,
 			RequireReceiveConfirmation: false,
 		},
 		Discovery: DiscoveryConfig{

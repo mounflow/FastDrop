@@ -855,7 +855,7 @@ onUnmounted(() => {
           <section class="settings-card">
             <div class="settings-card-heading"><div class="setting-icon"><AppIcon name="wifi" :size="20" /></div><div><h2>连接与发现</h2><p>FastDrop 只在当前局域网内广播设备信息。</p></div></div>
             <label class="toggle-row"><div><strong>mDNS 自动发现</strong><span>允许附近设备免扫码发现本机。</span></div><input v-model="settingsMdnsEnabled" type="checkbox" role="switch" /></label>
-            <label class="toggle-row"><div><strong>配对时需要确认</strong><span>默认开启；新的配对请求需在本机确认后才生效。</span></div><input v-model="settingsRequirePairConfirmation" type="checkbox" role="switch" /></label>
+            <label class="toggle-row"><div><strong>配对时需要确认</strong><span>默认关闭；开启后需在本机同意新的配对请求。</span></div><input v-model="settingsRequirePairConfirmation" type="checkbox" role="switch" /></label>
             <div class="setting-detail"><span>当前网络</span><strong>{{ settingsNetworkName || '局域网' }}</strong></div>
             <div class="setting-detail"><span>本机地址</span><code>{{ settingsLocalAddresses.join(' / ') || '未检测到局域网地址' }}</code></div>
             <div class="setting-detail"><span>监听端口</span><code>9527</code></div>
