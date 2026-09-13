@@ -207,7 +207,7 @@ func TestRouterTransferPauseResume(t *testing.T) {
 
 	// Pause.
 	payload, _ := json.Marshal(map[string]string{"transferId": res.TransferID})
-	r.OnMessage(c, &Envelope{Type: MsgTransferPaused, Payload: payload})
+	r.OnMessage(c, &Envelope{Type: MsgTransferPause, Payload: payload})
 	tr, _ := db.GetTransfer(ctx, res.TransferID)
 	if tr.Status != "paused" {
 		t.Errorf("after pause: status = %s, want paused", tr.Status)
@@ -218,6 +218,37 @@ func TestRouterTransferPauseResume(t *testing.T) {
 	tr, _ = db.GetTransfer(ctx, res.TransferID)
 	if tr.Status != "transferring" {
 		t.Errorf("after resume: status = %s, want transferring", tr.Status)
+	}
+}
+
+func TestRouterRejectsCrossSessionPause(t *testing.T) {
+	r, _, db := newTestRouter(t)
+	ctx := context.Background()
+
+	tm := transfer.NewManager(db, 4*1024*1024, nil)
+	res, _ := tm.Create(ctx, "s1", "d1", transfer.DirClientToServer, "o", []transfer.FileSpec{
+		{ClientFileID: "c1", Name: "f.txt", Size: 10},
+	})
+	_ = db.UpdateTransferStatus(ctx, res.TransferID, "transferring", 0, "", "")
+
+	c := fakeClient("s2", "d2")
+	payload, _ := json.Marshal(map[string]string{"transferId": res.TransferID})
+	r.OnMessage(c, &Envelope{Type: MsgTransferPause, Payload: payload})
+
+	select {
+	case msg := <-c.send:
+		var reply Envelope
+		_ = json.Unmarshal(msg, &reply)
+		if reply.Type != MsgError {
+			t.Errorf("reply type = %s, want error", reply.Type)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("no error reply for cross-session pause")
+	}
+
+	tr, _ := db.GetTransfer(ctx, res.TransferID)
+	if tr.Status != "transferring" {
+		t.Errorf("status = %s, want transferring", tr.Status)
 	}
 }
 

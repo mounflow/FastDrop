@@ -11,6 +11,7 @@ type ServiceInfo struct {
 	Host            string
 	Port            int
 	ProtocolVersion int
+	AppVersion      string
 	Platform        string
 }
 

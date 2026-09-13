@@ -22,27 +22,28 @@ const ReconnectGrace = 60 * time.Second
 type MessageType string
 
 const (
-	MsgAuth            MessageType = "auth"
-	MsgAuthResult      MessageType = "auth.result"
-	MsgHeartbeatPing   MessageType = "heartbeat.ping"
-	MsgHeartbeatPong   MessageType = "heartbeat.pong"
-	MsgDeviceInfo      MessageType = "device.info"
-	MsgDeviceDisconnect MessageType = "device.disconnect"
-	MsgFileOffer       MessageType = "file.offer"
-	MsgFileOfferAccept MessageType = "file.offer.accept"
-	MsgFileOfferReject MessageType = "file.offer.reject"
-	MsgTransferCreated MessageType = "transfer.created"
-	MsgTransferStarted MessageType = "transfer.started"
-	MsgTransferProgress MessageType = "transfer.progress"
-	MsgTransferPaused  MessageType = "transfer.paused"
-	MsgTransferResume  MessageType = "transfer.resume"
-	MsgTransferCancel  MessageType = "transfer.cancel"
+	MsgAuth              MessageType = "auth"
+	MsgAuthResult        MessageType = "auth.result"
+	MsgHeartbeatPing     MessageType = "heartbeat.ping"
+	MsgHeartbeatPong     MessageType = "heartbeat.pong"
+	MsgDeviceInfo        MessageType = "device.info"
+	MsgDeviceDisconnect  MessageType = "device.disconnect"
+	MsgFileOffer         MessageType = "file.offer"
+	MsgFileOfferAccept   MessageType = "file.offer.accept"
+	MsgFileOfferReject   MessageType = "file.offer.reject"
+	MsgTransferCreated   MessageType = "transfer.created"
+	MsgTransferStarted   MessageType = "transfer.started"
+	MsgTransferProgress  MessageType = "transfer.progress"
+	MsgTransferPause     MessageType = "transfer.pause"
+	MsgTransferPaused    MessageType = "transfer.paused"
+	MsgTransferResume    MessageType = "transfer.resume"
+	MsgTransferCancel    MessageType = "transfer.cancel"
 	MsgTransferCancelled MessageType = "transfer.cancelled"
-	MsgTransferFailed  MessageType = "transfer.failed"
+	MsgTransferFailed    MessageType = "transfer.failed"
 	MsgTransferVerifying MessageType = "transfer.verifying"
 	MsgTransferCompleted MessageType = "transfer.completed"
-	MsgSessionRevoked  MessageType = "session.revoked"
-	MsgError           MessageType = "error"
+	MsgSessionRevoked    MessageType = "session.revoked"
+	MsgError             MessageType = "error"
 )
 
 // Envelope is the universal message wrapper (§8.1).
@@ -71,12 +72,12 @@ func NewEnvelope(t MessageType, payload any) (*Envelope, error) {
 
 // AuthPayload is the first-message authentication payload (§7.3).
 type AuthPayload struct {
-	SessionID    string `json:"sessionId"`
+	SessionID   string `json:"sessionId"`
 	AccessToken string `json:"accessToken"`
 }
 
 // AuthResultPayload is the server's response to an auth message.
 type AuthResultPayload struct {
-	OK      bool   `json:"ok"`
-	Error   string `json:"error,omitempty"`
+	OK    bool   `json:"ok"`
+	Error string `json:"error,omitempty"`
 }

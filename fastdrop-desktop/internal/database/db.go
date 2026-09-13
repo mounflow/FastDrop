@@ -249,19 +249,28 @@ func (d *DB) DeleteExpiredSessions(ctx context.Context, cutoff int64) (int64, er
 // --- transfers ---
 
 type TransferRow struct {
-	ID               string  `json:"id"`
-	SessionID        string  `json:"sessionId"`
-	PeerDeviceID     string  `json:"peerDeviceId"`
-	Direction        string  `json:"direction"`
-	Status           string  `json:"status"`
-	TotalFiles       int     `json:"totalFiles"`
-	TotalBytes       int64   `json:"totalBytes"`
-	TransferredBytes int64   `json:"transferredBytes"`
-	CreatedAt        int64   `json:"createdAt"`
-	StartedAt        *int64  `json:"startedAt"`
-	CompletedAt      *int64  `json:"completedAt"`
-	ErrorCode        string  `json:"errorCode,omitempty"`
-	ErrorMessage     string  `json:"errorMessage,omitempty"`
+	ID               string `json:"id"`
+	SessionID        string `json:"sessionId"`
+	PeerDeviceID     string `json:"peerDeviceId"`
+	Direction        string `json:"direction"`
+	Status           string `json:"status"`
+	TotalFiles       int    `json:"totalFiles"`
+	TotalBytes       int64  `json:"totalBytes"`
+	TransferredBytes int64  `json:"transferredBytes"`
+	CreatedAt        int64  `json:"createdAt"`
+	StartedAt        *int64 `json:"startedAt"`
+	CompletedAt      *int64 `json:"completedAt"`
+	ErrorCode        string `json:"errorCode,omitempty"`
+	ErrorMessage     string `json:"errorMessage,omitempty"`
+}
+
+// TransferHistoryRow adds stable peer metadata to a persisted transfer. It is
+// used only by the loopback-only desktop history endpoint, so history remains
+// useful after sessions are invalidated on restart.
+type TransferHistoryRow struct {
+	TransferRow
+	PeerName     string `json:"peerName"`
+	PeerPlatform string `json:"peerPlatform"`
 }
 
 func (d *DB) InsertTransfer(ctx context.Context, t TransferRow) error {
@@ -335,6 +344,45 @@ func (d *DB) ListTransfersForSession(ctx context.Context, sessionID string) ([]T
 		t.ErrorCode = errCode.String
 		t.ErrorMessage = errMsg.String
 		out = append(out, t)
+	}
+	return out, rows.Err()
+}
+
+// ListTransferHistory returns every persisted transfer, across expired and
+// revoked sessions, with the peer name captured from the devices table.
+func (d *DB) ListTransferHistory(ctx context.Context) ([]TransferHistoryRow, error) {
+	rows, err := d.QueryContext(ctx, `
+SELECT t.id, t.session_id, t.peer_device_id, t.direction, t.status,
+       t.total_files, t.total_bytes, t.transferred_bytes, t.created_at,
+       t.started_at, t.completed_at, t.error_code, t.error_message,
+       COALESCE(d.name, ''), COALESCE(d.platform, 'unknown')
+FROM transfers t
+LEFT JOIN devices d ON d.id = t.peer_device_id
+ORDER BY t.created_at DESC`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var out []TransferHistoryRow
+	for rows.Next() {
+		var h TransferHistoryRow
+		var sessionID, errCode, errMsg sql.NullString
+		var startedAt, completedAt sql.NullInt64
+		if err := rows.Scan(
+			&h.ID, &sessionID, &h.PeerDeviceID, &h.Direction, &h.Status,
+			&h.TotalFiles, &h.TotalBytes, &h.TransferredBytes, &h.CreatedAt,
+			&startedAt, &completedAt, &errCode, &errMsg,
+			&h.PeerName, &h.PeerPlatform,
+		); err != nil {
+			return nil, err
+		}
+		h.SessionID = sessionID.String
+		h.StartedAt = nullInt64Ptr(startedAt)
+		h.CompletedAt = nullInt64Ptr(completedAt)
+		h.ErrorCode = errCode.String
+		h.ErrorMessage = errMsg.String
+		out = append(out, h)
 	}
 	return out, rows.Err()
 }

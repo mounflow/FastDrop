@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"fastdrop-desktop/internal/api"
+	"fastdrop-desktop/internal/config"
 	"fastdrop-desktop/internal/database"
 	"fastdrop-desktop/internal/discovery"
 	"fastdrop-desktop/internal/pairing"
@@ -200,7 +201,8 @@ func main() {
 	host, port := resolveBindAddress(cfg)
 	if err := discoveryCtl.Start(rootCtx, discovery.ServiceInfo{
 		DeviceID: cfg.Server.DeviceID, DeviceName: cfg.Server.DeviceName,
-		Host: host, Port: port, ProtocolVersion: 1, Platform: "windows",
+		Host: host, Port: port, ProtocolVersion: 1,
+		AppVersion: config.AppVersion, Platform: "windows",
 	}); err != nil {
 		log.Printf("[discovery] start failed: %v (continuing without mDNS)", err)
 	}

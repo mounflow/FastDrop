@@ -84,6 +84,7 @@ func New(s *Server) http.Handler {
 	// --- settings (local PC only, no auth) ---
 	mux.HandleFunc("GET /api/v1/settings", withLocalDesktop(s.handleGetSettings))
 	mux.HandleFunc("PUT /api/v1/settings", withLocalDesktop(s.withSizeLimit(64*1024, s.handleUpdateSettings)))
+	mux.HandleFunc("GET /api/v1/local/transfers", withLocalDesktop(s.handleListLocalTransferHistory))
 
 	// --- current pair token (for the QR code) ---
 	mux.HandleFunc("GET /api/v1/pair/qr", s.handleCurrentQRPayload)
@@ -153,7 +154,7 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 		"deviceId":   s.Cfg.Server.DeviceID,
 		"deviceName": s.Cfg.Server.DeviceName,
 		"platform":   "windows",
-		"version":    "0.1.0",
+		"version":    config.AppVersion,
 		"protocol":   1,
 	})
 }
@@ -164,7 +165,7 @@ func (s *Server) handleServerInfo(w http.ResponseWriter, r *http.Request) {
 		"name":        s.Cfg.Server.DeviceName,
 		"platform":    "windows",
 		"protocol":    1,
-		"version":     "0.1.0",
+		"version":     config.AppVersion,
 		"port":        s.Cfg.Server.Port,
 		"mdnsEnabled": s.Cfg.Discovery.MdnsEnabled,
 	})

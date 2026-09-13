@@ -1,8 +1,11 @@
 import { computed, reactive, ref } from 'vue';
-import { announceTransfer, completeFile, createTransfer, downloadFileBlob, listTransfers, triggerBrowserDownload, uploadChunk, } from '../api';
+import { announceTransfer, completeFile, createTransfer, downloadFileBlob, HttpStatusError, listLocalTransferHistory, listTransfers, triggerBrowserDownload, uploadChunk, } from '../api';
 import { useWebSocket } from './useWebSocket';
 const PEERS_KEY = 'fastdrop_peer_sessions_v1';
+const HISTORY_KEY = 'fastdrop_transfer_history_v1';
+const MAX_HISTORY_ROWS = 500;
 const CHUNK_SIZE = 4 * 1024 * 1024;
+const CHUNK_RETRY_DELAYS = [500, 1000, 2000, 4000, 8000];
 class AsyncLimiter {
     maximum;
     active = 0;
@@ -36,6 +39,7 @@ export function usePeerPool(handlers = {}) {
     const httpLimiter = new AsyncLimiter(6);
     const readiness = new Map();
     const resolvedReadiness = new Map();
+    const transferControls = new Map();
     const connectedPeers = computed(() => peers.value.filter((peer) => peer.status === 'connected'));
     function persist() {
         const sessions = peers.value.map(({ status: _status, ...session }) => session);
@@ -105,6 +109,12 @@ export function usePeerPool(handlers = {}) {
             if (key.startsWith(`${peerId}::`))
                 resolvedReadiness.delete(key);
         }
+        for (const [key, control] of transferControls) {
+            if (key.startsWith(`${peerId}::`)) {
+                resumeControl(control);
+                transferControls.delete(key);
+            }
+        }
         if (shouldPersist)
             persist();
         handlers.onPeerChanged?.();
@@ -132,9 +142,24 @@ export function usePeerPool(handlers = {}) {
         }
         readiness.clear();
         resolvedReadiness.clear();
+        for (const control of transferControls.values())
+            resumeControl(control);
+        transferControls.clear();
     }
     function send(peerId, message) {
         runtimes.get(peerId)?.ws.send(message);
+    }
+    function pauseTransfer(peerId, transferId) {
+        const control = transferControls.get(transferKey(peerId, transferId));
+        if (control)
+            control.paused = true;
+        send(peerId, transferEnvelope('transfer.pause', transferId));
+    }
+    function resumeTransfer(peerId, transferId) {
+        const control = transferControls.get(transferKey(peerId, transferId));
+        if (control)
+            resumeControl(control);
+        send(peerId, transferEnvelope('transfer.resume', transferId));
     }
     function handleMessage(peerId, raw) {
         const message = raw;
@@ -215,31 +240,44 @@ export function usePeerPool(handlers = {}) {
                 }],
         }, undefined, session));
         const remoteFile = result.files[0];
-        emitProgress(session, result, remoteFile.fileId, file, 0, directUpload && isConfirmationPlatform(session.platform)
-            ? 'waiting_accept'
-            : 'preparing');
-        if (directUpload && isConfirmationPlatform(session.platform)) {
-            await waitForAcceptance(session.id, result.transferId);
+        const control = { paused: false };
+        const controlKey = transferKey(session.id, result.transferId);
+        transferControls.set(controlKey, control);
+        try {
+            emitProgress(session, result, remoteFile.fileId, file, 0, directUpload && isConfirmationPlatform(session.platform)
+                ? 'waiting_accept'
+                : 'preparing');
+            if (directUpload && isConfirmationPlatform(session.platform)) {
+                await waitForAcceptance(session.id, result.transferId);
+            }
+            await waitWhilePaused(control);
+            await uploadFileChunks(session, result, remoteFile.fileId, file, control);
+            await waitWhilePaused(control);
+            if (directUpload) {
+                await httpLimiter.run(() => completeFile(`/api/v1/transfers/${result.transferId}/files/${remoteFile.fileId}/complete`, file.size, sha256, undefined, session));
+                emitProgress(session, result, remoteFile.fileId, file, file.size, 'completed');
+                return;
+            }
+            await httpLimiter.run(() => announceTransfer(result.transferId, session));
+            emitProgress(session, result, remoteFile.fileId, file, file.size, 'waiting_accept');
         }
-        await uploadFileChunks(session, result, remoteFile.fileId, file);
-        if (directUpload) {
-            await httpLimiter.run(() => completeFile(`/api/v1/transfers/${result.transferId}/files/${remoteFile.fileId}/complete`, file.size, sha256, undefined, session));
-            emitProgress(session, result, remoteFile.fileId, file, file.size, 'completed');
-            return;
+        finally {
+            resumeControl(control);
+            transferControls.delete(controlKey);
         }
-        await httpLimiter.run(() => announceTransfer(result.transferId, session));
-        emitProgress(session, result, remoteFile.fileId, file, file.size, 'waiting_accept');
     }
-    async function uploadFileChunks(session, result, fileId, file) {
+    async function uploadFileChunks(session, result, fileId, file, control) {
         const totalChunks = Math.ceil(file.size / CHUNK_SIZE);
         let transferred = 0;
         const jobs = Array.from({ length: totalChunks }, (_, index) => async () => {
             const start = index * CHUNK_SIZE;
             const end = Math.min(start + CHUNK_SIZE, file.size);
             const data = await file.slice(start, end).arrayBuffer();
-            await httpLimiter.run(() => uploadChunk(`/api/v1/transfers/${result.transferId}/files/${fileId}/chunks/${index}`, data, undefined, session));
+            await uploadChunkWithRetry(async () => {
+                await httpLimiter.run(() => uploadChunk(`/api/v1/transfers/${result.transferId}/files/${fileId}/chunks/${index}`, data, undefined, session));
+            }, control);
             transferred += data.byteLength;
-            emitProgress(session, result, fileId, file, transferred, 'transferring');
+            emitProgress(session, result, fileId, file, transferred, control.paused ? 'paused' : 'transferring');
         });
         await runJobs(jobs, 3);
     }
@@ -282,7 +320,7 @@ export function usePeerPool(handlers = {}) {
         });
     }
     async function loadHistory() {
-        const rows = await Promise.all(peers.value.map(async (peer) => {
+        const peerRows = await Promise.all(peers.value.map(async (peer) => {
             try {
                 const history = await listTransfers(peer);
                 return history.map((row) => ({
@@ -296,7 +334,28 @@ export function usePeerPool(handlers = {}) {
                 return [];
             }
         }));
-        return rows.flat().sort((a, b) => b.createdAt - a.createdAt);
+        const localRows = await listLocalTransferHistory()
+            .then((history) => history.map((row) => ({
+            ...row,
+            peerId: row.peerDeviceId,
+            peerName: row.peerName || 'Unknown Device',
+            peerRole: 'local-session',
+        })))
+            .catch(() => []);
+        // Keep a token-free local projection so remote-server transfers remain
+        // visible when that phone is offline or has restarted its in-memory server.
+        const merged = new Map();
+        for (const row of readCachedHistory())
+            merged.set(row.id, row);
+        for (const row of localRows)
+            merged.set(row.id, row);
+        for (const row of peerRows.flat())
+            merged.set(row.id, row);
+        const rows = [...merged.values()]
+            .sort((a, b) => b.createdAt - a.createdAt)
+            .slice(0, MAX_HISTORY_ROWS);
+        persistHistory(rows);
+        return rows;
     }
     return {
         peers,
@@ -308,10 +367,94 @@ export function usePeerPool(handlers = {}) {
         close,
         sendFiles,
         send,
+        pauseTransfer,
+        resumeTransfer,
         acceptOffer,
         rejectOffer,
         loadHistory,
     };
+}
+function readCachedHistory() {
+    try {
+        const raw = localStorage.getItem(HISTORY_KEY);
+        if (!raw)
+            return [];
+        const rows = JSON.parse(raw);
+        return Array.isArray(rows) ? rows : [];
+    }
+    catch {
+        try {
+            localStorage.removeItem(HISTORY_KEY);
+        }
+        catch {
+            // Storage can be unavailable in hardened WebView profiles.
+        }
+        return [];
+    }
+}
+function persistHistory(rows) {
+    try {
+        localStorage.setItem(HISTORY_KEY, JSON.stringify(rows));
+    }
+    catch {
+        // History caching is best effort; the durable local SQLite rows still load.
+    }
+}
+function transferKey(peerId, transferId) {
+    return `${peerId}::${transferId}`;
+}
+function transferEnvelope(type, transferId) {
+    return {
+        version: 1,
+        type,
+        messageId: crypto.randomUUID(),
+        timestamp: Date.now(),
+        payload: { transferId },
+    };
+}
+function resumeControl(control) {
+    control.paused = false;
+    control.resume?.();
+    control.resume = undefined;
+    control.resumePromise = undefined;
+}
+async function waitWhilePaused(control) {
+    while (control.paused) {
+        if (!control.resumePromise) {
+            control.resumePromise = new Promise((resolve) => {
+                control.resume = resolve;
+            });
+        }
+        await control.resumePromise;
+    }
+}
+async function uploadChunkWithRetry(action, control) {
+    for (let attempt = 0;; attempt++) {
+        await waitWhilePaused(control);
+        try {
+            await action();
+            return;
+        }
+        catch (error) {
+            if (attempt >= CHUNK_RETRY_DELAYS.length || !isRetryableChunkError(error)) {
+                throw error;
+            }
+            await delay(CHUNK_RETRY_DELAYS[attempt]);
+        }
+    }
+}
+function isRetryableChunkError(error) {
+    if (error instanceof DOMException && error.name === 'AbortError')
+        return false;
+    if (error instanceof HttpStatusError) {
+        return error.status === 408 || error.status === 429 || error.status >= 500;
+    }
+    // Chunk PUT is idempotent by transfer/file/index, so transport failures are
+    // safe to replay after the required exponential backoff.
+    return true;
+}
+function delay(milliseconds) {
+    return new Promise((resolve) => setTimeout(resolve, milliseconds));
 }
 function isConfirmationPlatform(platform) {
     return ['android', 'ios', 'macos'].includes(platform.toLowerCase());

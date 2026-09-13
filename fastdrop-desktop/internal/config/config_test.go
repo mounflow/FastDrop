@@ -19,6 +19,9 @@ func TestDefaultValues(t *testing.T) {
 	if cfg.Security.RequirePairConfirmation {
 		t.Fatal("pair confirmation should be disabled by default")
 	}
+	if !cfg.Discovery.MdnsEnabled {
+		t.Fatal("mDNS discovery should be enabled by default")
+	}
 	if cfg.Server.Port != DefaultPort {
 		t.Errorf("port = %d, want %d", cfg.Server.Port, DefaultPort)
 	}

@@ -174,3 +174,35 @@ func TestTransferInsertAndList(t *testing.T) {
 		t.Errorf("got %d, want 2", len(got))
 	}
 }
+
+func TestListTransferHistorySpansSessionsAndIncludesPeer(t *testing.T) {
+	db := newTestDB(t)
+	ctx := context.Background()
+	if err := db.UpsertDevice(Device{
+		ID: "d1", Name: "Pixel", Platform: "android",
+		FirstSeenAt: 1, LastSeenAt: 2,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	for i, sessionID := range []string{"old-session", "new-session"} {
+		if err := db.InsertTransfer(ctx, TransferRow{
+			ID: "history-" + sessionID, SessionID: sessionID, PeerDeviceID: "d1",
+			Direction: "client_to_server", Status: "completed",
+			TotalFiles: 1, TotalBytes: 100, TransferredBytes: 100,
+			CreatedAt: int64(i + 1),
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	got, err := db.ListTransferHistory(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("got %d rows, want 2", len(got))
+	}
+	if got[0].SessionID != "new-session" || got[0].PeerName != "Pixel" || got[0].PeerPlatform != "android" {
+		t.Fatalf("unexpected newest row: %+v", got[0])
+	}
+}

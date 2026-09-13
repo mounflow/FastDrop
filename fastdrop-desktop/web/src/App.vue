@@ -242,7 +242,7 @@ async function connectRemotePeer() {
       deviceId: localClientId,
       deviceName: serverName.value || location.hostname,
       platform: 'windows',
-      appVersion: '0.1.0',
+      appVersion: '1.0.0',
     })
     const deadline = Date.now() + 30_000
     while (Date.now() < deadline) {

@@ -32,7 +32,7 @@ func (r *Router) OnMessage(c *Client, env *Envelope) {
 		r.handleFileOfferReject(c, env)
 	case MsgTransferCancel:
 		r.handleTransferCancel(c, env)
-	case MsgTransferPaused:
+	case MsgTransferPause:
 		r.handleTransferPause(c, env)
 	case MsgTransferResume:
 		r.handleTransferResume(c, env)
@@ -260,12 +260,21 @@ func (r *Router) handleTransferPause(c *Client, env *Envelope) {
 	if p.TransferID == "" {
 		return
 	}
-	// Preserve current transferred_bytes — pausing must not lose progress.
-	var transferred int64
-	if t, err := r.DB.GetTransfer(context.Background(), p.TransferID); err == nil {
-		transferred = t.TransferredBytes
+	// Verify ownership and current state before changing another transfer's
+	// control flow.
+	t, err := r.DB.GetTransfer(context.Background(), p.TransferID)
+	if err != nil || t.SessionID != c.sessionID {
+		r.sendError(c, "TRANSFER_NOT_FOUND", "no such transfer for this session")
+		return
 	}
-	_ = r.DB.UpdateTransferStatus(context.Background(), p.TransferID, string(transfer.StatusPaused), transferred, "", "")
+	if t.Status != string(transfer.StatusTransferring) {
+		r.sendError(c, "INVALID_REQUEST", "transfer is not transferring")
+		return
+	}
+	if err := r.DB.UpdateTransferStatus(context.Background(), p.TransferID, string(transfer.StatusPaused), t.TransferredBytes, "", ""); err != nil {
+		r.sendError(c, "INTERNAL_ERROR", err.Error())
+		return
+	}
 	r.pushTransferEvent(c.sessionID, MsgTransferPaused, map[string]any{
 		"transferId": p.TransferID,
 	})

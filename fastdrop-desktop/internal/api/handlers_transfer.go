@@ -232,6 +232,18 @@ func (s *Server) handleListTransfers(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"transfers": transfers})
 }
 
+// handleListLocalTransferHistory is reserved for the embedded Windows UI.
+// Unlike the authenticated session endpoint, it intentionally spans revoked
+// sessions so a service restart does not erase the user's visible history.
+func (s *Server) handleListLocalTransferHistory(w http.ResponseWriter, r *http.Request) {
+	transfers, err := s.DB.ListTransferHistory(r.Context())
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL_ERROR", err.Error(), requestID(r))
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"transfers": transfers})
+}
+
 func (s *Server) handleListActiveTransfers(w http.ResponseWriter, r *http.Request) {
 	sessID, _ := r.Context().Value(ctxSessionID).(string)
 	transfers, err := s.DB.ListTransfersForSession(r.Context(), sessID)

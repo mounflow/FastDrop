@@ -5,6 +5,7 @@ import (
 	"strings"
 	"time"
 
+	"fastdrop-desktop/internal/config"
 	"fastdrop-desktop/internal/database"
 	"fastdrop-desktop/internal/netutil"
 	"fastdrop-desktop/internal/pairing"
@@ -41,7 +42,7 @@ func serverDeviceIdentity(s *Server) pairing.ClientDevice {
 		DeviceID:   s.Cfg.Server.DeviceID,
 		DeviceName: s.Cfg.Server.DeviceName,
 		Platform:   "windows",
-		AppVersion: "0.1.0",
+		AppVersion: config.AppVersion,
 	}
 }
 

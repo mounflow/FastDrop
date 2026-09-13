@@ -14,6 +14,7 @@ import (
 
 // Protocol-scoped constants (do not deviate, see spec §9.1, §5.2, §7.1, §14, §15).
 const (
+	AppVersion                 = "1.0.0"
 	DefaultPort                = 9527
 	DefaultChunkSize           = 4 * 1024 * 1024 // 4 MB
 	DefaultMaxConcurrentFiles  = 2
@@ -92,7 +93,7 @@ func Default() *Config {
 			RequireReceiveConfirmation: false,
 		},
 		Discovery: DiscoveryConfig{
-			MdnsEnabled: false,
+			MdnsEnabled: true,
 		},
 	}
 	cfg.Server.DatabasePath = filepath.Join(AppDataDir(), "fastdrop.db")

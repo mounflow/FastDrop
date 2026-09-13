@@ -315,7 +315,7 @@ function handleWSMessage(peerId: string, raw: unknown) {
       if (item) {
         item.transferredBytes = Number(payload.transferredBytes || item.transferredBytes)
         item.speedBps = Number(payload.speedBps || 0)
-        item.status = 'transferring'
+        if (item.status !== 'paused') item.status = 'transferring'
       }
       break
     }
@@ -347,12 +347,12 @@ function updateTransferStatus(peerId: string, transferId: string, status: string
 
 function pauseTransfer(item: ActiveTransfer) {
   item.status = 'paused'
-  peerPool.send(item.peerId, envelope('transfer.pause', item.transferId))
+  peerPool.pauseTransfer(item.peerId, item.transferId)
 }
 
 function resumeTransfer(item: ActiveTransfer) {
   item.status = 'transferring'
-  peerPool.send(item.peerId, envelope('transfer.resume', item.transferId))
+  peerPool.resumeTransfer(item.peerId, item.transferId)
 }
 
 function cancelTransfer(item: ActiveTransfer) {

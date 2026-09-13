@@ -103,6 +103,10 @@ export async function listTransfers(target) {
     const data = await asJson(await fetch(targetUrl('/api/v1/transfers', target), { headers: authHeaders(target) }));
     return data.transfers || [];
 }
+export async function listLocalTransferHistory() {
+    const data = await asJson(await fetch(localUrl('/api/v1/local/transfers')));
+    return data.transfers || [];
+}
 /// Revoke the current session (DELETE /api/v1/session). Server then
 /// broadcasts session.revoked, which the Vue side already handles by
 /// clearing state and falling back to the QR pairing page. Used by
@@ -133,7 +137,15 @@ export async function uploadChunk(url, data, signal, target) {
         signal,
     });
     if (!resp.ok)
-        throw new Error(`chunk upload failed: ${resp.status}`);
+        throw new HttpStatusError(`chunk upload failed: ${resp.status}`, resp.status);
+}
+export class HttpStatusError extends Error {
+    status;
+    constructor(message, status) {
+        super(message);
+        this.status = status;
+        this.name = 'HttpStatusError';
+    }
 }
 export async function completeFile(url, size, sha256, signal, target) {
     return asJson(await fetch(url.startsWith('http') ? url : targetUrl(url, target), {

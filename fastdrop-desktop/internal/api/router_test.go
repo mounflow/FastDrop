@@ -168,6 +168,53 @@ func TestSettingsAreDesktopOnly(t *testing.T) {
 	}
 }
 
+func TestLocalTransferHistoryIsDesktopOnlyAndSpansSessions(t *testing.T) {
+	srv, _ := newTestServer(t)
+	ctx := context.Background()
+	if err := srv.DB.UpsertDevice(database.Device{
+		ID: "phone-history", Name: "History Phone", Platform: "android",
+		FirstSeenAt: 1, LastSeenAt: 2,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	for i, sessionID := range []string{"expired-session", "current-session"} {
+		if err := srv.DB.InsertTransfer(ctx, database.TransferRow{
+			ID: "transfer-" + sessionID, SessionID: sessionID, PeerDeviceID: "phone-history",
+			Direction: "client_to_server", Status: "completed",
+			TotalFiles: 1, TotalBytes: 5, TransferredBytes: 5,
+			CreatedAt: int64(i + 1),
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	h := New(srv)
+
+	localReq := httptest.NewRequest(http.MethodGet, "/api/v1/local/transfers", nil)
+	localReq.RemoteAddr = "127.0.0.1:49152"
+	localRes := httptest.NewRecorder()
+	h.ServeHTTP(localRes, localReq)
+	if localRes.Code != http.StatusOK {
+		t.Fatalf("local history status=%d body=%s", localRes.Code, localRes.Body.String())
+	}
+	var body struct {
+		Transfers []database.TransferHistoryRow `json:"transfers"`
+	}
+	if err := json.Unmarshal(localRes.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	if len(body.Transfers) != 2 || body.Transfers[0].PeerName != "History Phone" {
+		t.Fatalf("unexpected history: %+v", body.Transfers)
+	}
+
+	lanReq := httptest.NewRequest(http.MethodGet, "/api/v1/local/transfers", nil)
+	lanReq.RemoteAddr = "192.168.137.50:49152"
+	lanRes := httptest.NewRecorder()
+	h.ServeHTTP(lanRes, lanReq)
+	if lanRes.Code != http.StatusForbidden {
+		t.Fatalf("LAN history status=%d body=%s", lanRes.Code, lanRes.Body.String())
+	}
+}
+
 func TestServerToClientStagingCanBeOffered(t *testing.T) {
 	srv, _ := newTestServer(t)
 	ts := httptest.NewServer(New(srv))

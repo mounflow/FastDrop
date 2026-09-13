@@ -44,10 +44,14 @@ func (p *MdnsPublisher) Start(_ context.Context, info ServiceInfo) error {
 	// instead and let the library pick the actual interface IPs.
 	fqdn := strings.ReplaceAll(host, " ", "-") + ".local."
 	// TXT keys follow §30.2.
+	appVersion := info.AppVersion
+	if appVersion == "" {
+		appVersion = "1.0.0"
+	}
 	txt := []string{
 		"id=" + info.DeviceID,
 		"name=" + info.DeviceName,
-		"version=0.2.0",
+		"version=" + appVersion,
 		fmt.Sprintf("protocol=%d", info.ProtocolVersion),
 		"platform=" + info.Platform,
 		"pairing=required",

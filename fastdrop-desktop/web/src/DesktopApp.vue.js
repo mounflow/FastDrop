@@ -248,7 +248,8 @@ function handleWSMessage(peerId, raw) {
             if (item) {
                 item.transferredBytes = Number(payload.transferredBytes || item.transferredBytes);
                 item.speedBps = Number(payload.speedBps || 0);
-                item.status = 'transferring';
+                if (item.status !== 'paused')
+                    item.status = 'transferring';
             }
             break;
         }
@@ -279,11 +280,11 @@ function updateTransferStatus(peerId, transferId, status, error) {
 }
 function pauseTransfer(item) {
     item.status = 'paused';
-    peerPool.send(item.peerId, envelope('transfer.pause', item.transferId));
+    peerPool.pauseTransfer(item.peerId, item.transferId);
 }
 function resumeTransfer(item) {
     item.status = 'transferring';
-    peerPool.send(item.peerId, envelope('transfer.resume', item.transferId));
+    peerPool.resumeTransfer(item.peerId, item.transferId);
 }
 function cancelTransfer(item) {
     item.status = 'cancelled';
