@@ -603,6 +603,7 @@ class _DevicesScreenState extends ConsumerState<DevicesScreen>
     with TickerProviderStateMixin {
   List<Device> _devices = [];
   bool _loading = true;
+  String? _loadError;
   TabController? _tabController;
 
   /// 上次自动重连的时间戳（防抖，10 秒内不重复尝试）。
@@ -611,7 +612,9 @@ class _DevicesScreenState extends ConsumerState<DevicesScreen>
   @override
   void initState() {
     super.initState();
-    _loadDevices();
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) unawaited(_loadDevices());
+    });
   }
 
   @override
@@ -621,14 +624,27 @@ class _DevicesScreenState extends ConsumerState<DevicesScreen>
   }
 
   Future<void> _loadDevices({int preferredIndex = -1}) async {
-    ref.invalidate(localNetworkInfoProvider);
-    final store = ref.read(deviceStoreProvider);
-    final devices = await store.loadDevices();
+    late final DeviceStore store;
+    late final List<Device> devices;
+    try {
+      ref.invalidate(localNetworkInfoProvider);
+      store = ref.read(deviceStoreProvider);
+      devices = await store.loadDevices();
+    } catch (_) {
+      debugPrint('[Devices] Failed to load paired devices');
+      if (!mounted) return;
+      setState(() {
+        _loading = false;
+        _loadError = '无法加载设备，请重试';
+      });
+      return;
+    }
     if (!mounted) return;
 
     setState(() {
       _devices = devices;
       _loading = false;
+      _loadError = null;
       _rebuildTabController(devices);
     });
 
@@ -940,6 +956,32 @@ class _DevicesScreenState extends ConsumerState<DevicesScreen>
   Widget _buildBody(MultiDeviceConnectionState connState) {
     if (_loading) {
       return const Center(child: CircularProgressIndicator());
+    }
+    if (_loadError != null) {
+      return Center(
+        child: Padding(
+          padding: const EdgeInsets.all(24),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              const Icon(Icons.error_outline_rounded, size: 42),
+              const SizedBox(height: 12),
+              Text(_loadError!),
+              const SizedBox(height: 16),
+              ElevatedButton(
+                onPressed: () {
+                  setState(() {
+                    _loading = true;
+                    _loadError = null;
+                  });
+                  unawaited(_loadDevices());
+                },
+                child: const Text('重试'),
+              ),
+            ],
+          ),
+        ),
+      );
     }
     final serverState = ref.watch(fastdropServerProvider);
     final nearby = ref.watch(nearbyDevicesProvider);

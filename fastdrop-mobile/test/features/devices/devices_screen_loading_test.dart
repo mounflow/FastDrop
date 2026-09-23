@@ -43,4 +43,26 @@ void main() {
     expect(tester.takeException(), isNull);
     expect(find.byType(CircularProgressIndicator), findsOneWidget);
   });
+
+  testWidgets('shows retry state when paired devices cannot be loaded',
+      (tester) async {
+    await tester.pumpWidget(
+      ProviderScope(
+        overrides: [
+          deviceStoreProvider.overrideWithValue(
+            _TestDeviceStore(
+              () => Future<List<Device>>.error(StateError('storage failed')),
+            ),
+          ),
+        ],
+        child: const MaterialApp(home: DevicesScreen()),
+      ),
+    );
+    await tester.pump();
+
+    expect(tester.takeException(), isNull);
+    expect(find.byType(CircularProgressIndicator), findsNothing);
+    expect(find.text('无法加载设备，请重试'), findsOneWidget);
+    expect(find.text('重试'), findsOneWidget);
+  });
 }
