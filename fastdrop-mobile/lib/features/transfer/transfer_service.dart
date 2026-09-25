@@ -71,6 +71,16 @@ class TransferService {
   static const int _maxChunksPerFile = 3;
   static const int _maxConcurrentFiles = 2;
 
+  /// 全局在途传输计数（上传+下载，跨实例共享）。App 生命周期据此在任意
+  /// 传输进行中保持 Android 前台保活服务，即使"允许接收文件"开关是关闭
+  /// 的（问题 8：纯发送场景此前完全没有保活，切后台数分钟后被系统冻结）。
+  static int _activeTransfers = 0;
+  static bool get hasActiveTransfers => _activeTransfers > 0;
+  static void _beginActiveTransfer() => _activeTransfers++;
+  static void _endActiveTransfer() {
+    if (_activeTransfers > 0) _activeTransfers--;
+  }
+
   // ---------------------------------------------------------------------------
   // Internal state
   // ---------------------------------------------------------------------------
@@ -112,6 +122,7 @@ class TransferService {
     _cancelTokens[batchOfferId] = cancelToken;
     _pauseControllers[batchOfferId] = pauseController;
     var callbackTransferId = batchOfferId;
+    _beginActiveTransfer();
 
     // Declared outside try so the finally block can clean up temp copies.
     final fileInfos = <_FileInfo>[];
@@ -255,6 +266,7 @@ class TransferService {
       _cancelTokens.remove(batchOfferId);
       _pauseControllers.remove(batchOfferId)?.resume();
       _transferIdToOfferId.removeWhere((_, offerId) => offerId == batchOfferId);
+      _endActiveTransfer();
     }
   }
 
@@ -278,6 +290,7 @@ class TransferService {
     // 为下载注册取消令牌（M15）：复用 _cancelTokens 机制，key 用 transferId，
     // cancelTransfer(transferId) 即可触发。
     final cancelToken = _cancelTokens.putIfAbsent(transferId, CancelToken.new);
+    _beginActiveTransfer();
 
     try {
       final chunkSize = FileUtils.chunkSize;
@@ -388,6 +401,7 @@ class TransferService {
       }
       rethrow;
     } finally {
+      _endActiveTransfer();
       if (identical(_pauseControllers[transferId], pauseController)) {
         _pauseControllers.remove(transferId)?.resume();
       }

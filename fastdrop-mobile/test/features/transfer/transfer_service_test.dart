@@ -240,6 +240,30 @@ void main() {
     expect(mock.chunkSizes[0], 1024);
   });
 
+  test('active transfer counter tracks in-flight uploads (问题 8)', () async {
+    final sourceFile = await _createSparseFile(tempDir, 'counter.bin', 1024);
+    final mock = _MockTransferServer(1);
+    await mock.start();
+    addTearDown(mock.stop);
+
+    var sawInFlight = false;
+    final service = TransferService(
+      httpClient: FastDropHttpClient(baseUrl: mock.baseUrl),
+      onStateChange: (id, status, {String? errorCode, String? errorMessage}) {
+        // 批次建立后的任意回调点，在途计数必须为正（保活条件依赖它）。
+        if (status == 'preparing' || status == 'transferring') {
+          if (TransferService.hasActiveTransfers) sawInFlight = true;
+        }
+      },
+    );
+    addTearDown(service.dispose);
+
+    await service.uploadFiles([sourceFile.path]);
+
+    expect(sawInFlight, isTrue, reason: '上传进行中计数应为正');
+    expect(TransferService.hasActiveTransfers, isFalse, reason: '结束后计数归零');
+  });
+
   test('two-chunk file uploads indices [0, 1]', () async {
     final sourceFile = await _createSparseFile(
         tempDir, 'two.bin', FileUtils.chunkSize + 1);

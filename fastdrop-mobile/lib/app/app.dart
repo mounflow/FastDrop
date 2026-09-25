@@ -9,6 +9,7 @@ import 'package:fastdrop_mobile/core/platform/background_receive_service.dart';
 import 'package:fastdrop_mobile/core/server/server_providers.dart';
 import 'package:fastdrop_mobile/features/pairing/pair_confirm_dialog.dart';
 import 'package:fastdrop_mobile/features/transfer/receive_confirm_dialog.dart';
+import 'package:fastdrop_mobile/features/transfer/transfer_service.dart';
 
 /// Root widget of the FastDrop mobile app.
 ///
@@ -53,7 +54,10 @@ class _FastDropAppState extends ConsumerState<FastDropApp>
     } else if (state == AppLifecycleState.inactive ||
         state == AppLifecycleState.paused ||
         state == AppLifecycleState.hidden) {
-      if (ref.read(fastdropServerProvider).isRunning) {
+      // 保活条件 = 接收 server 在运行 或 有传输进行中（问题 8：纯发送的
+      // 上传/下载同样需要前台保活，否则切后台数分钟内被系统冻结而中断）。
+      if (ref.read(fastdropServerProvider).isRunning ||
+          TransferService.hasActiveTransfers) {
         unawaited(BackgroundReceiveService.start());
       }
     } else if (state == AppLifecycleState.detached) {
