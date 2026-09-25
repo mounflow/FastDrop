@@ -708,6 +708,13 @@ class _TransferScreenState extends ConsumerState<TransferScreen> {
       appBar: AppBar(
         title: const Text('传输'),
         actions: [
+          // L15 配套：历史记录入口。完成的传输从"当前"归档到本地历史库后，
+          // 这里是查看持久化记录（含"打开文件"）的唯一入口。
+          IconButton(
+            icon: const Icon(Icons.history),
+            tooltip: '传输记录',
+            onPressed: () => Navigator.of(context).pushNamed('/history'),
+          ),
           if (currentEntries.any((e) => e.value.status == 'transferring'))
             IconButton(
               icon: const Icon(Icons.cancel_outlined),
