@@ -92,3 +92,39 @@ func TestSplitIPv4PrivateOnly(t *testing.T) {
 		}
 	}
 }
+
+// Regression (问题 10 live test): the machine's own IP must exclude only that
+// single host from the sweep — filtering it during subnet collection emptied
+// the entire sweep on single-NIC machines.
+func TestLocalSubnetsCoversOwnSubnet(t *testing.T) {
+	addrs, err := net.InterfaceAddrs()
+	if err != nil {
+		t.Skipf("interface addrs unavailable: %v", err)
+	}
+	subnets := localSubnets()
+	found := false
+	for _, addr := range addrs {
+		ipNet, ok := addr.(*net.IPNet)
+		if !ok || ipNet.IP.To4() == nil || ipNet.IP.IsLoopback() {
+			continue
+		}
+		subnet := splitIPv4(ipNet.IP.To4().String())
+		if subnet == "" {
+			continue
+		}
+		found = true
+		covered := false
+		for _, s := range subnets {
+			if s == subnet {
+				covered = true
+				break
+			}
+		}
+		if !covered {
+			t.Errorf("localSubnets() missing own subnet %s (got %v)", subnet, subnets)
+		}
+	}
+	if !found {
+		t.Skip("no private IPv4 on this machine")
+	}
+}

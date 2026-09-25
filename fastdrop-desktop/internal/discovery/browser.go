@@ -29,10 +29,14 @@ type NearbyDevice struct {
 const DefaultPort = 9527
 
 const (
-	mdnsWindow       = 2 * time.Second // how long to listen for mDNS answers
-	probeTimeout     = 800 * time.Millisecond
+	mdnsWindow = 2 * time.Second // how long to listen for mDNS answers
+	// probeTimeout must tolerate Wi-Fi power-save wake-up (ARP + radio wake
+	// can take >1s for the first packet to a dozing phone), so it is well
+	// above a normal LAN RTT.
+	probeTimeout     = 1500 * time.Millisecond
 	sweepConcurrency = 64
 	maxSubnets       = 2 // bound total sweep time on multi-NIC machines
+	sweepPasses      = 2 // re-sweep once when the first pass finds nothing
 )
 
 type candidate struct {
@@ -53,7 +57,8 @@ type scanOptions struct {
 // endpoint, and every candidate is verified against its /health identity
 // before being returned (TXT records are hints only — the phone's discovery
 // follows the same model to defeat fake-IP DNS proxies). Self is excluded by
-// deviceId.
+// deviceId. When the first pass finds nothing, the sweep runs once more:
+// power-save wake-up and ARP delays routinely swallow first probes.
 func DiscoverNearby(ctx context.Context, localDeviceID string) ([]NearbyDevice, error) {
 	client := &http.Client{Timeout: probeTimeout}
 	opts := &scanOptions{
@@ -82,7 +87,29 @@ func DiscoverNearby(ctx context.Context, localDeviceID string) ([]NearbyDevice, 
 		close(candidates)
 	}()
 
-	return verifyCandidates(ctx, opts, candidates), nil
+	devices := verifyCandidates(ctx, opts, candidates)
+	if len(devices) == 0 {
+		// Second sweep pass: power-save wake-up swallows first probes, and
+		// mDNS announcements are often missed across power-save cycles.
+		select {
+		case <-ctx.Done():
+			return devices, nil
+		default:
+		}
+		candidates2 := make(chan candidate, 256)
+		var wg2 sync.WaitGroup
+		wg2.Add(1)
+		go func() {
+			defer wg2.Done()
+			seedFromSubnets(ctx, opts, candidates2)
+		}()
+		go func() {
+			wg2.Wait()
+			close(candidates2)
+		}()
+		devices = verifyCandidates(ctx, opts, candidates2)
+	}
+	return devices, nil
 }
 
 // seedFromMDNS listens for _fastdrop._tcp answers for mdnsWindow.
@@ -113,7 +140,7 @@ func seedFromMDNS(out chan<- candidate) {
 // seedFromSubnets sweeps each local /24 and emits every address as a
 // candidate; verification happens once, in verifyCandidates.
 func seedFromSubnets(ctx context.Context, opts *scanOptions, out chan<- candidate) {
-	subnets := localSubnets(opts.skipIPs)
+	subnets := localSubnets()
 	if len(subnets) == 0 {
 		return
 	}
@@ -231,9 +258,11 @@ func verifyHost(ctx context.Context, opts *scanOptions, host string, port int, v
 }
 
 // localSubnets returns the /24 prefixes of private, non-loopback IPv4
-// addresses on this machine (deduped), skipping interfaces whose own address
-// is in skipIPs.
-func localSubnets(skipIPs map[string]bool) []string {
+// addresses on this machine (deduped). The machine's own addresses must NOT
+// remove their whole /24 here — own-IP exclusion happens per candidate in
+// seedFromSubnets (skipping own /32 would otherwise empty the sweep entirely
+// on single-NIC machines).
+func localSubnets() []string {
 	seen := map[string]bool{}
 	var out []string
 	addrs, err := net.InterfaceAddrs()
@@ -245,17 +274,13 @@ func localSubnets(skipIPs map[string]bool) []string {
 		if !ok || ipNet.IP.To4() == nil || ipNet.IP.IsLoopback() {
 			continue
 		}
-		ip := ipNet.IP.To4().String()
-		if skipIPs[ip] {
+		subnet := splitIPv4(ipNet.IP.To4().String())
+		if subnet == "" {
 			continue
 		}
-		parts := splitIPv4(ip)
-		if parts == "" {
-			continue
-		}
-		if !seen[parts] {
-			seen[parts] = true
-			out = append(out, parts)
+		if !seen[subnet] {
+			seen[subnet] = true
+			out = append(out, subnet)
 		}
 	}
 	return out
