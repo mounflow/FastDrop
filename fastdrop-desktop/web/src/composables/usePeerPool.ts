@@ -362,10 +362,11 @@ export function usePeerPool(handlers: PeerPoolHandlers = {}): PeerPool {
       .filter((runtime): runtime is Runtime => runtime !== undefined)
     if (targets.length === 0) throw new Error('Select at least one connected device')
 
-    const jobs = targets.flatMap((runtime) =>
-      files.map((file) => () => sendFile(runtime, file)),
-    )
-    await runJobs(jobs, 2)
+    // 审计高#3：一次选择聚合为**一个批次**（一个 transferId），手机端
+    // 只弹一张多文件确认卡片、历史记录一行，不再逐文件建批次。
+    for (const runtime of targets) {
+      await sendBatch(runtime, files)
+    }
     return {
       sent: targets
         .map((runtime) => peers.value.find((peer) => peer.id === runtime.session.id))
@@ -374,30 +375,51 @@ export function usePeerPool(handlers: PeerPoolHandlers = {}): PeerPool {
     }
   }
 
-  async function sendFile(runtime: Runtime, file: File) {
+  async function sendBatch(runtime: Runtime, files: File[]) {
     const { session } = runtime
-    const fileSha256 = await sha256File(file)
-    const offerId = crypto.randomUUID()
     const directUpload = session.role === 'remote-server'
+    const totalBytes = files.reduce((sum, file) => sum + file.size, 0)
+    const batchName =
+      files.length === 1 ? files[0].name : `${files.length} 个文件`
+
+    // 1. Incremental SHA-256 per file (never buffers whole files — H1).
+    const entries: Array<{ file: File; sha256: string; clientFileId: string }> = []
+    for (const file of files) {
+      entries.push({
+        file,
+        sha256: await sha256File(file),
+        clientFileId: crypto.randomUUID(),
+      })
+    }
+
+    // 2. ONE transfer batch for all files.
+    const offerId = crypto.randomUUID()
     const result = await httpLimiter.run(() => createTransfer({
       offerId,
       direction: directUpload ? 'client_to_server' : 'server_to_client',
-      files: [{
-        clientFileId: crypto.randomUUID(),
-        name: file.name,
-        size: file.size,
-        mimeType: file.type || 'application/octet-stream',
-        sha256: fileSha256,
-      }],
+      files: entries.map((entry) => ({
+        clientFileId: entry.clientFileId,
+        name: entry.file.name,
+        size: entry.file.size,
+        mimeType: entry.file.type || 'application/octet-stream',
+        sha256: entry.sha256,
+      })),
     }, undefined, session))
-    const remoteFile = result.files[0]
+
     const control: TransferControl = { paused: false, cancelled: false }
     const controlKey = transferKey(session.id, result.transferId)
     transferControls.set(controlKey, control)
-    let transferred = 0
+    const fileByClientFileId = new Map(
+      result.files.map((f) => [f.clientFileId, f]),
+    )
+
+    let completedFilesBytes = 0
+    let failedCount = 0
+    const failureNames: string[] = []
 
     try {
-      emitProgress(session, result, remoteFile.fileId, file, 0,
+      emitProgressRaw(session, result.transferId, result.files[0]?.fileId ?? '',
+        batchName, totalBytes, 0,
         directUpload && isConfirmationPlatform(session.platform)
           ? 'waiting_accept'
           : 'preparing')
@@ -406,40 +428,79 @@ export function usePeerPool(handlers: PeerPoolHandlers = {}): PeerPool {
         await waitForAcceptance(session.id, result.transferId)
       }
 
-      await waitWhilePaused(control)
-      await uploadFileChunks(session, result, remoteFile.fileId, file, control,
-        (bytes) => { transferred = bytes })
-      await waitWhilePaused(control)
+      // 3. Upload per file (sequential), 3 chunks in flight per file — the
+      //    server-side scheduler caps the global budget anyway.
+      for (const entry of entries) {
+        await waitWhilePaused(control)
+        if (control.cancelled) throw new DOMException('Transfer cancelled', 'AbortError')
+        const remoteFile = fileByClientFileId.get(entry.clientFileId)
+        if (!remoteFile) throw new Error('server missing file mapping')
+        let fileTransferred = 0
+        try {
+          await uploadFileChunks(session, result, remoteFile.fileId, entry.file, control,
+            (bytes) => {
+              fileTransferred = bytes
+              emitProgressRaw(session, result.transferId, remoteFile.fileId,
+                batchName, totalBytes, completedFilesBytes + fileTransferred,
+                control.paused ? 'paused' : 'transferring')
+            })
+          if (directUpload) {
+            await httpLimiter.run(() => completeFile(
+              `/api/v1/transfers/${result.transferId}/files/${remoteFile.fileId}/complete`,
+              entry.file.size,
+              entry.sha256,
+              undefined,
+              session,
+            ))
+          }
+          completedFilesBytes += entry.file.size
+          emitProgressRaw(session, result.transferId, remoteFile.fileId,
+            batchName, totalBytes, completedFilesBytes,
+            control.paused ? 'paused' : 'transferring')
+        } catch (error) {
+          if (control.cancelled) throw error
+          // 单文件失败不中止整批（问题 11 M13 语义）：跳过继续。
+          failedCount++
+          failureNames.push(entry.file.name)
+          emitProgressRaw(session, result.transferId, remoteFile.fileId,
+            batchName, totalBytes, completedFilesBytes + fileTransferred,
+            'transferring', `${entry.file.name} 失败`)
+        }
+      }
 
-      if (directUpload) {
-        await httpLimiter.run(() => completeFile(
-          `/api/v1/transfers/${result.transferId}/files/${remoteFile.fileId}/complete`,
-          file.size,
-          fileSha256,
-          undefined,
-          session,
-        ))
-        emitProgress(session, result, remoteFile.fileId, file, file.size, 'completed')
+      if (failedCount > 0) {
+        // 整批按失败收尾并让服务端清理，消息注明比例。
+        await cancelTransferOnServer(result.transferId, session).catch(() => {})
+        emitProgressRaw(session, result.transferId, '', batchName, totalBytes,
+          completedFilesBytes, 'failed',
+          `${failedCount}/${files.length} 个文件失败（${failureNames.join('、')}）`)
         return
       }
 
+      if (directUpload) {
+        emitProgressRaw(session, result.transferId, '', batchName, totalBytes,
+          totalBytes, 'completed')
+        return
+      }
+
+      // 4. Staging: all files staged on this PC — announce ONCE, then wait
+      //    for the recipient's single accept (M7) so a silent recipient does
+      //    not linger as waiting_accept.
       await httpLimiter.run(() => announceTransfer(result.transferId, session))
-      transferred = file.size
-      emitProgress(session, result, remoteFile.fileId, file, file.size, 'waiting_accept')
-      if (session.role === 'local-session') {
-        // Staging path: wait for the recipient's accept echo (offerId equals
-        // transferId) so a silent recipient does not linger as waiting_accept.
-        try {
-          await waitForAcceptance(session.id, result.transferId)
-        } catch {
-          if (control.cancelled) throw new Error('Transfer cancelled')
-          // REST cancel so the server cleans up the announced offer.
-          await cancelTransferOnServer(result.transferId, session).catch(() => {})
-          throw new Error('对方未响应')
-        }
+      emitProgressRaw(session, result.transferId, '', batchName, totalBytes,
+        totalBytes, 'waiting_accept')
+      try {
+        await waitForAcceptance(session.id, result.transferId)
+        emitProgressRaw(session, result.transferId, '', batchName, totalBytes,
+          totalBytes, 'transferring')
+      } catch {
+        if (control.cancelled) throw new Error('Transfer cancelled')
+        await cancelTransferOnServer(result.transferId, session).catch(() => {})
+        throw new Error('对方未响应')
       }
     } catch (error) {
-      emitProgress(session, result, remoteFile.fileId, file, transferred,
+      emitProgressRaw(session, result.transferId, '', batchName, totalBytes,
+        completedFilesBytes,
         control.cancelled ? 'cancelled' : 'failed', readableTransferError(error))
     } finally {
       resumeControl(control)
@@ -471,17 +532,16 @@ export function usePeerPool(handlers: PeerPoolHandlers = {}): PeerPool {
       }, control)
       transferred += data.byteLength
       onTransferred?.(transferred)
-      emitProgress(session, result, fileId, file, transferred,
-        control.paused ? 'paused' : 'transferring')
     })
     await runJobs(jobs, 3)
   }
 
-  function emitProgress(
+  function emitProgressRaw(
     session: PeerSession,
-    result: CreateTransferResult,
+    transferId: string,
     fileId: string,
-    file: File,
+    fileName: string,
+    totalBytes: number,
     transferredBytes: number,
     status: string,
     error?: string,
@@ -489,11 +549,11 @@ export function usePeerPool(handlers: PeerPoolHandlers = {}): PeerPool {
     handlers.onProgress?.({
       peerId: session.id,
       peerName: session.name,
-      transferId: result.transferId,
+      transferId,
       fileId,
-      fileName: file.name,
+      fileName,
       transferredBytes,
-      totalBytes: file.size,
+      totalBytes,
       status,
       error,
     })

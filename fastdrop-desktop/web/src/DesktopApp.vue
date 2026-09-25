@@ -252,7 +252,8 @@ async function sendFiles(files: File[]) {
     const skippedNote = skipped.length
       ? `（跳过：${skipped.map((peer) => peer.name).join('、')} 不在线）`
       : ''
-    uploadStatus.value = `已向 ${sent.length} 台设备发起发送${skippedNote}`
+    uploadStatus.value =
+      `已开始向 ${sent.length} 台设备发送 ${files.length} 个文件${skippedNote}`
     await loadHistory()
   } catch (error) {
     uploadStatus.value = readableError(error)
