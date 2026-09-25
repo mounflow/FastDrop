@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, onUnmounted, ref } from 'vue'
+import { computed, onMounted, onUnmounted, reactive, ref } from 'vue'
 import QRCode from 'qrcode'
 
 import AppIcon from './components/AppIcon.vue'
@@ -317,9 +317,11 @@ function handleWSMessage(peerId: string, raw: unknown) {
     case 'transfer.started':
     case 'transfer.accepted':
     case 'file.offer.accept':
-    case 'transfer.resume':
+    case 'transfer.resume': {
+      ensureIncomingCard(peerId, transferId)
       updateTransferStatus(peerId, transferId, 'transferring')
       break
+    }
     case 'transfer.paused':
       updateTransferStatus(peerId, transferId, 'paused')
       break
@@ -331,12 +333,12 @@ function handleWSMessage(peerId: string, raw: unknown) {
       updateTransferStatus(peerId, transferId, 'failed', '对方已拒绝接收')
       break
     case 'transfer.progress': {
-      const item = activeTransfers.value.find((entry) => entry.peerId === peerId && entry.transferId === transferId)
-      if (item) {
-        item.transferredBytes = Number(payload.transferredBytes || item.transferredBytes)
-        item.speedBps = Number(payload.speedBps || 0)
-        if (item.status !== 'paused') item.status = 'transferring'
-      }
+      // 来件方向（手机→PC）此前从不创建卡片，传输进行中 PC 首页无感知。
+      const item = ensureIncomingCard(peerId, transferId)
+      item.totalBytes = Number(payload.totalBytes || item.totalBytes)
+      item.transferredBytes = Number(payload.transferredBytes || item.transferredBytes)
+      item.speedBps = Number(payload.speedBps || 0)
+      if (item.status !== 'paused') item.status = 'transferring'
       break
     }
     case 'transfer.completed':
@@ -355,6 +357,28 @@ function handleWSMessage(peerId: string, raw: unknown) {
       peerPool.removePeer(peerId)
       break
   }
+}
+
+// 来件方向（手机→PC，免确认直传）只会以 WS 事件的形式出现：确保存在
+// 一张进度卡片，首页才能实时反映接收进度（否则完成后才见于传输记录）。
+function ensureIncomingCard(peerId: string, transferId: string): ActiveTransfer {
+  const existing = activeTransfers.value.find(
+    (entry) => entry.peerId === peerId && entry.transferId === transferId,
+  )
+  if (existing) return existing
+  const card: ActiveTransfer = {
+    peerId,
+    peerName: peerNameFor(peerId),
+    transferId,
+    fileId: '',
+    filename: `来自 ${peerNameFor(peerId)} 的文件`,
+    totalBytes: 0,
+    transferredBytes: 0,
+    speedBps: 0,
+    status: 'transferring',
+  }
+  activeTransfers.value.unshift(card)
+  return card
 }
 
 function updateTransferStatus(peerId: string, transferId: string, status: string, error?: string) {
