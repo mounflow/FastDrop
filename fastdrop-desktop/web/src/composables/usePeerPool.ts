@@ -1,14 +1,14 @@
 import { computed, reactive, ref, type ComputedRef, type Ref } from 'vue'
+import { sha256 } from 'js-sha256'
 
 import {
   announceTransfer,
+  cancelTransfer as cancelTransferOnServer,
   completeFile,
   createTransfer,
-  downloadFileBlob,
   HttpStatusError,
   listLocalTransferHistory,
   listTransfers,
-  triggerBrowserDownload,
   uploadChunk,
   type ApiTarget,
 } from '../api'
@@ -109,8 +109,14 @@ interface Runtime {
 
 interface TransferControl {
   paused: boolean
+  cancelled: boolean
   resumePromise?: Promise<void>
   resume?: () => void
+}
+
+export interface SendFilesResult {
+  sent: PeerView[]
+  skipped: PeerView[]
 }
 
 export interface PeerPool {
@@ -121,10 +127,11 @@ export interface PeerPool {
   removePeer: (peerId: string) => void
   restore: () => void
   close: () => void
-  sendFiles: (files: File[], peerIds?: string[]) => Promise<void>
+  sendFiles: (files: File[], peerIds?: string[]) => Promise<SendFilesResult>
   send: (peerId: string, message: unknown) => void
   pauseTransfer: (peerId: string, transferId: string) => void
   resumeTransfer: (peerId: string, transferId: string) => void
+  cancelTransfer: (peerId: string, transferId: string) => Promise<void>
   acceptOffer: (offer: PeerIncomingOffer) => Promise<void>
   rejectOffer: (offer: PeerIncomingOffer) => void
   loadHistory: () => Promise<PeerHistoryRow[]>
@@ -154,8 +161,13 @@ export function usePeerPool(handlers: PeerPoolHandlers = {}): PeerPool {
 
   function updateStatus(peerId: string, status: WSStatus) {
     const peer = peers.value.find((item) => item.id === peerId)
-    if (peer) peer.status = status
-    handlers.onPeerChanged?.()
+    if (!peer || peer.status === status) return
+    peer.status = status
+    // Only terminal states notify listeners; connecting/reconnecting flips
+    // would spam onPeerChanged (and the history reload it triggers).
+    if (status === 'connected' || status === 'disconnected') {
+      handlers.onPeerChanged?.()
+    }
   }
 
   function wsUrl(session: PeerSession): string {
@@ -268,6 +280,26 @@ export function usePeerPool(handlers: PeerPoolHandlers = {}): PeerPool {
     send(peerId, transferEnvelope('transfer.resume', transferId))
   }
 
+  async function cancelTransfer(peerId: string, transferId: string) {
+    const key = transferKey(peerId, transferId)
+    const waiter = readiness.get(key)
+    if (waiter) {
+      clearTimeout(waiter.timer)
+      readiness.delete(key)
+      waiter.reject(new Error('Transfer cancelled'))
+    }
+    resolvedReadiness.delete(key)
+    const control = transferControls.get(key)
+    if (control) {
+      control.cancelled = true
+      resumeControl(control) // unblock a paused loop so it observes cancelled
+    }
+    // REST cancel against the owning server (local session for local-session,
+    // the paired device's server for remote-server); it cleans up state.
+    const runtime = runtimes.get(peerId)
+    if (runtime) await cancelTransferOnServer(transferId, runtime.session).catch(() => {})
+  }
+
   function handleMessage(peerId: string, raw: unknown) {
     const message = raw as WSEnvelope
     const payload = message.payload ?? {}
@@ -314,12 +346,16 @@ export function usePeerPool(handlers: PeerPoolHandlers = {}): PeerPool {
     })
   }
 
-  async function sendFiles(files: File[], peerIds = selectedIds.value) {
+  async function sendFiles(files: File[], peerIds = selectedIds.value): Promise<SendFilesResult> {
     const onlineIds = new Set(
       peers.value
         .filter((peer) => peer.status === 'connected')
         .map((peer) => peer.id),
     )
+    const skipped = peerIds
+      .filter((id) => !onlineIds.has(id))
+      .map((id) => peers.value.find((peer) => peer.id === id))
+      .filter((peer): peer is PeerView => peer !== undefined)
     const targets = peerIds
       .filter((id) => onlineIds.has(id))
       .map((id) => runtimes.get(id))
@@ -330,11 +366,17 @@ export function usePeerPool(handlers: PeerPoolHandlers = {}): PeerPool {
       files.map((file) => () => sendFile(runtime, file)),
     )
     await runJobs(jobs, 2)
+    return {
+      sent: targets
+        .map((runtime) => peers.value.find((peer) => peer.id === runtime.session.id))
+        .filter((peer): peer is PeerView => peer !== undefined),
+      skipped,
+    }
   }
 
   async function sendFile(runtime: Runtime, file: File) {
     const { session } = runtime
-    const sha256 = await sha256File(file)
+    const fileSha256 = await sha256File(file)
     const offerId = crypto.randomUUID()
     const directUpload = session.role === 'remote-server'
     const result = await httpLimiter.run(() => createTransfer({
@@ -345,13 +387,14 @@ export function usePeerPool(handlers: PeerPoolHandlers = {}): PeerPool {
         name: file.name,
         size: file.size,
         mimeType: file.type || 'application/octet-stream',
-        sha256,
+        sha256: fileSha256,
       }],
     }, undefined, session))
     const remoteFile = result.files[0]
-    const control: TransferControl = { paused: false }
+    const control: TransferControl = { paused: false, cancelled: false }
     const controlKey = transferKey(session.id, result.transferId)
     transferControls.set(controlKey, control)
+    let transferred = 0
 
     try {
       emitProgress(session, result, remoteFile.fileId, file, 0,
@@ -364,14 +407,15 @@ export function usePeerPool(handlers: PeerPoolHandlers = {}): PeerPool {
       }
 
       await waitWhilePaused(control)
-      await uploadFileChunks(session, result, remoteFile.fileId, file, control)
+      await uploadFileChunks(session, result, remoteFile.fileId, file, control,
+        (bytes) => { transferred = bytes })
       await waitWhilePaused(control)
 
       if (directUpload) {
         await httpLimiter.run(() => completeFile(
           `/api/v1/transfers/${result.transferId}/files/${remoteFile.fileId}/complete`,
           file.size,
-          sha256,
+          fileSha256,
           undefined,
           session,
         ))
@@ -380,7 +424,23 @@ export function usePeerPool(handlers: PeerPoolHandlers = {}): PeerPool {
       }
 
       await httpLimiter.run(() => announceTransfer(result.transferId, session))
+      transferred = file.size
       emitProgress(session, result, remoteFile.fileId, file, file.size, 'waiting_accept')
+      if (session.role === 'local-session') {
+        // Staging path: wait for the recipient's accept echo (offerId equals
+        // transferId) so a silent recipient does not linger as waiting_accept.
+        try {
+          await waitForAcceptance(session.id, result.transferId)
+        } catch {
+          if (control.cancelled) throw new Error('Transfer cancelled')
+          // REST cancel so the server cleans up the announced offer.
+          await cancelTransferOnServer(result.transferId, session).catch(() => {})
+          throw new Error('对方未响应')
+        }
+      }
+    } catch (error) {
+      emitProgress(session, result, remoteFile.fileId, file, transferred,
+        control.cancelled ? 'cancelled' : 'failed', readableTransferError(error))
     } finally {
       resumeControl(control)
       transferControls.delete(controlKey)
@@ -393,6 +453,7 @@ export function usePeerPool(handlers: PeerPoolHandlers = {}): PeerPool {
     fileId: string,
     file: File,
     control: TransferControl,
+    onTransferred?: (bytes: number) => void,
   ) {
     const totalChunks = Math.ceil(file.size / CHUNK_SIZE)
     let transferred = 0
@@ -409,6 +470,7 @@ export function usePeerPool(handlers: PeerPoolHandlers = {}): PeerPool {
         ))
       }, control)
       transferred += data.byteLength
+      onTransferred?.(transferred)
       emitProgress(session, result, fileId, file, transferred,
         control.paused ? 'paused' : 'transferring')
     })
@@ -438,6 +500,11 @@ export function usePeerPool(handlers: PeerPoolHandlers = {}): PeerPool {
   }
 
   async function acceptOffer(offer: PeerIncomingOffer) {
+    // PC never pulls files through the browser: local-session deliveries are
+    // written to disk by the local Go server, and a remote-server file.offer
+    // is the receipt for this PC's own outgoing transfer. Sending the accept
+    // signal alone is enough (payload carries both ids; the server prefers
+    // transferId).
     const runtime = runtimes.get(offer.peerId)
     if (!runtime) throw new Error('Peer is no longer connected')
     runtime.ws.send({
@@ -445,17 +512,8 @@ export function usePeerPool(handlers: PeerPoolHandlers = {}): PeerPool {
       type: 'file.offer.accept',
       messageId: crypto.randomUUID(),
       timestamp: Date.now(),
-      payload: { offerId: offer.offerId },
+      payload: { offerId: offer.offerId, transferId: offer.transferId },
     })
-    for (const file of offer.files) {
-      const blob = await httpLimiter.run(() => downloadFileBlob(
-        offer.transferId,
-        file.fileId,
-        undefined,
-        runtime.session,
-      ))
-      triggerBrowserDownload(blob, file.name)
-    }
   }
 
   function rejectOffer(offer: PeerIncomingOffer) {
@@ -464,7 +522,7 @@ export function usePeerPool(handlers: PeerPoolHandlers = {}): PeerPool {
       type: 'file.offer.reject',
       messageId: crypto.randomUUID(),
       timestamp: Date.now(),
-      payload: { offerId: offer.offerId, reason: 'user_rejected' },
+      payload: { offerId: offer.offerId, transferId: offer.transferId, reason: 'user_rejected' },
     })
   }
 
@@ -487,7 +545,7 @@ export function usePeerPool(handlers: PeerPoolHandlers = {}): PeerPool {
       .then((history) => history.map((row): PeerHistoryRow => ({
         ...row,
         peerId: row.peerDeviceId,
-        peerName: row.peerName || 'Unknown Device',
+        peerName: row.peerName || '已配对设备',
         peerRole: 'local-session',
       })))
       .catch(() => [])
@@ -518,6 +576,7 @@ export function usePeerPool(handlers: PeerPoolHandlers = {}): PeerPool {
     send,
     pauseTransfer,
     resumeTransfer,
+    cancelTransfer,
     acceptOffer,
     rejectOffer,
     loadHistory,
@@ -585,17 +644,33 @@ async function uploadChunkWithRetry(
   control: TransferControl,
 ) {
   for (let attempt = 0; ; attempt++) {
+    if (control.cancelled) {
+      throw new DOMException('Transfer cancelled', 'AbortError')
+    }
     await waitWhilePaused(control)
     try {
       await action()
       return
     } catch (error) {
-      if (attempt >= CHUNK_RETRY_DELAYS.length || !isRetryableChunkError(error)) {
+      if (control.cancelled || attempt >= CHUNK_RETRY_DELAYS.length || !isRetryableChunkError(error)) {
         throw error
       }
       await delay(CHUNK_RETRY_DELAYS[attempt])
     }
   }
+}
+
+function readableTransferError(error: unknown): string {
+  if (error instanceof HttpStatusError) {
+    if (error.status === 401 || error.status === 403) return '会话已失效，请重新连接设备'
+    if (error.status === 408 || error.status === 429) return '网络繁忙，请稍后重试'
+    if (error.status >= 500) return '对方服务异常，请稍后重试'
+    return `传输失败（HTTP ${error.status}）`
+  }
+  if (error instanceof DOMException && (error.name === 'AbortError' || error.name === 'TimeoutError')) {
+    return '连接超时，请重试'
+  }
+  return error instanceof Error && error.message ? error.message : '传输失败'
 }
 
 function isRetryableChunkError(error: unknown) {
@@ -617,10 +692,12 @@ function isConfirmationPlatform(platform: string): boolean {
 }
 
 async function sha256File(file: File): Promise<string> {
-  const digest = await crypto.subtle.digest('SHA-256', await file.arrayBuffer())
-  return Array.from(new Uint8Array(digest))
-    .map((byte) => byte.toString(16).padStart(2, '0'))
-    .join('')
+  // Incremental digest in 4MB slices — never buffer the whole file in memory.
+  const hasher = sha256.create()
+  for (let offset = 0; offset < file.size; offset += CHUNK_SIZE) {
+    hasher.update(await file.slice(offset, Math.min(offset + CHUNK_SIZE, file.size)).arrayBuffer())
+  }
+  return hasher.hex()
 }
 
 async function runJobs(

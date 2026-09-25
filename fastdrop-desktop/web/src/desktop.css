@@ -220,6 +220,11 @@ button:focus-visible, input:focus-visible, select:focus-visible { outline: 3px s
 .device-copy small { margin-top: 5px; color: #747e91; font-size: 11px; text-transform: capitalize; }
 .device-check { display: grid; place-items: center; width: 22px; height: 22px; margin-left: auto; border: 1px solid #d2d7e2; border-radius: 7px; color: #ffffff; }
 .device-card.selected .device-check { border-color: #4f6ef7; background: #4f6ef7; }
+.device-card-wrap { position: relative; min-width: 0; }
+.device-card-wrap .device-card { width: 100%; }
+.device-remove { position: absolute; top: 8px; right: 8px; width: 28px; height: 28px; border-radius: 9px; box-shadow: none; background: transparent; color: #9aa3b5; opacity: 0; transition: opacity 0.15s ease; }
+.device-card-wrap:hover .device-remove, .device-remove:focus-visible { opacity: 1; }
+.device-remove:hover { background: #fff0f1; color: #b72e35; }
 
 .selection-summary { display: flex; align-items: center; justify-content: space-between; gap: 16px; margin-top: 16px; padding: 12px 16px; border-radius: 12px; background: #eef1ff; color: #596275; font-size: 12px; }
 .selection-summary strong { color: #334bc8; }

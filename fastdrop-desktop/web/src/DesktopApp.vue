@@ -9,7 +9,6 @@ import {
   getHealth,
   getServerInfo,
   getSettings,
-  getTransfer,
   listPairRequests,
   pollPairStatus,
   rejectPair,
@@ -112,7 +111,10 @@ const peerPool = usePeerPool({
     void loadHistory()
   },
   onAuthFailed: (peerId) => {
+    const name = peerNameFor(peerId)
     incomingOffers.value = incomingOffers.value.filter((offer) => offer.peerId !== peerId)
+    peerPool.removePeer(peerId)
+    uploadStatus.value = `${name} 会话已失效，请重新添加设备`
   },
 })
 
@@ -183,6 +185,9 @@ async function refreshQR() {
     })
   } catch (error) {
     qrError.value = '无法连接本机 FastDrop 服务'
+    // Back off before the countdown-driven retry so a down service is not
+    // hammered once per second.
+    countdown.value = Math.max(countdown.value, 10)
     console.error(error)
   } finally {
     qrLoading.value = false
@@ -232,8 +237,11 @@ async function sendFiles(files: File[]) {
   }
   uploadStatus.value = `正在准备 ${files.length} 个文件…`
   try {
-    await peerPool.sendFiles(files, selectedRecipientIds.value)
-    uploadStatus.value = `已向 ${selectedRecipientIds.value.length} 台设备发起发送`
+    const { sent, skipped } = await peerPool.sendFiles(files, selectedRecipientIds.value)
+    const skippedNote = skipped.length
+      ? `（跳过：${skipped.map((peer) => peer.name).join('、')} 不在线）`
+      : ''
+    uploadStatus.value = `已向 ${sent.length} 台设备发起发送${skippedNote}`
     await loadHistory()
   } catch (error) {
     uploadStatus.value = readableError(error)
@@ -357,17 +365,7 @@ function resumeTransfer(item: ActiveTransfer) {
 
 function cancelTransfer(item: ActiveTransfer) {
   item.status = 'cancelled'
-  peerPool.send(item.peerId, envelope('transfer.cancel', item.transferId))
-}
-
-function envelope(type: string, transferId: string) {
-  return {
-    version: 1,
-    type,
-    messageId: crypto.randomUUID(),
-    timestamp: Date.now(),
-    payload: { transferId },
-  }
+  void peerPool.cancelTransfer(item.peerId, item.transferId)
 }
 
 async function acceptOffer(offer: IncomingOffer) {
@@ -385,13 +383,10 @@ async function acceptOffer(offer: IncomingOffer) {
       status: 'transferring',
     })
   }
+  // After accept, progress/state updates arrive via transfer.* WS events
+  // (e.g. transfer.completed); the local Go server writes received files.
   try {
     await peerPool.acceptOffer(offer)
-    const peer = peerViews.value.find((item) => item.id === offer.peerId)
-    if (peer) {
-      const row = await getTransfer(offer.transferId, peer)
-      if (row.status === 'completed') updateTransferStatus(offer.peerId, offer.transferId, 'completed')
-    }
   } catch (error) {
     updateTransferStatus(offer.peerId, offer.transferId, 'failed', readableError(error))
   }
@@ -504,9 +499,23 @@ async function loadHistory() {
   historyLoading.value = true
   try {
     transfers.value = await peerPool.loadHistory()
+    pruneActiveTransfers()
   } finally {
     historyLoading.value = false
   }
+}
+
+// Keep the transfer drawer bounded: drop terminal rows already reflected in
+// history, then cap the list at the 20 most recent entries.
+function pruneActiveTransfers() {
+  const settledIds = new Set(
+    transfers.value
+      .filter((row) => isTerminal(row.status))
+      .map((row) => row.id),
+  )
+  activeTransfers.value = activeTransfers.value
+    .filter((item) => !(isTerminal(item.status) && settledIds.has(item.transferId)))
+    .slice(0, 20)
 }
 
 function canRevealTransfer(item: PeerHistoryRow): boolean {
@@ -647,6 +656,8 @@ function readableError(error: unknown): string {
     SESSION_INVALID: '连接会话已失效，请重新连接设备',
     INSUFFICIENT_STORAGE: '接收设备空间不足',
     FILE_HASH_MISMATCH: '文件校验失败，请重试',
+    NETWORK_UNREACHABLE: '无法连接该地址，请检查 IP 和端口',
+    'Transfer cancelled': '已取消',
   }
   return labels[message] || message || '操作失败，请重试'
 }
@@ -745,17 +756,18 @@ onUnmounted(() => {
         </div>
 
         <div v-if="peerViews.length" class="device-grid">
-          <button
-            v-for="peer in peerViews"
-            :key="peer.id"
-            :class="['device-card', { selected: selectedRecipientIds.includes(peer.id), offline: peer.status !== 'connected' }]"
-            :disabled="peer.status !== 'connected'"
-            @click="toggleRecipient(peer.id)"
-          >
-            <span class="device-avatar"><AppIcon :name="peer.platform === 'windows' ? 'computer' : 'phone'" :size="26" /></span>
-            <span class="device-copy"><strong>{{ peer.name }}</strong><small>{{ peer.platform }} · {{ peer.status === 'connected' ? '已连接' : '连接中断' }}</small></span>
-            <span class="device-check"><AppIcon v-if="selectedRecipientIds.includes(peer.id)" name="check" :size="15" /></span>
-          </button>
+          <div v-for="peer in peerViews" :key="peer.id" class="device-card-wrap">
+            <button
+              :class="['device-card', { selected: selectedRecipientIds.includes(peer.id), offline: peer.status !== 'connected' }]"
+              :disabled="peer.status !== 'connected'"
+              @click="toggleRecipient(peer.id)"
+            >
+              <span class="device-avatar"><AppIcon :name="peer.platform === 'windows' ? 'computer' : 'phone'" :size="26" /></span>
+              <span class="device-copy"><strong>{{ peer.name }}</strong><small>{{ peer.platform }} · {{ peer.status === 'connected' ? '已连接' : '连接中断' }}</small></span>
+              <span class="device-check"><AppIcon v-if="selectedRecipientIds.includes(peer.id)" name="check" :size="15" /></span>
+            </button>
+            <button class="icon-button danger device-remove" title="移除设备" @click="peerPool.removePeer(peer.id)"><AppIcon name="x" :size="15" /></button>
+          </div>
         </div>
 
         <div v-else class="empty-state compact">

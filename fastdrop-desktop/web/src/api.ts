@@ -195,7 +195,7 @@ export async function uploadChunk(url: string, data: ArrayBuffer, signal?: Abort
     method: 'PUT',
     headers: { 'Content-Type': 'application/octet-stream', ...authHeaders(target) },
     body: data,
-    signal,
+    signal: signal ?? AbortSignal.timeout(120_000),
   })
   if (!resp.ok) throw new HttpStatusError(`chunk upload failed: ${resp.status}`, resp.status)
 }
@@ -262,6 +262,8 @@ export async function updateSettings(body: {
 }
 
 /// Download a file's content as a Blob (full GET, no Range).
+/// 当前无调用方：PC 不应经浏览器下载接收文件（手机→PC 的文件由本机 Go 服务端
+/// 落盘；remote-server 场景的 file.offer 是 PC 自己出向传输的确认回执）。
 export async function downloadFileBlob(transferId: string, fileId: string, signal?: AbortSignal, target?: ApiTarget): Promise<Blob> {
   const resp = await fetch(targetUrl(`/api/v1/transfers/${transferId}/files/${fileId}/content`, target), {
     headers: authHeaders(target),
@@ -279,16 +281,26 @@ export interface ServerInfo {
   port: number
 }
 
+/// fetch() only rejects with a bare TypeError on network failure; wrap it so
+/// callers get a coded HttpStatusError they can map to a readable message.
+async function fetchOrNetworkError(url: string, init?: RequestInit): Promise<Response> {
+  try {
+    return await fetch(url, init)
+  } catch {
+    throw new HttpStatusError('NETWORK_UNREACHABLE', 0)
+  }
+}
+
 export async function getServerInfo(baseUrl = ''): Promise<ServerInfo> {
   const root = baseUrl.replace(/\/$/, '')
-  const response = await fetch(`${root}/api/v1/server/info`)
+  const response = await fetchOrNetworkError(`${root}/api/v1/server/info`)
   if (response.ok) return asJson(response)
   const health = await asJson<{
     deviceId?: string
     deviceName?: string
     platform?: string
     protocol?: number
-  }>(await fetch(`${root}/api/v1/health`))
+  }>(await fetchOrNetworkError(`${root}/api/v1/health`))
   return {
     deviceId: health.deviceId || `${health.deviceName || 'peer'}@${root}`,
     name: health.deviceName || 'FastDrop Device',
@@ -307,6 +319,7 @@ export async function requestDiscoverPair(baseUrl: string, device: DeviceInfo): 
 }
 
 /// Trigger a browser file-save dialog for the given Blob.
+/// 当前无调用方：PC 不应经浏览器下载接收文件。
 export function triggerBrowserDownload(blob: Blob, fileName: string): void {
   const url = URL.createObjectURL(blob)
   const a = document.createElement('a')
