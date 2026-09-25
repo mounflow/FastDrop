@@ -1,9 +1,12 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- L15: 覆盖接收文件可能落盘的位置（默认 Download/FastDrop 属 external-path；
-     用户自定义目录可能是应用私有目录或 SD 卡），全部授予临时读权限。 -->
+<!-- L15: 覆盖接收文件可能落盘的位置。
+     注意默认下载目录是 getApplicationDocumentsDirectory() =
+     /data/user/0/<pkg>/app_flutter（files 的兄弟目录），必须有专门的
+     files-path path="app_flutter" 根，否则 FileProvider 找不到匹配。 -->
 <paths>
-    <external-path name="external_storage" path="." />
+    <files-path name="app_flutter" path="app_flutter" />
     <files-path name="internal_files" path="." />
+    <external-path name="external_storage" path="." />
     <cache-path name="cache" path="." />
     <external-files-path name="external_files" path="." />
     <external-cache-path name="external_cache" path="." />

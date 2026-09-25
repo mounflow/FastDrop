@@ -95,13 +95,22 @@ class MainActivity : FlutterActivity() {
     }
 
     /// L15: 用系统查看器打开已接收的文件。路径必须经 FileProvider 暴露，
-    /// 否则 Android 7+ 会抛 FileUriExposedException。
+    /// 否则 Android 7+ 会抛 FileUriExposedException。若路径不在已配置的
+    /// FileProvider 根内（如第二块存储上的自定义目录），退化为拷贝到
+    /// cache 后分享副本，保证"打开"始终可用。
     private fun openWithViewer(path: String) {
         val file = File(path)
         if (!file.exists()) {
             throw IllegalArgumentException("File does not exist: $path")
         }
-        val uri = FileProvider.getUriForFile(this, "$packageName.fileprovider", file)
+        val uri = try {
+            FileProvider.getUriForFile(this, "$packageName.fileprovider", file)
+        } catch (e: IllegalArgumentException) {
+            val cacheCopy = File(cacheDir, "open/${file.name}")
+            cacheCopy.parentFile?.mkdirs()
+            file.copyTo(cacheCopy, overwrite = true)
+            FileProvider.getUriForFile(this, "$packageName.fileprovider", cacheCopy)
+        }
         val ext = file.extension.lowercase()
         val mime = MimeTypeMap.getSingleton().getMimeTypeFromExtension(ext)
             ?: "application/octet-stream"
