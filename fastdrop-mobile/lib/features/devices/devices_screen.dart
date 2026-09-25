@@ -819,10 +819,31 @@ class _DevicesScreenState extends ConsumerState<DevicesScreen>
         status != MultiConnectionStatus.disconnected) {
       return;
     }
-    // Session 过期不自动重连——需要用户重新配对
-    if (connState.sessionExpired) return;
+    // Session 过期不直接放弃——mDNS 重新发现配对设备时自动重配对
+    // （信任设备 + 对端免确认 = 无感恢复会话）。
     final activeDevice = connState.activeDevice;
     if (activeDevice == null) return;
+    if (connState.sessionExpired) {
+      DiscoveredDevice? found;
+      for (final d in devices) {
+        if (d.deviceName == activeDevice.name ||
+            d.baseUrl == activeDevice.serverBaseUrl) {
+          found = d;
+          break;
+        }
+      }
+      if (found == null) return;
+      if (_lastAutoReconnect != null &&
+          DateTime.now().difference(_lastAutoReconnect!) <
+              const Duration(seconds: 30)) {
+        return;
+      }
+      _lastAutoReconnect = DateTime.now();
+      unawaited(ref
+          .read(multiDeviceConnectionProvider.notifier)
+          .autoRepairSession(activeDevice.id, found));
+      return;
+    }
 
     // 在发现的设备中查找匹配项（name 匹配可容忍 IP 变化）
     DiscoveredDevice? found;

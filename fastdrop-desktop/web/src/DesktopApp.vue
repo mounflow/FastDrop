@@ -114,9 +114,18 @@ const peerPool = usePeerPool({
   },
   onAuthFailed: (peerId) => {
     const name = peerNameFor(peerId)
+    const deadPeer = peerViews.value.find((item) => item.id === peerId)
     incomingOffers.value = incomingOffers.value.filter((offer) => offer.peerId !== peerId)
     peerPool.removePeer(peerId)
-    uploadStatus.value = `${name} 会话已失效，请重新添加设备`
+    // 信任设备自动重配对（免确认模式）：本机作为客户端连对端 server 的
+    // 会话失效后，自动重走 pair/discover——对端若开启确认仍会弹出确认框，
+    // 关闭则无感恢复。local-session 会话属于手机，须由手机端重新发起。
+    if (deadPeer?.role === 'remote-server') {
+      uploadStatus.value = `${name} 会话已失效，正在自动重新配对…`
+      void autoRepairRemotePair(deadPeer.baseUrl, name)
+    } else {
+      uploadStatus.value = `${name} 会话已失效，请重新添加设备`
+    }
   },
 })
 
@@ -484,6 +493,44 @@ async function connectNearby(device: NearbyDevice) {
 }
 
 // --------------------------------------------------------------------------
+
+// 信任设备自动重配对：remote-server 会话失效后自动重走 pair/discover。
+// 单次尝试，不循环——失败则提示用户手动重新添加设备。
+async function autoRepairRemotePair(baseUrl: string, name: string) {
+  try {
+    const request = await requestDiscoverPair(baseUrl, {
+      deviceId: localClientId(),
+      deviceName: serverName.value,
+      platform: 'windows',
+      appVersion: '1.0.0',
+    })
+    const deadline = Date.now() + 35_000
+    while (Date.now() < deadline) {
+      await new Promise((resolve) => setTimeout(resolve, 800))
+      const result = await pollPairStatus(request.requestId, baseUrl)
+      if (result.status === 'accepted' && 'session' in result) {
+        const accepted = result as PairAccepted
+        const remote = await getServerInfo(baseUrl)
+        peerPool.addPeer({
+          id: `${remote.deviceId}@${baseUrl}`,
+          name: accepted.server.deviceName || remote.name,
+          platform: accepted.server.platform || remote.platform,
+          baseUrl,
+          sessionId: accepted.session.sessionId,
+          accessToken: accepted.session.accessToken,
+          websocketUrl: accepted.session.websocketUrl,
+          role: 'remote-server',
+        })
+        uploadStatus.value = `已自动重新连接 ${accepted.server.deviceName || remote.name}`
+        return
+      }
+      if (result.status === 'rejected' || result.status === 'expired') break
+    }
+    uploadStatus.value = `${name} 会话已失效，请重新添加设备`
+  } catch (error) {
+    uploadStatus.value = `${name} 自动重连失败：${readableError(error)}`
+  }
+}
 
 async function connectRemotePeer() {
   const input = remoteAddress.value.trim()

@@ -1,6 +1,8 @@
 import 'dart:async';
+import 'dart:convert';
 import 'dart:io';
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import 'package:fastdrop_mobile/core/errors/app_error.dart';
@@ -321,6 +323,69 @@ class MultiDeviceConnectionNotifier
     if (device == null) return;
     disconnectDevice(id!);
     await connectDevice(device, select: state.selectedDeviceId == id);
+  }
+
+  /// 会话失效后的自动重配对（信任设备）：mDNS 重新发现该设备时，走
+  /// pair/discover——对端"免确认"默认下会自动接受，无需用户操作即可
+  /// 恢复会话并重连。单次尝试，失败静默（下次 mDNS 发现再触发）。
+  Future<void> autoRepairSession(
+      String deviceId, DiscoveredDevice discovered) async {
+    final peer = state.peer(deviceId);
+    if (peer == null) return;
+    final device = peer.device;
+
+    final myDeviceId = await DeviceIdManager.getDeviceId();
+    final myDeviceName = DeviceIdManager.anonymousDeviceName(myDeviceId);
+
+    final client = FastDropHttpClient(baseUrl: discovered.baseUrl);
+    try {
+      final createResp = await client.post(
+        '/api/v1/pair/discover',
+        body: {
+          'deviceId': myDeviceId,
+          'deviceName': myDeviceName,
+          'platform': 'android',
+        },
+      );
+      final created = jsonDecode(createResp.body) as Map<String, dynamic>;
+      final requestId = created['requestId'] as String?;
+
+      Map<String, dynamic>? session;
+      final deadline = DateTime.now().add(const Duration(seconds: 35));
+      while (requestId != null && DateTime.now().isBefore(deadline)) {
+        await Future<void>.delayed(const Duration(milliseconds: 800));
+        final pollResp = await client.get('/api/v1/pair/requests/$requestId');
+        final poll = jsonDecode(pollResp.body) as Map<String, dynamic>;
+        final status = poll['status'] as String?;
+        if (status == 'accepted' && poll['session'] is Map<String, dynamic>) {
+          session =
+              (poll['session'] as Map<String, dynamic>).cast<String, dynamic>();
+          break;
+        }
+        if (status == 'rejected' || status == 'expired') return;
+      }
+      if (session == null) return;
+
+      // PC 会话 TTL 为 12 小时（spec §7.1）；对端未回过期时间时按此兜底。
+      final updated = Device(
+        id: discovered.baseUrl,
+        name: device.name,
+        serverBaseUrl: discovered.baseUrl,
+        sessionId: session['sessionId'] as String,
+        accessToken: session['accessToken'] as String,
+        lastSeen: DateTime.now(),
+        platform: device.platform,
+        expiresAt: DateTime.now().add(const Duration(hours: 12)),
+      );
+      final store = _ref.read(deviceStoreProvider);
+      await store.removeDevice(device.id);
+      await store.saveDevice(updated);
+      await connectDevice(updated, select: state.selectedDeviceId == deviceId);
+    } catch (error) {
+      debugPrint('[MultiDevice] auto repair session failed: $error');
+    } finally {
+      client.dispose();
+    }
   }
 
   /// M20: mDNS 重新发现了已配对设备的新地址（IP 变了）→ 持久化新地址并
