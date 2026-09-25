@@ -7,6 +7,7 @@ import {
   acceptPair,
   fetchQR,
   getHealth,
+  getNearbyDevices,
   getServerInfo,
   getSettings,
   listPairRequests,
@@ -15,6 +16,7 @@ import {
   requestDiscoverPair,
   localServiceOrigin,
   updateSettings,
+  type NearbyDevice,
   type PendingPairRequest,
 } from './api'
 import {
@@ -448,6 +450,41 @@ async function handleReject(requestId: string) {
   showPairDialog.value = pendingRequests.value.length > 0
 }
 
+// --- 问题 10: LAN discovery ----------------------------------------------
+
+const nearbyDevices = ref<NearbyDevice[]>([])
+const scanningNearby = ref(false)
+const nearbyStatus = ref('')
+
+async function scanNearby() {
+  if (scanningNearby.value) return
+  scanningNearby.value = true
+  nearbyStatus.value = '正在扫描局域网…'
+  try {
+    nearbyDevices.value = await getNearbyDevices()
+    nearbyStatus.value = nearbyDevices.value.length
+      ? `发现 ${nearbyDevices.value.length} 台设备，点击连接`
+      : '未发现附近设备，可让对端打开 FastDrop 后重试，或直接输入 IP'
+  } catch (error) {
+    nearbyDevices.value = []
+    nearbyStatus.value = readableError(error)
+  } finally {
+    scanningNearby.value = false
+  }
+}
+
+function openConnectPanel() {
+  showConnectPanel.value = true
+  void scanNearby()
+}
+
+async function connectNearby(device: NearbyDevice) {
+  remoteAddress.value = `${device.host}:${device.port}`
+  await connectRemotePeer()
+}
+
+// --------------------------------------------------------------------------
+
 async function connectRemotePeer() {
   const input = remoteAddress.value.trim()
   if (!input || remotePairing.value) return
@@ -752,7 +789,7 @@ onUnmounted(() => {
 
         <div class="section-heading">
           <div><h2>附近设备</h2><p>可多选，同时发送给多台设备</p></div>
-          <button class="text-button" @click="showConnectPanel = true"><AppIcon name="plus" :size="17" />添加设备</button>
+          <button class="text-button" @click="openConnectPanel"><AppIcon name="plus" :size="17" />添加设备</button>
         </div>
 
         <div v-if="peerViews.length" class="device-grid">
@@ -773,7 +810,7 @@ onUnmounted(() => {
         <div v-else class="empty-state compact">
           <div class="empty-icon"><AppIcon name="wifi" :size="28" /></div>
           <div><h3>还没有可发送的设备</h3><p>让另一台设备打开 FastDrop，然后扫码或输入局域网 IP 连接。</p></div>
-          <button class="primary-button" @click="showConnectPanel = true">添加设备</button>
+          <button class="primary-button" @click="openConnectPanel">添加设备</button>
         </div>
 
         <div class="selection-summary">
@@ -900,6 +937,22 @@ onUnmounted(() => {
               <button class="primary-button full" :disabled="remotePairing" @click="connectRemotePeer">{{ remotePairing ? '连接中…' : '连接设备' }}</button>
               <span v-if="remotePairStatus" class="inline-notice">{{ remotePairStatus }}</span>
             </div>
+          </div>
+          <div class="nearby-panel">
+            <div class="nearby-heading">
+              <h3>附近设备</h3>
+              <button class="text-button" :disabled="scanningNearby" @click="scanNearby">{{ scanningNearby ? '扫描中…' : '重新扫描' }}</button>
+            </div>
+            <span v-if="nearbyStatus" class="inline-notice">{{ nearbyStatus }}</span>
+            <ul v-if="nearbyDevices.length" class="nearby-list">
+              <li v-for="device in nearbyDevices" :key="device.deviceId">
+                <button class="nearby-device" :disabled="remotePairing" @click="connectNearby(device)">
+                  <AppIcon :name="device.platform === 'windows' ? 'computer' : 'phone'" :size="18" />
+                  <strong>{{ device.deviceName }}</strong>
+                  <small>{{ device.host }}:{{ device.port }} · {{ device.platform }}</small>
+                </button>
+              </li>
+            </ul>
           </div>
         </section>
       </div>

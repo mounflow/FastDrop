@@ -61,6 +61,18 @@ func main() {
 	if err != nil {
 		log.Fatalf("storage: %v", err)
 	}
+
+	// Startup sweep: transfers left non-terminal by a previous run can never
+	// resume (their sessions were just revoked), so fail them and drop their
+	// temp files instead of leaving zombie "transferring" rows (问题 7④).
+	if orphaned, err := db.ListNonTerminalTransfers(context.Background()); err == nil && len(orphaned) > 0 {
+		for _, t := range orphaned {
+			_ = db.UpdateTransferStatus(context.Background(), t.ID, string(transfer.StatusFailed), t.TransferredBytes, "SERVER_RESTART", "server restarted mid-transfer")
+			_ = store.CleanupTransfer(t.ID)
+		}
+		log.Printf("[startup] failed %d transfer(s) orphaned by the previous run", len(orphaned))
+	}
+
 	pairMgr := pairing.NewManager(time.Duration(cfg.Security.PairTokenTTLSeconds) * time.Second)
 	sessMgr := session.NewManager(db, time.Duration(cfg.Security.SessionTTLSeconds)*time.Second)
 	wsHub := websocket.NewHub(&websocket.SessionValidator{M: sessMgr})

@@ -82,17 +82,29 @@ func (r *Router) handleTransferFailed(c *Client, env *Envelope) {
 	var p struct {
 		TransferID string `json:"transferId"`
 		Reason     string `json:"reason"`
+		Code       string `json:"code"`
 	}
 	if err := json.Unmarshal(env.Payload, &p); err != nil || p.TransferID == "" {
 		return
 	}
+	// Ownership is still enforced, but the direction restriction is gone:
+	// a sender reporting its own failed upload (client_to_server) must reach
+	// the server that owns the authoritative transfer row, otherwise inbound
+	// transfers linger as "transferring" forever (问题 7②).
 	t, err := r.DB.GetTransfer(context.Background(), p.TransferID)
-	if err != nil || t.SessionID != c.sessionID || t.Direction != string(transfer.DirServerToClient) {
-		r.sendError(c, "TRANSFER_NOT_FOUND", "no outbound transfer for this session")
+	if err != nil || t.SessionID != c.sessionID {
+		r.sendError(c, "TRANSFER_NOT_FOUND", "no such transfer for this session")
 		return
 	}
+	if transfer.Status(t.Status).IsTerminal() {
+		return // already settled; a late failure report is a no-op
+	}
+	code := p.Code
+	if code == "" {
+		code = "INTERNAL_ERROR"
+	}
 	_ = r.DB.UpdateTransferStatus(
-		context.Background(), p.TransferID, string(transfer.StatusFailed), t.TransferredBytes, "INTERNAL_ERROR", p.Reason,
+		context.Background(), p.TransferID, string(transfer.StatusFailed), t.TransferredBytes, code, p.Reason,
 	)
 	_ = r.Storage.CleanupTransfer(p.TransferID)
 	r.pushTransferEvent(c.sessionID, MsgTransferFailed, map[string]any{

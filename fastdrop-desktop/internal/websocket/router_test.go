@@ -590,3 +590,50 @@ func TestRouterFileOfferGuardsState(t *testing.T) {
 		t.Errorf("status = %s, want created (unchanged)", tr.Status)
 	}
 }
+
+// 问题 7②: an inbound (client_to_server) sender must be able to report its
+// own failure so the authoritative row does not linger as "transferring".
+func TestRouterTransferFailedAcceptsInbound(t *testing.T) {
+	r, _, db := newTestRouter(t)
+	ctx := context.Background()
+
+	tm := transfer.NewManager(db, 4*1024*1024, nil)
+	res, err := tm.Create(ctx, "s1", "d1", transfer.DirClientToServer, "o", []transfer.FileSpec{
+		{ClientFileID: "c1", Name: "f.txt", Size: 10},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	tid := res.TransferID
+	if err := db.UpdateTransferStatus(ctx, tid, string(transfer.StatusTransferring), 4, "", ""); err != nil {
+		t.Fatal(err)
+	}
+
+	payload, _ := json.Marshal(map[string]string{
+		"transferId": tid,
+		"code":       "TRANSFER_FAILED",
+		"reason":     "sender gave up",
+	})
+
+	// Another session must not be able to fail it (ownership check).
+	other := fakeClient("s2", "d2")
+	r.OnMessage(other, &Envelope{Type: MsgTransferFailed, Payload: payload})
+	if tr, _ := db.GetTransfer(ctx, tid); tr.Status != string(transfer.StatusTransferring) {
+		t.Fatalf("status after foreign report = %s, want unchanged", tr.Status)
+	}
+
+	// The owning session's report settles the transfer as failed.
+	c := fakeClient("s1", "d1")
+	r.OnMessage(c, &Envelope{Type: MsgTransferFailed, Payload: payload})
+
+	tr, _ := db.GetTransfer(ctx, tid)
+	if tr.Status != string(transfer.StatusFailed) {
+		t.Errorf("status = %s, want failed", tr.Status)
+	}
+	if tr.ErrorCode != "TRANSFER_FAILED" {
+		t.Errorf("error_code = %q, want TRANSFER_FAILED", tr.ErrorCode)
+	}
+	// Note: pushTransferEvent goes through the hub, which only delivers to
+	// registered real connections — a fakeClient is not registered, so the
+	// WS event itself cannot be asserted here (the DB row is the contract).
+}

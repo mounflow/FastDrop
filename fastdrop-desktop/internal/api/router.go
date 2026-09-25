@@ -86,6 +86,9 @@ func New(s *Server) http.Handler {
 	mux.HandleFunc("PUT /api/v1/settings", withLocalDesktop(s.withSizeLimit(64*1024, s.handleUpdateSettings)))
 	mux.HandleFunc("GET /api/v1/local/transfers", withLocalDesktop(s.handleListLocalTransferHistory))
 
+	// --- LAN discovery (local PC only, 问题 10) ---
+	mux.HandleFunc("GET /api/v1/discovery/nearby", withLocalDesktop(s.handleDiscoveryNearby))
+
 	// --- current pair token (for the QR code) ---
 	// Desktop-only + rate limited: the QR payload carries a live pair token,
 	// so LAN peers must not be able to fish for it.

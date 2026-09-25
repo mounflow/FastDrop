@@ -222,12 +222,18 @@ class TransferService {
             batchResult.firstError != null && _isSessionError(batchResult.firstError!)
                 ? ErrorCodes.sessionExpired
                 : ErrorCodes.transferFailed;
+        final message = '${batchResult.failedCount}/${fileTasks.length} 个文件失败';
         onStateChange?.call(
           createResult.transferId,
           'failed',
           errorCode: errorCode,
-          errorMessage:
-              '${batchResult.failedCount}/${fileTasks.length} 个文件失败',
+          errorMessage: message,
+        );
+        // 问题 7②：主动告知 PC，避免其权威传输行永久停留在"传输中"。
+        _notifyPeerTransferFailed(
+          createResult.transferId,
+          errorCode,
+          message,
         );
         return;
       }
@@ -245,6 +251,14 @@ class TransferService {
           errorCode: _errorCodeFor(e),
           errorMessage: e.toString(),
         );
+        // 问题 7②：任务已在服务端创建过才上报（否则服务端没有这一行）。
+        if (callbackTransferId != batchOfferId) {
+          _notifyPeerTransferFailed(
+            callbackTransferId,
+            _errorCodeFor(e),
+            e.toString(),
+          );
+        }
       }
       rethrow;
     } finally {
@@ -419,6 +433,22 @@ class TransferService {
   /// Release a paused upload or download so it continues from its next chunk.
   void resumeTransfer(String identifier) {
     _pauseControllerFor(identifier)?.resume();
+  }
+
+  /// 问题 7②：把批次失败上报给 PC（fire-and-forget）。PC 端据此把权威
+  /// 传输行置为 failed 并清理临时文件；socket 已断时静默丢弃——那种情况
+  /// 由 PC 端的断线宽限兜底（H7）。
+  void _notifyPeerTransferFailed(String transferId, String code, String message) {
+    try {
+      wsClient?.send({
+        'version': 1,
+        'type': 'transfer.failed',
+        'timestamp': DateTime.now().millisecondsSinceEpoch,
+        'payload': {'transferId': transferId, 'code': code, 'reason': message},
+      });
+    } catch (_) {
+      // Best-effort：本端状态已正确，上报失败不影响本地流程。
+    }
   }
 
   /// Cancel an active transfer and clean up any temp files.

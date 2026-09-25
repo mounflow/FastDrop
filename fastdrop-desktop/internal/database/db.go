@@ -362,6 +362,34 @@ func (d *DB) ListTransfersForSession(ctx context.Context, sessionID string) ([]T
 	return out, rows.Err()
 }
 
+// ListNonTerminalTransfers returns every transfer whose status is not
+// terminal, across all sessions. Used by the startup sweep: transfers left
+// active by a previous server run can never resume (sessions are revoked on
+// restart), so they must be failed instead of lingering as zombies (问题 7④).
+func (d *DB) ListNonTerminalTransfers(ctx context.Context) ([]TransferRow, error) {
+	rows, err := d.QueryContext(ctx, `SELECT id, session_id, peer_device_id, direction, status, total_files, total_bytes, transferred_bytes, created_at, started_at, completed_at, error_code, error_message FROM transfers WHERE status NOT IN ('completed', 'failed', 'cancelled', 'rejected') ORDER BY created_at`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []TransferRow
+	for rows.Next() {
+		var t TransferRow
+		var sessionID, errCode, errMsg sql.NullString
+		var startedAt, completedAt sql.NullInt64
+		if err := rows.Scan(&t.ID, &sessionID, &t.PeerDeviceID, &t.Direction, &t.Status, &t.TotalFiles, &t.TotalBytes, &t.TransferredBytes, &t.CreatedAt, &startedAt, &completedAt, &errCode, &errMsg); err != nil {
+			return nil, err
+		}
+		t.SessionID = sessionID.String
+		t.StartedAt = nullInt64Ptr(startedAt)
+		t.CompletedAt = nullInt64Ptr(completedAt)
+		t.ErrorCode = errCode.String
+		t.ErrorMessage = errMsg.String
+		out = append(out, t)
+	}
+	return out, rows.Err()
+}
+
 // ListTransferHistory returns every persisted transfer, across expired and
 // revoked sessions, with the peer name captured from the devices table.
 func (d *DB) ListTransferHistory(ctx context.Context) ([]TransferHistoryRow, error) {

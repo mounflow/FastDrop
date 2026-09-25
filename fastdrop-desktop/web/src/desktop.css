@@ -357,3 +357,46 @@ button:focus-visible, input:focus-visible, select:focus-visible { outline: 3px s
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { scroll-behavior: auto !important; transition-duration: 0.01ms !important; animation-duration: 0.01ms !important; }
 }
+
+/* Œ Ã‚ 10: nearby device discovery in the connect modal */
+.nearby-panel {
+  margin-top: 14px;
+  padding-top: 14px;
+  border-top: 1px solid #eceef2;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.nearby-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+.nearby-heading h3 {
+  margin: 0;
+  font-size: 15px;
+}
+.nearby-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.nearby-device {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  padding: 9px 12px;
+  border: 1px solid #e3e6ec;
+  border-radius: 10px;
+  background: #fafbfc;
+  cursor: pointer;
+  text-align: left;
+}
+.nearby-device:hover { border-color: #c9d4f8; background: #f4f6fd; }
+.nearby-device:disabled { opacity: 0.55; cursor: default; }
+.nearby-device strong { font-size: 14px; color: #23272e; }
+.nearby-device small { color: #8a8f98; margin-left: auto; }

@@ -291,6 +291,24 @@ async function fetchOrNetworkError(url: string, init?: RequestInit): Promise<Res
   }
 }
 
+export interface NearbyDevice {
+  deviceId: string
+  deviceName: string
+  platform: string
+  protocol: number
+  host: string
+  port: number
+  viaMdns: boolean
+}
+
+/// 问题 10: scan the LAN for FastDrop peers (desktop-only endpoint, no auth).
+export async function getNearbyDevices(): Promise<NearbyDevice[]> {
+  const resp = await fetchOrNetworkError(localUrl('/api/v1/discovery/nearby'))
+  if (!resp.ok) throw new HttpStatusError(`discovery failed: ${resp.status}`, resp.status)
+  const body = await asJson<{ devices?: NearbyDevice[] }>(resp)
+  return body.devices ?? []
+}
+
 export async function getServerInfo(baseUrl = ''): Promise<ServerInfo> {
   const root = baseUrl.replace(/\/$/, '')
   const response = await fetchOrNetworkError(`${root}/api/v1/server/info`)
