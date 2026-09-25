@@ -283,15 +283,15 @@ WHERE status IN ('created','waiting_accept','preparing','transferring','paused',
 
 **建议修复顺序：** P0 = H4（安全）→ H5/H6（数据损坏）→ H1/H2/H3（大文件与副本损坏）→ H7（与 #7 同补丁）→ H8/H9/H10；P1 = M 系按端分组修；P2 = L 系随手清理。
 
-## 问题 12：传输记录页面（HistoryScreen）无任何入口，用户无法查看历史
-
 > **发现日期**：2026-09-25（用户反馈"手机传输记录里没有刚发的照片"）
 >
 > **现状**：记录实际已写入本地历史库（SharedPreferences `fastdrop.transfer_history.v1`，含落盘路径），但 `HistoryScreen`（`/history`）在全 App 中没有任何导航指向；底部「传输」标签（TransferScreen）只展示内存中的进行中批次，传输完成即消失、重启即清空——用户感知为"记录丢了"。
 >
-> **修复**：传输页 AppBar 增加「传输记录」入口按钮（`transfer_screen.dart`）。另发现：默认落盘路径为应用私有目录（`/data/user/0/.../app_flutter/FastDrop/`），相册不可见，仅能经历史页"打开文件"查看——是否改为公共目录（相册可见）待产品决策（关联问题 1 的 .nomedia 逻辑）。
+> **修复**：传输页 AppBar 增加「传输记录」入口按钮（`transfer_screen.dart`）。
 >
-> **优先级**：中（入口缺失，已修）
+> **关联产品决策（2026-09-25，用户选 B）**：默认落盘目录原为应用私有目录（相册不可见、只能经 App 内"打开"访问）。已改为 **Android 默认经 MediaStore 落盘公共媒体目录**：图片 → `Pictures/FastDrop`（相册可见），视频 → `Movies/FastDrop`，其他 → `Downloads/FastDrop`；scoped storage 安全、重名自动追加 "(1)"、失败回退应用内目录；savedPath 记录 DATA 真实路径，"打开文件"经 external-path 根直接可用（`2519500`）。
+>
+> **优先级**：中（入口缺失 + 落盘可见性，已修）
 
 ---
 
