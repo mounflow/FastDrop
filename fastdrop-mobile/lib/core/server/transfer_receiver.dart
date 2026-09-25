@@ -19,6 +19,7 @@ class ServerFileTask {
     required this.name,
     required this.size,
     this.sha256,
+    this.mimeType,
   });
 
   final String fileId;
@@ -26,6 +27,7 @@ class ServerFileTask {
   final String name;
   final int size;
   final String? sha256;
+  final String? mimeType;
 
   int get totalChunks => (size / FileUtils.chunkSize).ceil();
 
@@ -324,6 +326,7 @@ class TransferReceiver {
         name: FileUtils.sanitizeFileName(fm['name'] as String? ?? 'unnamed'),
         size: size,
         sha256: fm['sha256'] as String?,
+        mimeType: fm['mimeType'] as String?,
       ));
     }
 
@@ -536,7 +539,11 @@ class TransferReceiver {
 
       // Atomic rename to downloads dir.
       final finalPath =
-          await FileUtils.movePartToFinal(file.partPath!, file.name);
+          await FileUtils.movePartToFinal(
+          file.partPath!,
+          file.name,
+          mimeType: file.mimeType,
+        );
       file.finalPath = finalPath;
       file.status = 'completed';
 

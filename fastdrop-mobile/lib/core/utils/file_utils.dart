@@ -188,10 +188,42 @@ class FileUtils {
   }
 
   /// Atomically move a `.part` file to the final destination.
+  ///
+  /// 产品决策 B：Android 上默认经 MediaStore 落盘到**公共媒体目录**
+  /// （图片 → Pictures/FastDrop 相册可见，视频 → Movies/FastDrop，
+  /// 其他 → Downloads/FastDrop），重名由 MediaStore 自动追加 "(1)"。
+  /// 用户设置了自定义目录、或 MediaStore 失败时，退回应用内目录的
+  /// 旧逻辑（rename + 跨卷拷贝 fallback），保证接收不失败。
   static Future<String> movePartToFinal(
     String partPath,
-    String originalFileName,
-  ) async {
+    String originalFileName, {
+    String? mimeType,
+  }) async {
+    if (Platform.isAndroid) {
+      final custom = await getCustomDownloadDir();
+      if (custom == null || custom.isEmpty) {
+        try {
+          final publicPath = await saveToPublicStorage(
+            sourcePath: partPath,
+            fileName: originalFileName,
+            mimeType: mimeType ?? _mimeTypeForFileName(originalFileName),
+          );
+          // 公共目录落盘成功，.part 已无用；清理空的传输临时目录。
+          try {
+            await File(partPath).delete();
+          } catch (_) {}
+          final transferDir = File(partPath).parent;
+          try {
+            if (transferDir.listSync().isEmpty) transferDir.deleteSync();
+          } catch (_) {}
+          return publicPath;
+        } catch (e) {
+          // 极少发生（存储满/MediaStore 异常）：退回应用内目录，保证接收成功。
+          // （静默回退即可——接收本身仍然成功，路径照常入历史记录。）
+        }
+      }
+    }
+
     final downloadsDir = await getDownloadsDir();
     final sanitized = sanitizeFileName(originalFileName);
     var finalPath =
@@ -217,6 +249,51 @@ class FileUtils {
     }
 
     return finalPath;
+  }
+
+  /// B(方案)：经 MediaStore 写入公共媒体目录，返回落盘路径（DATA 列）。
+  static Future<String> saveToPublicStorage({
+    required String sourcePath,
+    required String fileName,
+    required String mimeType,
+  }) async {
+    final value = await const MethodChannel('fastdrop/platform').invokeMethod<String>(
+      'saveToPublicStorage',
+      {
+        'sourcePath': sourcePath,
+        'fileName': fileName,
+        'mimeType': mimeType,
+      },
+    );
+    if (value == null || value.isEmpty) {
+      throw Exception('saveToPublicStorage returned no path');
+    }
+    return value;
+  }
+
+  /// 按扩展名推断 MIME 类型（MediaStore 集合归属与打开行为都依赖它）。
+  static String _mimeTypeForFileName(String fileName) {
+    final ext = fileName.contains('.')
+        ? fileName.substring(fileName.lastIndexOf('.') + 1).toLowerCase()
+        : '';
+    const map = {
+      'png': 'image/png',
+      'jpg': 'image/jpeg',
+      'jpeg': 'image/jpeg',
+      'gif': 'image/gif',
+      'webp': 'image/webp',
+      'bmp': 'image/bmp',
+      'heic': 'image/heic',
+      'mp4': 'video/mp4',
+      'mov': 'video/quicktime',
+      'mkv': 'video/x-matroska',
+      'mp3': 'audio/mpeg',
+      'wav': 'audio/wav',
+      'pdf': 'application/pdf',
+      'txt': 'text/plain',
+      'zip': 'application/zip',
+    };
+    return map[ext] ?? 'application/octet-stream';
   }
 
   /// Stream-copy a `.part` file to [finalPath] (cross-volume rename fallback).

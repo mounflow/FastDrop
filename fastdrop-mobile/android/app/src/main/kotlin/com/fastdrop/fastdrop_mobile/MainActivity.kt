@@ -1,15 +1,19 @@
 package com.fastdrop.fastdrop_mobile
 
 import android.Manifest
+import android.content.ContentValues
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.net.ConnectivityManager
 import android.net.NetworkCapabilities
+import android.net.Uri
 import android.net.wifi.WifiInfo
 import android.net.wifi.WifiManager
+import android.os.Environment
 import android.os.PowerManager
 import android.os.StatFs
+import android.provider.MediaStore
 import android.provider.Settings
 import android.webkit.MimeTypeMap
 import androidx.core.app.ActivityCompat
@@ -47,6 +51,22 @@ class MainActivity : FlutterActivity() {
                     "stopKeepAlive" -> {
                         FastDropKeepAliveService.stop(applicationContext)
                         result.success(null)
+                    }
+                    "saveToPublicStorage" -> {
+                        // 产品决策 B：接收文件默认落盘到公共媒体目录（scoped
+                        // storage 安全）。图片/视频进相册集合，其他进 Downloads；
+                        // MediaStore 对重名自动追加 "(1)"（对齐 rename 策略）。
+                        val fileName = call.argument<String>("fileName")!!
+                        val mimeType = call.argument<String>("mimeType")
+                            ?: "application/octet-stream"
+                        val sourcePath = call.argument<String>("sourcePath")!!
+                        try {
+                            result.success(
+                                saveToPublicStorage(fileName, mimeType, sourcePath)
+                            )
+                        } catch (e: Exception) {
+                            result.error("SAVE_FAILED", e.message, null)
+                        }
                     }
                     "openFile" -> {
                         val path = call.argument<String>("path")
@@ -92,6 +112,63 @@ class MainActivity : FlutterActivity() {
                     else -> result.notImplemented()
                 }
             }
+    }
+
+    /// 产品决策 B：经 MediaStore 把 .part 内容写入公共媒体目录。
+    /// 图片 → Pictures/FastDrop（相册可见），视频 → Movies/FastDrop，
+    /// 其他 → Downloads/FastDrop。返回实际落盘路径（DATA 列）。
+    private fun saveToPublicStorage(fileName: String, mimeType: String, sourcePath: String): String {
+        val source = File(sourcePath)
+        if (!source.exists()) {
+            throw IllegalArgumentException("Source part file does not exist: $sourcePath")
+        }
+        val isImage = mimeType.startsWith("image/")
+        val isVideo = mimeType.startsWith("video/")
+        val collection: Uri = when {
+            isImage -> MediaStore.Images.Media.EXTERNAL_CONTENT_URI
+            isVideo -> MediaStore.Video.Media.EXTERNAL_CONTENT_URI
+            else -> MediaStore.Downloads.EXTERNAL_CONTENT_URI
+        }
+        val relativePath = when {
+            isImage -> Environment.DIRECTORY_PICTURES + "/FastDrop"
+            isVideo -> Environment.DIRECTORY_MOVIES + "/FastDrop"
+            else -> Environment.DIRECTORY_DOWNLOADS + "/FastDrop"
+        }
+        val resolver = contentResolver
+        val values = ContentValues().apply {
+            put(MediaStore.MediaColumns.DISPLAY_NAME, fileName.substringAfterLast('/'))
+            put(MediaStore.MediaColumns.MIME_TYPE, mimeType)
+            if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.Q) {
+                put(MediaStore.MediaColumns.RELATIVE_PATH, relativePath)
+                put(MediaStore.MediaColumns.IS_PENDING, 1)
+            }
+        }
+        val uri = resolver.insert(collection, values)
+            ?: throw IllegalStateException("MediaStore insert failed")
+        try {
+            resolver.openOutputStream(uri)?.use { out ->
+                source.inputStream().use { input -> input.copyTo(out) }
+            } ?: throw IllegalStateException("MediaStore output stream is null")
+            if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.Q) {
+                values.clear()
+                values.put(MediaStore.MediaColumns.IS_PENDING, 0)
+                resolver.update(uri, values, null, null)
+            }
+        } catch (e: Exception) {
+            resolver.delete(uri, null, null)
+            throw e
+        }
+        // 查询 DATA 列得到真实落盘路径，供历史记录/打开文件使用。
+        val dataColumn = MediaStore.MediaColumns.DATA
+        resolver.query(
+            uri, arrayOf(dataColumn), null, null, null
+        )?.use { cursor ->
+            if (cursor.moveToFirst()) {
+                val data = cursor.getString(0)
+                if (!data.isNullOrEmpty()) return data
+            }
+        }
+        return relativePath + "/" + fileName.substringAfterLast('/')
     }
 
     /// L15: 用系统查看器打开已接收的文件。路径必须经 FileProvider 暴露，
