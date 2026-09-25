@@ -87,7 +87,9 @@ func New(s *Server) http.Handler {
 	mux.HandleFunc("GET /api/v1/local/transfers", withLocalDesktop(s.handleListLocalTransferHistory))
 
 	// --- current pair token (for the QR code) ---
-	mux.HandleFunc("GET /api/v1/pair/qr", s.handleCurrentQRPayload)
+	// Desktop-only + rate limited: the QR payload carries a live pair token,
+	// so LAN peers must not be able to fish for it.
+	mux.HandleFunc("GET /api/v1/pair/qr", withLocalDesktop(s.withPairRateLimit(s.handleCurrentQRPayload)))
 
 	return withRecover(withLANPeerCORS(mux))
 }
@@ -254,12 +256,8 @@ func withContext(r *http.Request, key, val any) *http.Request {
 }
 
 func clientIP(r *http.Request) string {
-	if h := r.Header.Get("X-Forwarded-For"); h != "" {
-		if i := strings.Index(h, ","); i > 0 {
-			return strings.TrimSpace(h[:i])
-		}
-		return strings.TrimSpace(h)
-	}
+	// RemoteAddr only. Trusting X-Forwarded-For would let any LAN peer
+	// spoof its address (rate-limit bypass, log pollution).
 	host := r.RemoteAddr
 	if i := strings.LastIndex(host, ":"); i > 0 {
 		host = host[:i]

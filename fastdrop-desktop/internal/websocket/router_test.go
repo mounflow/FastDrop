@@ -429,3 +429,164 @@ func TestFileMimeByID(t *testing.T) {
 		t.Error("fileMimeByID(c) should be empty")
 	}
 }
+
+// Insufficient disk space must reject the offer before any transfer task or
+// .part file is created (§18).
+func TestRouterFileOfferInsufficientStorage(t *testing.T) {
+	r, _, db := newTestRouter(t)
+	c := fakeClient("s1", "d1")
+
+	payload, _ := json.Marshal(FileOfferPayload{
+		OfferID: "offer-big",
+		Files: []FileOfferFile{
+			{ClientFileID: "cf1", Name: "huge.bin", Size: 1 << 62},
+		},
+	})
+	r.OnMessage(c, &Envelope{Type: MsgFileOffer, Payload: payload})
+
+	select {
+	case msg := <-c.send:
+		var reply Envelope
+		if err := json.Unmarshal(msg, &reply); err != nil {
+			t.Fatal(err)
+		}
+		if reply.Type != MsgError {
+			t.Fatalf("reply type = %s, want error", reply.Type)
+		}
+		var p map[string]any
+		if err := json.Unmarshal(reply.Payload, &p); err != nil {
+			t.Fatal(err)
+		}
+		if p["code"] != "INSUFFICIENT_STORAGE" {
+			t.Errorf("error code = %v, want INSUFFICIENT_STORAGE", p["code"])
+		}
+	case <-time.After(time.Second):
+		t.Fatal("no error reply received")
+	}
+
+	transfers, _ := db.ListTransfersForSession(context.Background(), "s1")
+	if len(transfers) != 0 {
+		t.Errorf("created %d transfer(s) despite insufficient storage", len(transfers))
+	}
+}
+
+// The accept/reject handlers must honour an explicit transferId field.
+func TestRouterFileOfferAcceptByTransferIdField(t *testing.T) {
+	r, _, db := newTestRouter(t)
+	ctx := context.Background()
+	c := fakeClient("s1", "d1")
+
+	offerPayload, _ := json.Marshal(FileOfferPayload{
+		OfferID: "offer-tid",
+		Files:   []FileOfferFile{{ClientFileID: "cf1", Name: "f.txt", Size: 10}},
+	})
+	r.OnMessage(c, &Envelope{Type: MsgFileOffer, Payload: offerPayload})
+	select {
+	case <-c.send: // drain transfer.created
+	case <-time.After(time.Second):
+		t.Fatal("no transfer.created reply")
+	}
+	transfers, _ := db.ListTransfersForSession(ctx, "s1")
+	if len(transfers) != 1 {
+		t.Fatalf("expected 1 transfer, got %d", len(transfers))
+	}
+	tid := transfers[0].ID
+	if tr, _ := db.GetTransfer(ctx, tid); tr.Status != string(transfer.StatusWaitingAccept) {
+		t.Fatalf("fresh offer status = %s, want waiting_accept", tr.Status)
+	}
+
+	payload, _ := json.Marshal(map[string]string{"transferId": tid})
+	r.OnMessage(c, &Envelope{Type: MsgFileOfferAccept, Payload: payload})
+
+	tr, _ := db.GetTransfer(ctx, tid)
+	if tr.Status != string(transfer.StatusPreparing) {
+		t.Errorf("after accept: status = %s, want preparing", tr.Status)
+	}
+}
+
+func TestRouterFileOfferRejectByTransferIdField(t *testing.T) {
+	r, _, db := newTestRouter(t)
+	ctx := context.Background()
+	c := fakeClient("s1", "d1")
+
+	offerPayload, _ := json.Marshal(FileOfferPayload{
+		OfferID: "offer-tid-r",
+		Files:   []FileOfferFile{{ClientFileID: "cf1", Name: "f.txt", Size: 10}},
+	})
+	r.OnMessage(c, &Envelope{Type: MsgFileOffer, Payload: offerPayload})
+	select {
+	case <-c.send: // drain transfer.created
+	case <-time.After(time.Second):
+		t.Fatal("no transfer.created reply")
+	}
+	transfers, _ := db.ListTransfersForSession(ctx, "s1")
+	tid := transfers[0].ID
+
+	payload, _ := json.Marshal(map[string]string{"transferId": tid, "reason": "not now"})
+	r.OnMessage(c, &Envelope{Type: MsgFileOfferReject, Payload: payload})
+
+	tr, _ := db.GetTransfer(ctx, tid)
+	if tr.Status != string(transfer.StatusRejected) {
+		t.Errorf("after reject: status = %s, want rejected", tr.Status)
+	}
+}
+
+// State-machine guards: accept only from created/waiting_accept, reject
+// only from waiting_accept — otherwise a 409-style error and no mutation.
+func TestRouterFileOfferGuardsState(t *testing.T) {
+	r, _, db := newTestRouter(t)
+	ctx := context.Background()
+
+	tm := transfer.NewManager(db, 4*1024*1024, nil)
+	res, _ := tm.Create(ctx, "s1", "d1", transfer.DirClientToServer, "o", []transfer.FileSpec{
+		{ClientFileID: "c1", Name: "f.txt", Size: 10},
+	})
+	tid := res.TransferID
+
+	// Accept while transferring → error, status unchanged.
+	db.UpdateTransferStatus(ctx, tid, string(transfer.StatusTransferring), 0, "", "")
+	c := fakeClient("s1", "d1")
+	payload, _ := json.Marshal(map[string]string{"transferId": tid})
+	r.OnMessage(c, &Envelope{Type: MsgFileOfferAccept, Payload: payload})
+	select {
+	case msg := <-c.send:
+		var reply Envelope
+		_ = json.Unmarshal(msg, &reply)
+		if reply.Type != MsgError {
+			t.Fatalf("accept while transferring: reply type = %s, want error", reply.Type)
+		}
+		var p map[string]any
+		_ = json.Unmarshal(reply.Payload, &p)
+		if p["code"] != "TRANSFER_NOT_ACTIVE" {
+			t.Errorf("accept while transferring: code = %v, want TRANSFER_NOT_ACTIVE", p["code"])
+		}
+	case <-time.After(time.Second):
+		t.Fatal("no error reply for accept while transferring")
+	}
+	if tr, _ := db.GetTransfer(ctx, tid); tr.Status != string(transfer.StatusTransferring) {
+		t.Errorf("status = %s, want transferring (unchanged)", tr.Status)
+	}
+
+	// Reject while merely created (not waiting_accept) → error, unchanged.
+	db.UpdateTransferStatus(ctx, tid, string(transfer.StatusCreated), 0, "", "")
+	payload, _ = json.Marshal(map[string]string{"transferId": tid, "reason": "no"})
+	r.OnMessage(c, &Envelope{Type: MsgFileOfferReject, Payload: payload})
+	select {
+	case msg := <-c.send:
+		var reply Envelope
+		_ = json.Unmarshal(msg, &reply)
+		if reply.Type != MsgError {
+			t.Fatalf("reject while created: reply type = %s, want error", reply.Type)
+		}
+		var p map[string]any
+		_ = json.Unmarshal(reply.Payload, &p)
+		if p["code"] != "TRANSFER_NOT_ACTIVE" {
+			t.Errorf("reject while created: code = %v, want TRANSFER_NOT_ACTIVE", p["code"])
+		}
+	case <-time.After(time.Second):
+		t.Fatal("no error reply for reject while created")
+	}
+	if tr, _ := db.GetTransfer(ctx, tid); tr.Status != string(transfer.StatusCreated) {
+		t.Errorf("status = %s, want created (unchanged)", tr.Status)
+	}
+}

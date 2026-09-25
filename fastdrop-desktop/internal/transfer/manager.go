@@ -59,6 +59,11 @@ type Manager struct {
 	speed    map[string]*SpeedWindow  // transferID -> speed window
 	throttle map[string]*Throttle     // transferID -> push throttle
 	cb       ProgressCallback
+
+	// chunkLocks serializes SetChunkBit per fileID: the DB bitmap update is
+	// a read-modify-write, so concurrent chunk PUTs for the same file must
+	// not interleave (lost-update race).
+	chunkLocks sync.Map // fileID -> *sync.Mutex
 }
 
 type fileProgress struct {
@@ -132,15 +137,23 @@ func (m *Manager) Create(ctx context.Context, sessionID, peerDeviceID string, di
 			return nil, err
 		}
 		out.Files = append(out.Files, CreatedFile{
-			FileID:       fileID,
-			ClientFileID: f.ClientFileID,
-			Name:         f.Name,
-			ChunkSize:    m.chunkSize,
-			TotalChunks:  total,
+			FileID:           fileID,
+			ClientFileID:     f.ClientFileID,
+			Name:             f.Name,
+			ChunkSize:        m.chunkSize,
+			TotalChunks:      total,
 			UploadURLPattern: fmt.Sprintf("/api/v1/transfers/%s/files/%s/chunks/{index}", transferID, fileID),
 		})
 	}
 	return out, nil
+}
+
+// chunkLockFor returns the per-file mutex guarding SetChunkBit. The lock
+// must never be held while holding m.mu (deadlock order: chunk lock → m.mu
+// only, never the reverse).
+func (m *Manager) chunkLockFor(fileID string) *sync.Mutex {
+	v, _ := m.chunkLocks.LoadOrStore(fileID, &sync.Mutex{})
+	return v.(*sync.Mutex)
 }
 
 // MarkChunkComplete records that chunk `idx` for fileID has been received.
@@ -151,7 +164,10 @@ func (m *Manager) MarkChunkComplete(ctx context.Context, transferID, fileID stri
 	if err != nil {
 		return 0, false, ErrFileNotFound
 	}
-	count, _, err := m.db.SetChunkBit(ctx, fileID, idx, f.TotalChunks)
+	lock := m.chunkLockFor(fileID)
+	lock.Lock()
+	count, isNewBit, err := m.db.SetChunkBit(ctx, fileID, idx, f.TotalChunks)
+	lock.Unlock()
 	if err != nil {
 		return 0, false, err
 	}
@@ -162,9 +178,12 @@ func (m *Manager) MarkChunkComplete(ctx context.Context, transferID, fileID stri
 		fp = &fileProgress{total: f.TotalBytes}
 		m.progress[fileID] = fp
 	}
-	fp.transferred += chunkBytes
-	if fp.transferred > fp.total {
-		fp.transferred = fp.total
+	if isNewBit {
+		// Duplicate PUT of an already-complete chunk must not double-count.
+		fp.transferred += chunkBytes
+		if fp.transferred > fp.total {
+			fp.transferred = fp.total
+		}
 	}
 	sw, hasSpeed := m.speed[transferID]
 	if !hasSpeed {
@@ -234,8 +253,11 @@ func (m *Manager) CompleteFile(ctx context.Context, transferID, fileID, shaActua
 		_ = m.db.UpdateTransferStatus(ctx, transferID, string(StatusVerifying), sumBytes, "", "")
 		return true, m.db.MarkTransferCompleted(ctx, transferID, sumBytes, database.Now())
 	}
-	// Otherwise, update aggregate progress on the parent transfer row.
-	return false, m.db.UpdateTransferStatus(ctx, transferID, string(StatusTransferring), sumBytes, "", "")
+	// Otherwise, update aggregate progress on the parent transfer row. Use
+	// the terminal-guarded variant so a concurrent completion cannot be
+	// stomped back to transferring by a straggler file finishing last.
+	_, err = m.db.UpdateTransferStatusIfNotTerminal(ctx, transferID, string(StatusTransferring), sumBytes, "", "")
+	return false, err
 }
 
 // Cancel moves a transfer to the cancelled state.

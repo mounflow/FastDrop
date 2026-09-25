@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -40,7 +41,7 @@ func TestAuthFirstMessageRule(t *testing.T) {
 			return
 		}
 		// Run HandleConn synchronously; it returns on close.
-		_ = h.HandleConn(ctx, conn, "1.2.3.4", nil)
+		_ = h.HandleConn(ctx, conn, "1.2.3.4", false, nil)
 	}))
 	defer srv.Close()
 
@@ -77,7 +78,7 @@ func TestAuthSuccessThenHeartbeat(t *testing.T) {
 		if err != nil {
 			return
 		}
-		_ = h.HandleConn(ctx, conn, "1.2.3.4", nil)
+		_ = h.HandleConn(ctx, conn, "1.2.3.4", false, nil)
 	}))
 	defer srv.Close()
 
@@ -125,7 +126,7 @@ func TestAuthFailedClosesConnection(t *testing.T) {
 		if err != nil {
 			return
 		}
-		_ = h.HandleConn(ctx, conn, "1.2.3.4", nil)
+		_ = h.HandleConn(ctx, conn, "1.2.3.4", false, nil)
 	}))
 	defer srv.Close()
 
@@ -153,4 +154,105 @@ func TestMaskID(t *testing.T) {
 	if maskID("1234567890") != "****7890" {
 		t.Errorf("mask = %s", maskID("1234567890"))
 	}
+}
+
+// --- §19 reconnect-grace: local (Vue UI) vs remote (phone) clients ---
+
+// graceTestHub returns a running hub with a short grace window and a counter
+// recording every OnGraceExpired firing.
+func graceTestHub(t *testing.T, grace time.Duration) (*Hub, context.CancelFunc, *int32) {
+	t.Helper()
+	h := NewHub(&fakeValidator{deviceID: "d1"})
+	h.gracePeriod = grace
+	var fired int32
+	h.OnGraceExpired = func(sessionID string) { atomic.AddInt32(&fired, 1) }
+	ctx, cancel := context.WithCancel(context.Background())
+	go h.Run(ctx)
+	t.Cleanup(cancel)
+	return h, cancel, &fired
+}
+
+func graceTestClient(sessionID string, local bool) *Client {
+	return &Client{sessionID: sessionID, local: local, send: make(chan []byte, 1)}
+}
+
+func hubClientCount(h *Hub, sessionID string) int {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	return len(h.clients[sessionID])
+}
+
+func waitForCond(t *testing.T, desc string, cond func() bool) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if cond() {
+			return
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Fatalf("condition not met in time: %s", desc)
+}
+
+func waitForNoFire(t *testing.T, fired *int32, quiet time.Duration) {
+	t.Helper()
+	time.Sleep(quiet)
+	if got := atomic.LoadInt32(fired); got != 0 {
+		t.Fatalf("OnGraceExpired fired %d time(s), want 0", got)
+	}
+}
+
+// Remote disconnect starts the grace window even though a local client is
+// still connected — and a local disconnect never starts one.
+func TestGraceOnlyTracksRemoteClients(t *testing.T) {
+	h, _, fired := graceTestHub(t, 60*time.Millisecond)
+
+	local := graceTestClient("s1", true)
+	remote := graceTestClient("s1", false)
+	h.register <- local
+	h.register <- remote
+	waitForCond(t, "both clients registered", func() bool { return hubClientCount(h, "s1") == 2 })
+
+	// Remote (phone) disconnects while the local Vue UI stays connected:
+	// grace must fire despite the local client.
+	h.unregister <- remote
+	waitForCond(t, "remote unregistered", func() bool { return hubClientCount(h, "s1") == 1 })
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if atomic.LoadInt32(fired) > 0 {
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	if got := atomic.LoadInt32(fired); got != 1 {
+		t.Fatalf("OnGraceExpired fired %d time(s) after remote disconnect, want 1", got)
+	}
+
+	// Local disconnect on a fresh session: no grace, no firing.
+	h2, _, fired2 := graceTestHub(t, 60*time.Millisecond)
+	onlyLocal := graceTestClient("s2", true)
+	h2.register <- onlyLocal
+	waitForCond(t, "local registered", func() bool { return hubClientCount(h2, "s2") == 1 })
+	h2.unregister <- onlyLocal
+	waitForCond(t, "local unregistered", func() bool { return hubClientCount(h2, "s2") == 0 })
+	waitForNoFire(t, fired2, 300*time.Millisecond)
+}
+
+// A phone reconnecting cancels the pending grace window.
+func TestGraceCancelledByRemoteReconnect(t *testing.T) {
+	h, _, fired := graceTestHub(t, 200*time.Millisecond)
+
+	remote := graceTestClient("s1", false)
+	h.register <- remote
+	waitForCond(t, "remote registered", func() bool { return hubClientCount(h, "s1") == 1 })
+
+	h.unregister <- remote
+	waitForCond(t, "remote unregistered", func() bool { return hubClientCount(h, "s1") == 0 })
+
+	// Reconnect well before the 200ms grace elapses.
+	reconnect := graceTestClient("s1", false)
+	h.register <- reconnect
+	waitForCond(t, "remote re-registered", func() bool { return hubClientCount(h, "s1") == 1 })
+
+	waitForNoFire(t, fired, 400*time.Millisecond)
 }

@@ -3,6 +3,7 @@ package websocket
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"log"
 
 	"fastdrop-desktop/internal/database"
@@ -124,6 +125,21 @@ func (r *Router) handleFileOffer(c *Client, env *Envelope) {
 		r.sendError(c, "INVALID_REQUEST", "no files in offer")
 		return
 	}
+	// Disk-space precheck across the whole offer (§18) — reject before any
+	// transfer task or .part file is created.
+	var totalSize int64
+	for _, f := range p.Files {
+		totalSize += f.Size
+	}
+	ok, free, spaceErr := r.Storage.HasSpaceFor(totalSize)
+	if spaceErr != nil {
+		r.sendError(c, "INTERNAL_ERROR", spaceErr.Error())
+		return
+	}
+	if !ok {
+		r.sendError(c, "INSUFFICIENT_STORAGE", fmt.Sprintf("insufficient storage: required=%d available=%d", totalSize, free))
+		return
+	}
 	specs := make([]transfer.FileSpec, 0, len(p.Files))
 	for _, f := range p.Files {
 		specs = append(specs, transfer.FileSpec{
@@ -145,6 +161,9 @@ func (r *Router) handleFileOffer(c *Client, env *Envelope) {
 			_ = r.Storage.CreatePart(res.TransferID, f.FileID, size)
 		}
 	}
+	// The offer now awaits the PC user's accept/reject decision (§12:
+	// created → waiting_accept).
+	_ = r.DB.UpdateTransferStatus(context.Background(), res.TransferID, string(transfer.StatusWaitingAccept), 0, "", "")
 	// Reply to the sender (the phone) with the create result. The phone
 	// needs transferId + per-file fileId to drive subsequent chunk PUTs.
 	reply, _ := NewEnvelope(MsgTransferCreated, map[string]any{
@@ -179,27 +198,40 @@ func (r *Router) handleFileOffer(c *Client, env *Envelope) {
 
 func (r *Router) handleFileOfferAccept(c *Client, env *Envelope) {
 	var p struct {
-		OfferID string `json:"offerId"`
+		OfferID    string `json:"offerId"`
+		TransferID string `json:"transferId"`
 	}
 	if err := json.Unmarshal(env.Payload, &p); err != nil {
 		return
 	}
-	// Try the offerId as a direct transferId first (the Vue UI sends
-	// transferId in the offerId field), then fall back to session search.
-	transferID := p.OfferID
-	if transferID == "" || !r.transferExists(transferID) {
-		transferID = r.findTransferBySession(c.sessionID)
+	// Preferred: an explicit transferId in the payload. Fall back to the
+	// legacy behaviour — the Vue UI sends transferId in the offerId field —
+	// then a session search.
+	transferID := ""
+	if p.TransferID != "" && r.transferExists(p.TransferID) {
+		transferID = p.TransferID
+	} else {
+		transferID = p.OfferID
+		if transferID == "" || !r.transferExists(transferID) {
+			transferID = r.findTransferBySession(c.sessionID)
+		}
 	}
 	if transferID == "" {
 		r.sendError(c, "TRANSFER_NOT_FOUND", "no pending transfer for this session")
 		return
 	}
-	// Preserve current transferred_bytes — accepting must not lose progress.
-	var transferred int64
-	if t, err := r.DB.GetTransfer(context.Background(), transferID); err == nil {
-		transferred = t.TransferredBytes
+	t, err := r.DB.GetTransfer(context.Background(), transferID)
+	if err != nil {
+		r.sendError(c, "TRANSFER_NOT_FOUND", "no such transfer")
+		return
 	}
-	_ = r.DB.UpdateTransferStatus(context.Background(), transferID, string(transfer.StatusPreparing), transferred, "", "")
+	// §12: only created/waiting_accept offers can be accepted.
+	if _, err := transfer.Advance(transfer.Status(t.Status), transfer.StatusPreparing); err != nil {
+		r.sendError(c, "TRANSFER_NOT_ACTIVE", "transfer is "+t.Status+"; offer can no longer be accepted")
+		return
+	}
+	// Preserve current transferred_bytes — accepting must not lose progress.
+	_ = r.DB.UpdateTransferStatus(context.Background(), transferID, string(transfer.StatusPreparing), t.TransferredBytes, "", "")
 	r.pushTransferEvent(c.sessionID, MsgFileOfferAccept, map[string]any{
 		"transferId": transferID,
 		"offerId":    p.OfferID,
@@ -208,20 +240,33 @@ func (r *Router) handleFileOfferAccept(c *Client, env *Envelope) {
 
 func (r *Router) handleFileOfferReject(c *Client, env *Envelope) {
 	var p struct {
-		OfferID string `json:"offerId"`
-		Reason  string `json:"reason"`
+		OfferID    string `json:"offerId"`
+		TransferID string `json:"transferId"`
+		Reason     string `json:"reason"`
 	}
 	_ = json.Unmarshal(env.Payload, &p)
-	transferID := r.findTransferBySession(c.sessionID)
+	// Preferred: an explicit transferId in the payload, else the legacy
+	// session search.
+	transferID := ""
+	if p.TransferID != "" && r.transferExists(p.TransferID) {
+		transferID = p.TransferID
+	} else {
+		transferID = r.findTransferBySession(c.sessionID)
+	}
 	if transferID == "" {
 		return
 	}
-	// Preserve current transferred_bytes.
-	var transferred int64
-	if t, err := r.DB.GetTransfer(context.Background(), transferID); err == nil {
-		transferred = t.TransferredBytes
+	t, err := r.DB.GetTransfer(context.Background(), transferID)
+	if err != nil {
+		return
 	}
-	_ = r.DB.UpdateTransferStatus(context.Background(), transferID, string(transfer.StatusRejected), transferred, "user_rejected", p.Reason)
+	// §12: only a waiting_accept offer can be rejected.
+	if _, err := transfer.Advance(transfer.Status(t.Status), transfer.StatusRejected); err != nil {
+		r.sendError(c, "TRANSFER_NOT_ACTIVE", "transfer is "+t.Status+"; nothing to reject")
+		return
+	}
+	// Preserve current transferred_bytes.
+	_ = r.DB.UpdateTransferStatus(context.Background(), transferID, string(transfer.StatusRejected), t.TransferredBytes, "user_rejected", p.Reason)
 	r.pushTransferEvent(c.sessionID, MsgFileOfferReject, map[string]any{
 		"transferId": transferID,
 		"offerId":    p.OfferID,

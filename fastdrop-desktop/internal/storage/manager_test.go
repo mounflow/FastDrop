@@ -3,10 +3,12 @@ package storage
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 )
 
@@ -212,5 +214,52 @@ func TestCleanupTransfer(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(m.TempDir(), "t1")); !os.IsNotExist(err) {
 		t.Error("temp dir not removed")
+	}
+}
+
+// Regression: two concurrent FinalizeAndVerify calls with the same target
+// name must not race between ResolveConflict and os.Rename — both files
+// have to survive with their own contents.
+func TestFinalizeConcurrentSameNameNoOverwrite(t *testing.T) {
+	m := newMgr(t)
+	datasets := [][]byte{[]byte("short"), []byte("a-much-longer-payload")}
+	paths := make([]string, len(datasets))
+	errs := make([]error, len(datasets))
+
+	var wg sync.WaitGroup
+	for i, data := range datasets {
+		wg.Add(1)
+		go func(i int, data []byte) {
+			defer wg.Done()
+			tid, fid := fmt.Sprintf("t%d", i), fmt.Sprintf("f%d", i)
+			if err := m.CreatePart(tid, fid, 0); err != nil {
+				errs[i] = err
+				return
+			}
+			if _, err := m.WriteChunk(tid, fid, 0, 16, data); err != nil {
+				errs[i] = err
+				return
+			}
+			p, _, err := m.FinalizeAndVerify(context.Background(), tid, fid, "same.txt", "", "rename")
+			paths[i], errs[i] = p, err
+		}(i, data)
+	}
+	wg.Wait()
+	for i, err := range errs {
+		if err != nil {
+			t.Fatalf("finalize %d: %v", i, err)
+		}
+	}
+	if paths[0] == paths[1] {
+		t.Fatalf("both finalizes landed on %s; one overwrote the other", paths[0])
+	}
+	for i, data := range datasets {
+		got, err := os.ReadFile(paths[i])
+		if err != nil {
+			t.Fatalf("read %s: %v", paths[i], err)
+		}
+		if !bytes.Equal(got, data) {
+			t.Errorf("file %d content = %q, want %q", i, got, data)
+		}
 	}
 }

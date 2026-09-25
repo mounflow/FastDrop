@@ -287,6 +287,8 @@ func (s *Server) handleCancelTransfer(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "TRANSFER_CANCELLED", err.Error(), requestID(r))
 		return
 	}
+	// Cancelled transfers keep no staged data: drop the .part directory.
+	_ = s.Storage.CleanupTransfer(transferID)
 	s.pushWSEvent(callerSession, ws.MsgTransferCancelled, map[string]any{
 		"transferId": transferID,
 	})
@@ -303,8 +305,9 @@ func (s *Server) handleRetryTransfer(w http.ResponseWriter, r *http.Request) {
 		writeOwnedError(w, r, err)
 		return
 	}
-	if transfer.Status(t.Status).IsTerminal() {
-		writeError(w, http.StatusConflict, "TRANSFER_NOT_ACTIVE", "cannot retry a terminal transfer", requestID(r))
+	// §12: only failed (or an already-retrying) transfer may be retried.
+	if _, err := transfer.Advance(transfer.Status(t.Status), transfer.StatusRetrying); err != nil {
+		writeError(w, http.StatusConflict, "TRANSFER_NOT_ACTIVE", "cannot retry from state "+t.Status, requestID(r))
 		return
 	}
 	_ = s.DB.UpdateTransferStatus(r.Context(), t.ID, string(transfer.StatusRetrying), t.TransferredBytes, "", "")
@@ -365,14 +368,12 @@ func (s *Server) handlePutChunk(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "CHUNK_INDEX_INVALID", "chunk out of range", requestID(r))
 		return
 	}
-	// Body size = at most chunkSize + small slack (spec §28.1).
+	// Body size = at most chunkSize + small slack (spec §28.1). The reader
+	// cap stays in front; the body itself is only buffered once the
+	// scheduler has admitted the request (don't hold a global slot while
+	// reading).
 	maxBody := int64(f.ChunkSize) + 1024
 	r.Body = http.MaxBytesReader(w, r.Body, maxBody)
-	data, err := io.ReadAll(r.Body)
-	if err != nil {
-		writeError(w, http.StatusRequestEntityTooLarge, "INVALID_REQUEST", "chunk too large", requestID(r))
-		return
-	}
 	sched := s.Transfer.Scheduler()
 	if sched != nil {
 		if err := sched.Acquire(r.Context(), fileID); err != nil {
@@ -380,6 +381,11 @@ func (s *Server) handlePutChunk(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		defer sched.Release(fileID)
+	}
+	data, err := io.ReadAll(r.Body)
+	if err != nil {
+		writeError(w, http.StatusRequestEntityTooLarge, "INVALID_REQUEST", "chunk too large", requestID(r))
+		return
 	}
 	if _, err := s.Storage.WriteChunk(transferID, fileID, idx, f.ChunkSize, data); err != nil {
 		writeError(w, http.StatusInternalServerError, "INTERNAL_ERROR", err.Error(), requestID(r))
@@ -487,6 +493,16 @@ func (s *Server) handleCompleteFile(w http.ResponseWriter, r *http.Request) {
 	finalPath, shaActual, err := s.Storage.FinalizeAndVerify(r.Context(), transferID, fileID, f.OriginalName, body.Sha256, s.Cfg.Storage.ConflictPolicy)
 	if err != nil {
 		if errors.Is(err, storage.ErrHashMismatch) {
+			// §12: verifying → failed. The transfer can never complete with
+			// a corrupt file, so terminalize it, notify, and drop all
+			// staged .part data.
+			_ = s.DB.UpdateTransferStatus(r.Context(), transferID, string(transfer.StatusFailed), t.TransferredBytes, "FILE_HASH_MISMATCH", "file hash mismatch")
+			s.pushWSEvent(callerSession, ws.MsgTransferFailed, map[string]any{
+				"transferId": transferID,
+				"fileId":     fileID,
+				"error":      "file hash mismatch",
+			})
+			_ = s.Storage.CleanupTransfer(transferID)
 			writeError(w, http.StatusBadRequest, "FILE_HASH_MISMATCH", "hash mismatch", requestID(r))
 			return
 		}
@@ -678,9 +694,9 @@ func (s *Server) handleDownloadFile(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusRequestedRangeNotSatisfiable, "INVALID_REQUEST", "bad range", requestID(r))
 		return
 	}
-	if end == 0 {
-		end = fileSize - 1
-	}
+	// parseRange already normalizes open-ended ranges (bytes=N-) to
+	// size-1; no fallback here — it would corrupt bytes=0-0 into a full
+	// file response.
 	contentLen := end - start + 1
 	w.Header().Set("Content-Length", formatInt(contentLen))
 	w.Header().Set("Content-Range", "bytes "+formatInt(start)+"-"+formatInt(end)+"/"+formatInt(fileSize))

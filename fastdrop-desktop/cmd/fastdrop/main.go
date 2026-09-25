@@ -89,6 +89,8 @@ func main() {
 				continue
 			}
 			_ = db.UpdateTransferStatus(context.Background(), t.ID, string(transfer.StatusFailed), t.TransferredBytes, "WS_DISCONNECTED", "reconnect grace period expired")
+			// Drop the staged .part data — no client is coming back for it.
+			_ = store.CleanupTransfer(t.ID)
 			env, _ := websocket.NewEnvelope(websocket.MsgTransferFailed, map[string]any{
 				"transferId": t.ID,
 				"error":      "reconnect grace period expired",
@@ -290,6 +292,7 @@ func wsHandler(hub *websocket.Hub, sessMgr *session.Manager) http.HandlerFunc {
 		if err != nil {
 			return
 		}
+		ip := clientIP(r)
 		// Pre-auth from headers if possible.
 		var pre *websocket.PreAuth
 		if h := r.Header.Get("Authorization"); len(h) > 7 && h[:7] == "Bearer " {
@@ -298,7 +301,7 @@ func wsHandler(hub *websocket.Hub, sessMgr *session.Manager) http.HandlerFunc {
 				// enforceIP=false: the same session is shared by the PC
 				// browser (127.0.0.1) and the phone (LAN IP), so strict
 				// IP binding would reject valid WS connections.
-				row, err := sessMgr.Validate(r.Context(), sessID, h[7:], clientIP(r), false)
+				row, err := sessMgr.Validate(r.Context(), sessID, h[7:], ip, false)
 				if err == nil {
 					pre = &websocket.PreAuth{SessionID: row.ID, DeviceID: row.DeviceID}
 				}
@@ -306,7 +309,9 @@ func wsHandler(hub *websocket.Hub, sessMgr *session.Manager) http.HandlerFunc {
 		}
 		ctx, cancel := context.WithCancel(r.Context())
 		defer cancel()
-		_ = hub.HandleConn(ctx, conn, clientIP(r), pre)
+		// local = the PC's own Vue UI. The hub uses it to keep reconnect
+		// grace semantics tied to phone connections only (§19).
+		_ = hub.HandleConn(ctx, conn, ip, isLocalIP(ip), pre)
 	}
 }
 

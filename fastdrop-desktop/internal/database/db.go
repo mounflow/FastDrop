@@ -289,6 +289,20 @@ func (d *DB) UpdateTransferStatus(ctx context.Context, id, status string, transf
 	return err
 }
 
+// UpdateTransferStatusIfNotTerminal behaves like UpdateTransferStatus but
+// refuses to touch rows already in a terminal state (§12). Returns true if
+// the row was updated — callers use this to avoid stomping a concurrent
+// completion back to an active status.
+func (d *DB) UpdateTransferStatusIfNotTerminal(ctx context.Context, id, status string, transferred int64, errorCode, errorMsg string) (bool, error) {
+	res, err := d.ExecContext(ctx, `UPDATE transfers SET status = ?, transferred_bytes = ?, error_code = ?, error_message = ? WHERE id = ? AND status NOT IN ('completed','failed','cancelled','rejected')`,
+		status, transferred, nullableString(errorCode), nullableString(errorMsg), id)
+	if err != nil {
+		return false, err
+	}
+	n, _ := res.RowsAffected()
+	return n > 0, nil
+}
+
 // MarkTransferStarted sets started_at and status='transferring' only if
 // started_at is still NULL (idempotent — first chunk wins). Returns true
 // if the row was actually updated (i.e. this is the first chunk).

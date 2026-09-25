@@ -22,15 +22,16 @@ type Validator interface {
 
 // Client is a single authenticated WS connection.
 type Client struct {
-	conn       *websocket.Conn
-	sessionID  string
-	deviceID   string
-	sourceIP   string
-	send       chan []byte
-	hub        *Hub
-	lastPong   time.Time
+	conn        *websocket.Conn
+	sessionID   string
+	deviceID    string
+	sourceIP    string
+	local       bool // true = the PC's own Vue UI, not a phone
+	send        chan []byte
+	hub         *Hub
+	lastPong    time.Time
 	missedPongs int
-	hmu        sync.Mutex // guards lastPong / missedPongs
+	hmu         sync.Mutex // guards lastPong / missedPongs
 	disconnOnce sync.Once  // ensures OnClientDisconnected fires exactly once
 }
 
@@ -52,6 +53,10 @@ type Hub struct {
 	broadcast   chan broadcast
 	authTimeout time.Duration
 
+	// gracePeriod is the reconnect-grace window (§19: 60s). Overridable so
+	// tests don't have to wait a minute.
+	gracePeriod time.Duration
+
 	// OnMessage is called for every non-heartbeat message after auth.
 	OnMessage MessageHandler
 
@@ -72,8 +77,9 @@ type Hub struct {
 	inboxesMu sync.Mutex
 	inboxes   map[string][][]byte
 
-	// Grace timers keyed by sessionID — started when the last client
-	// disconnects, cancelled on reconnect.
+	// Grace timers keyed by sessionID — started when the last non-local
+	// (phone) client disconnects, cancelled when a phone reconnects. The
+	// PC's own Vue UI neither starts nor cancels the window.
 	graceMu     sync.Mutex
 	graceTimers map[string]*time.Timer
 }
@@ -86,15 +92,30 @@ type broadcast struct {
 // NewHub constructs a Hub with the given validator.
 func NewHub(v Validator) *Hub {
 	return &Hub{
-		clients:     make(map[string]map[*Client]bool),
-		validator:   v,
-		register:    make(chan *Client, 16),
-		unregister:  make(chan *Client, 16),
+		clients:   make(map[string]map[*Client]bool),
+		validator: v,
+		register:  make(chan *Client, 16),
+		// Generous buffer: sendHeartbeats pushes onto unregister from the
+		// same goroutine that drains it, so a small cap risks self-deadlock
+		// when many clients drop at once.
+		unregister:  make(chan *Client, 256),
 		broadcast:   make(chan broadcast, 64),
 		authTimeout: 10 * time.Second,
+		gracePeriod: ReconnectGrace,
 		inboxes:     make(map[string][][]byte),
 		graceTimers: make(map[string]*time.Timer),
 	}
+}
+
+// hasNonLocal reports whether the client set still contains at least one
+// phone (non-local) client. Callers must hold h.mu.
+func hasNonLocal(set map[*Client]bool) bool {
+	for c := range set {
+		if !c.local {
+			return true
+		}
+	}
+	return false
 }
 
 // Run processes registration / unregistration / broadcast events. It runs
@@ -107,13 +128,16 @@ func (h *Hub) Run(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case c := <-h.register:
-			// Cancel any pending reconnect-grace timer for this session.
-			h.graceMu.Lock()
-			if timer, ok := h.graceTimers[c.sessionID]; ok {
-				timer.Stop()
-				delete(h.graceTimers, c.sessionID)
+			// Only a reconnecting phone cancels a pending reconnect-grace
+			// timer; the local Vue UI refreshing must not.
+			if !c.local {
+				h.graceMu.Lock()
+				if timer, ok := h.graceTimers[c.sessionID]; ok {
+					timer.Stop()
+					delete(h.graceTimers, c.sessionID)
+				}
+				h.graceMu.Unlock()
 			}
-			h.graceMu.Unlock()
 			h.mu.Lock()
 			set := h.clients[c.sessionID]
 			if set == nil {
@@ -138,20 +162,24 @@ func (h *Hub) Run(ctx context.Context) {
 			}
 		case c := <-h.unregister:
 			h.mu.Lock()
-			lastClient := false
+			lastRemote := false
 			if set, ok := h.clients[c.sessionID]; ok {
 				if set[c] {
 					delete(set, c)
 					close(c.send)
 				}
+				// §19: the reconnect-grace window tracks phone connections
+				// only. The PC's own Vue UI disconnecting neither starts the
+				// timer nor keeps a phone-triggered one from firing.
+				if !c.local && !hasNonLocal(set) {
+					lastRemote = true
+				}
 				if len(set) == 0 {
 					delete(h.clients, c.sessionID)
-					lastClient = true
 				}
 			}
 			h.mu.Unlock()
-			// §19: Start 60s reconnect grace when the last client disconnects.
-			if lastClient {
+			if lastRemote {
 				h.startGraceTimer(c.sessionID)
 			}
 		case b := <-h.broadcast:
@@ -209,14 +237,14 @@ func (h *Hub) enqueueInbox(sessionID string, data []byte) {
 }
 
 // startGraceTimer begins the 60s reconnect-grace window for a session.
-// If no client reconnects before it fires, OnGraceExpired is called.
+// If no phone client reconnects before it fires, OnGraceExpired is called.
 func (h *Hub) startGraceTimer(sessionID string) {
 	h.graceMu.Lock()
 	defer h.graceMu.Unlock()
 	if _, exists := h.graceTimers[sessionID]; exists {
 		return // already ticking
 	}
-	h.graceTimers[sessionID] = time.AfterFunc(ReconnectGrace, func() {
+	h.graceTimers[sessionID] = time.AfterFunc(h.gracePeriod, func() {
 		h.graceMu.Lock()
 		delete(h.graceTimers, sessionID)
 		h.graceMu.Unlock()
@@ -262,12 +290,15 @@ func (h *Hub) sendHeartbeats(ctx context.Context) {
 // HandleConn runs the read/write loops for one WS connection. It blocks
 // until the connection closes.
 //
-// On the very first frame, if headers didn't already authenticate, the
-// client MUST send {type:"auth"}; any other type closes the connection.
-func (h *Hub) HandleConn(ctx context.Context, conn *websocket.Conn, sourceIP string, preAuthed *PreAuth) error {
+// local marks the connection as the PC's own Vue UI (as opposed to a phone);
+// it drives the §19 reconnect-grace semantics. On the very first frame, if
+// headers didn't already authenticate, the client MUST send {type:"auth"};
+// any other type closes the connection.
+func (h *Hub) HandleConn(ctx context.Context, conn *websocket.Conn, sourceIP string, local bool, preAuthed *PreAuth) error {
 	c := &Client{
 		conn:     conn,
 		sourceIP: sourceIP,
+		local:    local,
 		send:     make(chan []byte, 32),
 		hub:      h,
 		lastPong: time.Now(),

@@ -153,3 +153,24 @@ func TestSaveRoundTrip(t *testing.T) {
 		t.Errorf("config path outside appdata: %s", ConfigPath())
 	}
 }
+
+// Save must write config.json.tmp then atomically rename, leaving no .tmp
+// file behind.
+func TestSaveAtomicNoTmpLeftover(t *testing.T) {
+	t.Setenv("APPDATA", t.TempDir())
+	cfg := Default()
+	cfg.Server.DeviceName = "Atomic-Save"
+	if err := Save(cfg); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(ConfigPath() + ".tmp"); !os.IsNotExist(err) {
+		t.Errorf("config.json.tmp left behind: %v", err)
+	}
+	loaded, err := Load()
+	if err != nil {
+		t.Fatalf("load after atomic save: %v", err)
+	}
+	if loaded.Server.DeviceName != "Atomic-Save" {
+		t.Errorf("save/load mismatch: %q", loaded.Server.DeviceName)
+	}
+}

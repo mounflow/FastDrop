@@ -11,17 +11,17 @@ import (
 type Status string
 
 const (
-	StatusCreated        Status = "created"
-	StatusWaitingAccept  Status = "waiting_accept"
-	StatusPreparing      Status = "preparing"
-	StatusTransferring   Status = "transferring"
-	StatusPaused         Status = "paused"
-	StatusRetrying       Status = "retrying"
-	StatusVerifying      Status = "verifying"
-	StatusCompleted      Status = "completed"
-	StatusFailed         Status = "failed"
-	StatusCancelled      Status = "cancelled"
-	StatusRejected       Status = "rejected"
+	StatusCreated       Status = "created"
+	StatusWaitingAccept Status = "waiting_accept"
+	StatusPreparing     Status = "preparing"
+	StatusTransferring  Status = "transferring"
+	StatusPaused        Status = "paused"
+	StatusRetrying      Status = "retrying"
+	StatusVerifying     Status = "verifying"
+	StatusCompleted     Status = "completed"
+	StatusFailed        Status = "failed"
+	StatusCancelled     Status = "cancelled"
+	StatusRejected      Status = "rejected"
 )
 
 // IsTerminal reports whether s represents an end state.
@@ -39,6 +39,9 @@ var validTransitions = map[Status]map[Status]bool{
 	StatusCreated: {
 		StatusWaitingAccept: true,
 		StatusCancelled:     true,
+		// Phone→PC transfers skip waiting_accept entirely (the PC is the
+		// passive receiver): accepting the offer moves created → preparing.
+		StatusPreparing: true,
 	},
 	StatusWaitingAccept: {
 		StatusPreparing: true,
@@ -73,7 +76,11 @@ var validTransitions = map[Status]map[Status]bool{
 		StatusFailed:    true,
 		StatusCancelled: true,
 	},
-	// Terminal states have no outgoing edges.
+	// §12: a failed transfer may be retried.
+	StatusFailed: {
+		StatusRetrying: true,
+	},
+	// Terminal states other than failed have no outgoing edges.
 }
 
 // CanTransition reports whether transitioning from->to is legal per §12.

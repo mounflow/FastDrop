@@ -3,6 +3,7 @@ package transfer
 import (
 	"context"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 
@@ -25,6 +26,7 @@ func newDB(t *testing.T) *database.DB {
 func TestLegalTransitions(t *testing.T) {
 	legal := []struct{ from, to Status }{
 		{StatusCreated, StatusWaitingAccept},
+		{StatusCreated, StatusPreparing}, // PC accepts a phone offer directly
 		{StatusWaitingAccept, StatusPreparing},
 		{StatusPreparing, StatusTransferring},
 		{StatusTransferring, StatusPaused},
@@ -35,6 +37,7 @@ func TestLegalTransitions(t *testing.T) {
 		{StatusVerifying, StatusCompleted},
 		{StatusVerifying, StatusFailed},
 		{StatusTransferring, StatusCancelled},
+		{StatusFailed, StatusRetrying}, // §12 retry edge
 	}
 	for _, c := range legal {
 		if !CanTransition(c.from, c.to) {
@@ -46,10 +49,12 @@ func TestLegalTransitions(t *testing.T) {
 func TestIllegalTransitions(t *testing.T) {
 	illegal := []struct{ from, to Status }{
 		{StatusCreated, StatusTransferring},
+		{StatusCreated, StatusRejected}, // reject only from waiting_accept
 		{StatusCompleted, StatusTransferring},
 		{StatusCancelled, StatusTransferring},
 		{StatusRejected, StatusPreparing},
 		{StatusWaitingAccept, StatusCompleted},
+		{StatusFailed, StatusTransferring}, // failed must go through retrying
 	}
 	for _, c := range illegal {
 		if CanTransition(c.from, c.to) {
@@ -83,7 +88,10 @@ func TestIsTerminal(t *testing.T) {
 // Chunk arithmetic.
 func TestTotalChunks(t *testing.T) {
 	const mb = 4 * 1024 * 1024
-	cases := []struct{ size, chunk int64; want int }{
+	cases := []struct {
+		size, chunk int64
+		want        int
+	}{
 		{0, mb, 0},
 		{1, mb, 1},
 		{mb, mb, 1},
@@ -262,6 +270,92 @@ func TestManagerMarkChunkCompleteAndProgress(t *testing.T) {
 	// in production, but the DB bitmap is idempotent at the chunk level).
 }
 
+// Regression: concurrent chunk PUTs for the same file must not lose bitmap
+// updates (SetChunkBit is a read-modify-write; MarkChunkComplete serializes
+// it per fileID).
+func TestMarkChunkCompleteConcurrentBitmap(t *testing.T) {
+	db := newDB(t)
+	m := NewManager(db, 100, nil)
+	ctx := context.Background()
+	res, err := m.Create(ctx, "s1", "d1", DirClientToServer, "o", []FileSpec{
+		{ClientFileID: "c", Name: "a.bin", Size: 50 * 100},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	tid, fid := res.TransferID, res.Files[0].FileID
+
+	const workers = 50
+	var wg sync.WaitGroup
+	errCh := make(chan error, workers)
+	for i := 0; i < workers; i++ {
+		wg.Add(1)
+		go func(idx int) {
+			defer wg.Done()
+			if _, _, err := m.MarkChunkComplete(ctx, tid, fid, idx, 100); err != nil {
+				errCh <- err
+			}
+		}(i)
+	}
+	wg.Wait()
+	close(errCh)
+	for err := range errCh {
+		t.Fatalf("MarkChunkComplete: %v", err)
+	}
+
+	// Every bitmap bit must be set.
+	bm, err := db.GetChunkBitmap(ctx, fid, workers)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < workers; i++ {
+		if bm[i>>3]&(1<<uint(i&7)) == 0 {
+			t.Errorf("chunk %d bit not set", i)
+		}
+	}
+	f, err := db.GetTransferFile(ctx, fid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if f.CompletedChunks != workers {
+		t.Errorf("completedChunks = %d, want %d", f.CompletedChunks, workers)
+	}
+	if f.TransferredBytes != workers*100 {
+		t.Errorf("transferredBytes = %d, want %d", f.TransferredBytes, workers*100)
+	}
+}
+
+// A duplicate PUT of an already-complete chunk must not double-count bytes.
+func TestMarkChunkCompleteDuplicateNoDoubleCount(t *testing.T) {
+	db := newDB(t)
+	m := NewManager(db, 4*1024*1024, nil)
+	ctx := context.Background()
+	res, err := m.Create(ctx, "s1", "d1", DirClientToServer, "o", []FileSpec{
+		{ClientFileID: "c", Name: "a.bin", Size: 100},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	tid, fid := res.TransferID, res.Files[0].FileID
+
+	if _, _, err := m.MarkChunkComplete(ctx, tid, fid, 0, 100); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := m.MarkChunkComplete(ctx, tid, fid, 0, 100); err != nil {
+		t.Fatal(err)
+	}
+	f, err := db.GetTransferFile(ctx, fid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if f.CompletedChunks != 1 {
+		t.Errorf("completedChunks = %d, want 1", f.CompletedChunks)
+	}
+	if f.TransferredBytes != 100 {
+		t.Errorf("transferredBytes = %d, want 100 (no double count)", f.TransferredBytes)
+	}
+}
+
 func TestManagerCancel(t *testing.T) {
 	db := newDB(t)
 	m := NewManager(db, 4*1024*1024, nil)
@@ -369,6 +463,43 @@ func TestCompleteFileMultiFile(t *testing.T) {
 	tr, _ = db.GetTransfer(ctx, tid)
 	if tr.Status != string(StatusCompleted) {
 		t.Errorf("transfer status = %s, want completed", tr.Status)
+	}
+}
+
+// A straggler file completing must not stomp an already-terminal transfer
+// back to transferring (UpdateTransferStatusIfNotTerminal).
+func TestCompleteFileDoesNotStompTerminalTransfer(t *testing.T) {
+	db := newDB(t)
+	m := NewManager(db, 4*1024*1024, nil)
+	ctx := context.Background()
+
+	res, err := m.Create(ctx, "s1", "d1", DirClientToServer, "o", []FileSpec{
+		{ClientFileID: "c1", Name: "a.txt", Size: 50},
+		{ClientFileID: "c2", Name: "b.txt", Size: 60},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	tid, f1 := res.TransferID, res.Files[0].FileID
+	m.MarkChunkComplete(ctx, tid, f1, 0, 50)
+
+	// Terminalize the transfer out-of-band (e.g. grace expired, cancel).
+	if err := db.UpdateTransferStatus(ctx, tid, string(StatusFailed), 0, "WS_DISCONNECTED", "grace expired"); err != nil {
+		t.Fatal(err)
+	}
+	allDone, err := m.CompleteFile(ctx, tid, f1, "hash1", "a.txt", "/downloads/a.txt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if allDone {
+		t.Error("should not be allDone with a pending sibling file")
+	}
+	tr, err := db.GetTransfer(ctx, tid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if tr.Status != string(StatusFailed) {
+		t.Errorf("transfer status = %s, want failed (must not be stomped back to transferring)", tr.Status)
 	}
 }
 

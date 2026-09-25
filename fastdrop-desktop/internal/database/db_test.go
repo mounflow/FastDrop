@@ -175,6 +175,53 @@ func TestTransferInsertAndList(t *testing.T) {
 	}
 }
 
+func TestUpdateTransferStatusIfNotTerminal(t *testing.T) {
+	db := newTestDB(t)
+	ctx := context.Background()
+	for _, id := range []string{"t-active", "t-done"} {
+		if err := db.InsertTransfer(ctx, TransferRow{
+			ID: id, SessionID: "s1", PeerDeviceID: "d1",
+			Direction: "client_to_server", Status: "transferring",
+			TotalFiles: 1, TotalBytes: 100, TransferredBytes: 10,
+			CreatedAt: 1,
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := db.UpdateTransferStatus(ctx, "t-done", "completed", 100, "", ""); err != nil {
+		t.Fatal(err)
+	}
+
+	// Active row: updates normally.
+	updated, err := db.UpdateTransferStatusIfNotTerminal(ctx, "t-active", "paused", 20, "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !updated {
+		t.Fatal("active row was not updated")
+	}
+	got, _ := db.GetTransfer(ctx, "t-active")
+	if got.Status != "paused" || got.TransferredBytes != 20 {
+		t.Errorf("active row: status=%s bytes=%d", got.Status, got.TransferredBytes)
+	}
+
+	// Terminal row: refused, existing state preserved.
+	for _, terminal := range []string{"completed", "failed", "cancelled", "rejected"} {
+		db.UpdateTransferStatus(ctx, "t-done", terminal, 100, "", "")
+		updated, err := db.UpdateTransferStatusIfNotTerminal(ctx, "t-done", "transferring", 50, "", "")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if updated {
+			t.Errorf("terminal %s row was updated", terminal)
+		}
+		got, _ := db.GetTransfer(ctx, "t-done")
+		if got.Status != terminal || got.TransferredBytes != 100 {
+			t.Errorf("terminal %s row mutated: status=%s bytes=%d", terminal, got.Status, got.TransferredBytes)
+		}
+	}
+}
+
 func TestListTransferHistorySpansSessionsAndIncludesPeer(t *testing.T) {
 	db := newTestDB(t)
 	ctx := context.Background()

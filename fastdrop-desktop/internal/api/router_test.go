@@ -365,6 +365,43 @@ func TestPairManagementListIsDesktopOnly(t *testing.T) {
 	}
 }
 
+func TestPairQRIsDesktopOnly(t *testing.T) {
+	srv, _ := newTestServer(t)
+	h := New(srv)
+
+	// The Wails WebView and a localhost browser connect via loopback and
+	// must be able to read the QR payload.
+	pairLimiter = newRateLimiter(20, time.Minute)
+	localReq := httptest.NewRequest(http.MethodGet, "/api/v1/pair/qr", nil)
+	localReq.RemoteAddr = "127.0.0.1:49152"
+	localRes := httptest.NewRecorder()
+	h.ServeHTTP(localRes, localReq)
+	if localRes.Code != http.StatusOK {
+		t.Fatalf("local pair/qr status=%d body=%s", localRes.Code, localRes.Body.String())
+	}
+
+	// A LAN peer must be rejected — the payload carries a live pair token.
+	pairLimiter = newRateLimiter(20, time.Minute)
+	lanReq := httptest.NewRequest(http.MethodGet, "/api/v1/pair/qr", nil)
+	lanReq.RemoteAddr = "192.168.137.50:49152"
+	lanRes := httptest.NewRecorder()
+	h.ServeHTTP(lanRes, lanReq)
+	if lanRes.Code != http.StatusForbidden {
+		t.Fatalf("LAN pair/qr status=%d body=%s", lanRes.Code, lanRes.Body.String())
+	}
+
+	// Spoofing a loopback source via X-Forwarded-For must not help.
+	pairLimiter = newRateLimiter(20, time.Minute)
+	spoofReq := httptest.NewRequest(http.MethodGet, "/api/v1/pair/qr", nil)
+	spoofReq.RemoteAddr = "192.168.137.50:49152"
+	spoofReq.Header.Set("X-Forwarded-For", "127.0.0.1")
+	spoofRes := httptest.NewRecorder()
+	h.ServeHTTP(spoofRes, spoofReq)
+	if spoofRes.Code != http.StatusForbidden {
+		t.Fatalf("spoofed pair/qr status=%d body=%s", spoofRes.Code, spoofRes.Body.String())
+	}
+}
+
 func TestRateLimit(t *testing.T) {
 	srv, _ := newTestServer(t)
 	h := New(srv)
@@ -588,6 +625,7 @@ func TestParseRange(t *testing.T) {
 		{"bytes=500-999", 500, 999, true},
 		{"bytes=0-", 0, 999, true},
 		{"bytes=999-", 999, 999, true},
+		{"bytes=0-0", 0, 0, true}, // 1-byte range must not be expanded
 		{"bytes=-100", 900, 999, true},
 		{"bytes=-1000", 0, 999, true},
 		// Invalid ranges.
@@ -923,6 +961,86 @@ func TestDownloadFileWithRange(t *testing.T) {
 	}
 }
 
+// bytes=0-0 must return exactly 1 byte (regression: the removed end==0
+// fallback used to expand it to the whole file).
+func TestDownloadRangeZeroToZero(t *testing.T) {
+	srv, _ := newTestServer(t)
+	ts := httptest.NewServer(New(srv))
+	defer ts.Close()
+
+	ctx := context.Background()
+	srv.DB.UpsertDevice(database.Device{ID: "d1", Name: "phone", Platform: "android", FirstSeenAt: 1, LastSeenAt: 1})
+	sess, _ := srv.Session.Create(ctx, "d1", "127.0.0.1")
+
+	content := []byte("hello world")
+	resp, body := doReqAuthJSON(t, ts, "POST", "/api/v1/transfers", sess.ID, sess.Token, map[string]any{
+		"offerId": "rr1", "direction": "client_to_server",
+		"files": []map[string]any{{"clientFileId": "c1", "name": "rr.txt", "size": len(content)}},
+	})
+	if resp.StatusCode != 201 {
+		t.Fatalf("create: %d %s", resp.StatusCode, body)
+	}
+	var res struct {
+		TransferID string `json:"transferId"`
+		Files      []struct {
+			FileID string `json:"fileId"`
+		} `json:"files"`
+	}
+	json.Unmarshal([]byte(body), &res)
+	tid, fid := res.TransferID, res.Files[0].FileID
+
+	doReqAuth(t, ts, "PUT", "/api/v1/transfers/"+tid+"/files/"+fid+"/chunks/0", sess.ID, sess.Token, content)
+	doReqAuthJSON(t, ts, "POST", "/api/v1/transfers/"+tid+"/files/"+fid+"/complete", sess.ID, sess.Token,
+		map[string]any{"size": len(content), "sha256": "b94d27b9934d3e08a52e52d7da7dabfac484efe37a5380ee9088f7ace2efcde9"})
+
+	dlURL := "/api/v1/transfers/" + tid + "/files/" + fid + "/content"
+
+	// bytes=0-0 → 1 byte + correct Content-Range.
+	req, _ := http.NewRequest("GET", ts.URL+dlURL, nil)
+	req.Header.Set("Authorization", "Bearer "+sess.Token)
+	req.Header.Set("X-Session-Id", sess.ID)
+	req.Header.Set("Range", "bytes=0-0")
+	resp2, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp2.Body.Close()
+	b2, _ := io.ReadAll(resp2.Body)
+	if resp2.StatusCode != http.StatusPartialContent {
+		t.Fatalf("bytes=0-0: %d, want 206", resp2.StatusCode)
+	}
+	if string(b2) != "h" {
+		t.Errorf("bytes=0-0 body = %q, want %q", string(b2), "h")
+	}
+	if cr := resp2.Header.Get("Content-Range"); cr != "bytes 0-0/11" {
+		t.Errorf("Content-Range = %q, want 'bytes 0-0/11'", cr)
+	}
+	if cl := resp2.Header.Get("Content-Length"); cl != "1" {
+		t.Errorf("Content-Length = %q, want 1", cl)
+	}
+
+	// Open-ended bytes=9- → the tail, still 206.
+	req3, _ := http.NewRequest("GET", ts.URL+dlURL, nil)
+	req3.Header.Set("Authorization", "Bearer "+sess.Token)
+	req3.Header.Set("X-Session-Id", sess.ID)
+	req3.Header.Set("Range", "bytes=9-")
+	resp3, err := http.DefaultClient.Do(req3)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp3.Body.Close()
+	b3, _ := io.ReadAll(resp3.Body)
+	if resp3.StatusCode != http.StatusPartialContent {
+		t.Fatalf("bytes=9-: %d, want 206", resp3.StatusCode)
+	}
+	if string(b3) != "ld" {
+		t.Errorf("bytes=9- body = %q, want %q", string(b3), "ld")
+	}
+	if cr := resp3.Header.Get("Content-Range"); cr != "bytes 9-10/11" {
+		t.Errorf("Content-Range = %q, want 'bytes 9-10/11'", cr)
+	}
+}
+
 // ---------------------------------------------------------------------------
 // Multi-file transfer E2E
 // ---------------------------------------------------------------------------
@@ -1148,6 +1266,62 @@ func TestRetryTransferFlow(t *testing.T) {
 	json.Unmarshal([]byte(body), &tr)
 	if tr["status"] != "transferring" {
 		t.Errorf("after re-upload: status = %v, want transferring", tr["status"])
+	}
+}
+
+// M4: a hash mismatch on complete must terminalize the transfer (failed),
+// push transfer.failed, and drop the staged .part data.
+func TestCompleteFileHashMismatchFailsTransfer(t *testing.T) {
+	srv, _ := newTestServer(t)
+	h := New(srv)
+	ts := httptest.NewServer(h)
+	defer ts.Close()
+
+	ctx := context.Background()
+	srv.DB.UpsertDevice(database.Device{ID: "d1", Name: "phone", Platform: "android", FirstSeenAt: 1, LastSeenAt: 1})
+	sess, _ := srv.Session.Create(ctx, "d1", "127.0.0.1")
+
+	resp, body := doReqAuthJSON(t, ts, "POST", "/api/v1/transfers", sess.ID, sess.Token, map[string]any{
+		"offerId": "hm1", "direction": "client_to_server",
+		"files": []map[string]any{
+			{"clientFileId": "c1", "name": "hm.txt", "size": 5},
+		},
+	})
+	if resp.StatusCode != 201 {
+		t.Fatalf("create: %d %s", resp.StatusCode, body)
+	}
+	var res struct {
+		TransferID string `json:"transferId"`
+		Files      []struct {
+			FileID string `json:"fileId"`
+		} `json:"files"`
+	}
+	json.Unmarshal([]byte(body), &res)
+	tid, fid := res.TransferID, res.Files[0].FileID
+
+	doReqAuth(t, ts, "PUT", "/api/v1/transfers/"+tid+"/files/"+fid+"/chunks/0", sess.ID, sess.Token, []byte("aaaaa"))
+
+	// Complete with a wrong hash → 400 FILE_HASH_MISMATCH.
+	resp, body = doReqAuthJSON(t, ts, "POST", "/api/v1/transfers/"+tid+"/files/"+fid+"/complete",
+		sess.ID, sess.Token, map[string]any{"size": 5, "sha256": "deadbeef"})
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("complete with bad hash: %d %s", resp.StatusCode, body)
+	}
+	if !strings.Contains(body, "FILE_HASH_MISMATCH") {
+		t.Errorf("error body missing FILE_HASH_MISMATCH: %s", body)
+	}
+
+	// Transfer must be terminalized as failed.
+	resp, body = doReqAuth(t, ts, "GET", "/api/v1/transfers/"+tid, sess.ID, sess.Token, nil)
+	var tr map[string]any
+	json.Unmarshal([]byte(body), &tr)
+	if tr["status"] != "failed" {
+		t.Errorf("transfer status = %v, want failed", tr["status"])
+	}
+
+	// Staged .part data must be cleaned up.
+	if _, err := os.Stat(srv.Storage.PartPath(tid, fid)); !os.IsNotExist(err) {
+		t.Errorf("part file survived cleanup: %v", err)
 	}
 }
 

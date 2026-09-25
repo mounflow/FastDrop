@@ -23,6 +23,12 @@ type Manager struct {
 	downloadDir string
 	mu          sync.Mutex
 	openFiles   map[string]*os.File // fileId -> handle for the active .part
+
+	// finalizeMu guards the check-then-rename window in FinalizeAndVerify:
+	// conflict resolution and the final os.Rename happen under this lock so
+	// two concurrent finalizes cannot both observe a name as unused and
+	// clobber each other.
+	finalizeMu sync.Mutex
 }
 
 func NewManager(downloadDir string) (*Manager, error) {
@@ -173,18 +179,24 @@ func (m *Manager) FinalizeAndVerify(ctx context.Context, transferID, fileID, ori
 
 	safeName := security.SanitizeFilename(originalName)
 	dlDir := m.DownloadDir()
+	// Hold finalizeMu from conflict resolution through the rename so
+	// concurrent finalizes of the same name serialize (see Manager).
+	m.finalizeMu.Lock()
 	finalName := security.ResolveConflict(dlDir, safeName, conflictPolicy, fileExists)
 	if finalName == "" {
 		// "skip" policy and target exists: remove the .part, return no-op.
 		_ = os.Remove(partPath)
+		m.finalizeMu.Unlock()
 		return "", actualSha, ErrSkipConflict
 	}
 	finalPath := filepath.Join(dlDir, finalName)
 	// Atomic-ish rename. Windows does not atomic-rename over an existing
 	// file, but ResolveConflict guarantees finalName is unused.
 	if err := os.Rename(partPath, finalPath); err != nil {
+		m.finalizeMu.Unlock()
 		return "", actualSha, err
 	}
+	m.finalizeMu.Unlock()
 	// Best-effort: drop the (now empty) per-transfer temp dir.
 	_ = os.Remove(filepath.Dir(partPath))
 	return finalPath, actualSha, nil
@@ -205,7 +217,7 @@ func (m *Manager) ReadChunk(transferID, fileID string, offset, length int64) (io
 }
 
 type chunkReader struct {
-	f        *os.File
+	f         *os.File
 	remaining int64
 }
 
@@ -247,6 +259,6 @@ func fileExists(path string) bool {
 
 // Errors.
 var (
-	ErrHashMismatch  = errors.New("file hash mismatch")
-	ErrSkipConflict  = errors.New("file already exists (skip policy)")
+	ErrHashMismatch = errors.New("file hash mismatch")
+	ErrSkipConflict = errors.New("file already exists (skip policy)")
 )

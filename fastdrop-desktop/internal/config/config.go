@@ -157,6 +157,8 @@ func Load() (*Config, error) {
 }
 
 // Save writes the config to ConfigPath, creating directories as needed.
+// The write goes to config.json.tmp followed by an atomic rename so a crash
+// mid-write can never leave a truncated config.json behind.
 func Save(cfg *Config) error {
 	dir := AppDataDir()
 	if err := os.MkdirAll(dir, 0o755); err != nil {
@@ -166,7 +168,15 @@ func Save(cfg *Config) error {
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(ConfigPath(), data, 0o600)
+	tmpPath := ConfigPath() + ".tmp"
+	if err := os.WriteFile(tmpPath, data, 0o600); err != nil {
+		return fmt.Errorf("write config tmp: %w", err)
+	}
+	if err := os.Rename(tmpPath, ConfigPath()); err != nil {
+		_ = os.Remove(tmpPath)
+		return fmt.Errorf("replace config: %w", err)
+	}
+	return nil
 }
 
 // normalize enforces protocol invariants even if user config is wrong.
