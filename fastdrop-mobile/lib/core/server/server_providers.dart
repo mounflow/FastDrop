@@ -203,6 +203,13 @@ class FastDropServerNotifier extends StateNotifier<ServerState> {
                 ? DateTime.now().millisecondsSinceEpoch ~/ 1000
                 : null,
             errorCode: transfer.status == 'failed' ? 'INTERNAL_ERROR' : null,
+            // L15: 接收完成的批次记录首个落盘路径，供历史页"打开"入口。
+            savedPath: (transfer.direction == 'client_to_server' &&
+                    transfer.status == 'completed')
+                ? transfer.files
+                    .map((file) => file.finalPath)
+                    .firstWhere((path) => path != null, orElse: () => null)
+                : null,
           )));
         },
         onPeerConnected: (peer) {

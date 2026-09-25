@@ -4,6 +4,7 @@ import 'dart:io';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import 'package:fastdrop_mobile/core/errors/app_error.dart';
+import 'package:fastdrop_mobile/core/discovery/device_discovery.dart';
 import 'package:fastdrop_mobile/core/network/http_client.dart';
 import 'package:fastdrop_mobile/core/network/ws_client.dart';
 import 'package:fastdrop_mobile/core/providers.dart';
@@ -320,6 +321,33 @@ class MultiDeviceConnectionNotifier
     if (device == null) return;
     disconnectDevice(id!);
     await connectDevice(device, select: state.selectedDeviceId == id);
+  }
+
+  /// M20: mDNS 重新发现了已配对设备的新地址（IP 变了）→ 持久化新地址并
+  /// 按新地址重连。旧实现只会重拨存储的旧地址，导致换网/换热点后必须
+  /// 手动重新配对。Device.id 与 serverBaseUrl 同为 baseUrl（存储约定），
+  /// 因此换地址等于换 id：移除旧记录、写入新记录。
+  Future<void> adoptDeviceAddress(
+      String deviceId, DiscoveredDevice discovered) async {
+    final peer = state.peer(deviceId);
+    if (peer == null) return;
+    final device = peer.device;
+    if (device.serverBaseUrl == discovered.baseUrl) return;
+
+    final updated = Device(
+      id: discovered.baseUrl,
+      name: device.name,
+      serverBaseUrl: discovered.baseUrl,
+      sessionId: device.sessionId,
+      accessToken: device.accessToken,
+      lastSeen: DateTime.now(),
+      platform: device.platform,
+      expiresAt: device.expiresAt,
+    );
+    final store = _ref.read(deviceStoreProvider);
+    await store.removeDevice(device.id);
+    await store.saveDevice(updated);
+    await connectDevice(updated, select: state.selectedDeviceId == deviceId);
   }
 
   void disconnectDevice(String deviceId) {

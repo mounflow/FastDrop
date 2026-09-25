@@ -824,11 +824,30 @@ class _DevicesScreenState extends ConsumerState<DevicesScreen>
     final activeDevice = connState.activeDevice;
     if (activeDevice == null) return;
 
-    // 在发现的设备中查找匹配项
-    final found = devices.any((d) =>
-        d.baseUrl == activeDevice.serverBaseUrl ||
-        d.deviceName == activeDevice.name);
-    if (!found) return;
+    // 在发现的设备中查找匹配项（name 匹配可容忍 IP 变化）
+    DiscoveredDevice? found;
+    for (final d in devices) {
+      if (d.baseUrl == activeDevice.serverBaseUrl ||
+          d.deviceName == activeDevice.name) {
+        found = d;
+        break;
+      }
+    }
+    if (found == null) return;
+
+    // M20: IP 变了 → 先采纳新地址（持久化+重连），否则重连仍拨旧地址。
+    if (found.baseUrl != activeDevice.serverBaseUrl) {
+      if (_lastAutoReconnect != null &&
+          DateTime.now().difference(_lastAutoReconnect!) <
+              const Duration(seconds: 10)) {
+        return;
+      }
+      _lastAutoReconnect = DateTime.now();
+      unawaited(ref
+          .read(multiDeviceConnectionProvider.notifier)
+          .adoptDeviceAddress(activeDevice.id, found));
+      return;
+    }
 
     // 冷却：10 秒内不重复尝试
     if (_lastAutoReconnect != null &&

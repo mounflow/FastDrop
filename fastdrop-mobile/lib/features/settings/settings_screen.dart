@@ -6,6 +6,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:fastdrop_mobile/core/discovery/device_discovery.dart';
 import 'package:fastdrop_mobile/core/discovery/discovery_providers.dart';
 import 'package:fastdrop_mobile/core/app_info.dart';
+import 'package:fastdrop_mobile/core/platform/background_receive_service.dart';
 import 'package:fastdrop_mobile/core/server/server_providers.dart';
 import 'package:fastdrop_mobile/core/storage/session_store.dart';
 import 'package:fastdrop_mobile/core/providers.dart';
@@ -33,18 +34,38 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
   Device? _activeDevice;
   final _manualIpController = TextEditingController();
   String? _customDownloadDir;
+  bool? _ignoringBatteryOptimizations;
 
   @override
   void initState() {
     super.initState();
     _loadActiveDevice();
     _loadDownloadDir();
+    _loadBatteryOptimizationState();
   }
 
   @override
   void dispose() {
     _manualIpController.dispose();
     super.dispose();
+  }
+
+  /// 问题 9（小改档）：检测电池优化白名单状态。各厂商后台杀进程策略
+  /// 不同，但白名单是通用且用户可控的第一道保障。
+  Future<void> _loadBatteryOptimizationState() async {
+    final ignoring = await BackgroundReceiveService.isIgnoringBatteryOptimizations();
+    if (mounted) {
+      setState(() => _ignoringBatteryOptimizations = ignoring);
+    }
+  }
+
+  Future<void> _openBatteryOptimizationSettings() async {
+    await BackgroundReceiveService.openBatteryOptimizationSettings();
+    // 用户大概率改完设置返回，刷新状态。
+    if (mounted) {
+      await Future<void>.delayed(const Duration(milliseconds: 500));
+      await _loadBatteryOptimizationState();
+    }
   }
 
   Future<void> _loadActiveDevice() async {
@@ -184,6 +205,45 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
               );
             },
           ),
+
+          // -- 问题 9（小改档）：电池优化白名单引导 --------------------------
+          if (_ignoringBatteryOptimizations == false) ...[
+            Padding(
+              padding: const EdgeInsets.fromLTRB(16, 8, 16, 4),
+              child: Material(
+                color: const Color(0xFFFFF7E6),
+                borderRadius: BorderRadius.circular(10),
+                child: Padding(
+                  padding: const EdgeInsets.all(12),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      const Row(
+                        children: [
+                          Icon(Icons.battery_saver, size: 18, color: Color(0xFFB45309)),
+                          SizedBox(width: 8),
+                          Expanded(
+                            child: Text(
+                              '为了保证后台接收稳定，建议将 FastDrop 加入电池优化白名单',
+                              style: TextStyle(fontSize: 13),
+                            ),
+                          ),
+                        ],
+                      ),
+                      const SizedBox(height: 8),
+                      Align(
+                        alignment: Alignment.centerRight,
+                        child: TextButton(
+                          onPressed: _openBatteryOptimizationSettings,
+                          child: const Text('去设置'),
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+            ),
+          ],
 
           const Divider(),
 

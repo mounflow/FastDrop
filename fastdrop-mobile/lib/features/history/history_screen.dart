@@ -4,6 +4,7 @@ import 'dart:convert';
 import 'package:flutter/material.dart';
 
 import 'package:fastdrop_mobile/core/network/http_client.dart';
+import 'package:fastdrop_mobile/core/platform/background_receive_service.dart';
 import 'package:fastdrop_mobile/core/storage/session_store.dart';
 import 'package:fastdrop_mobile/core/storage/transfer_history_store.dart';
 import 'package:fastdrop_mobile/shared/models/transfer.dart';
@@ -254,6 +255,21 @@ class _HistoryScreenState extends State<HistoryScreen> {
                       ),
                     ),
                   ),
+                if (transfer.savedPath != null &&
+                    transfer.status == 'completed' &&
+                    transfer.direction == 'server_to_client')
+                  Padding(
+                    padding: const EdgeInsets.only(top: 8),
+                    child: Row(
+                      children: [
+                        ElevatedButton.icon(
+                          onPressed: () => _openSavedFile(transfer.savedPath!),
+                          icon: const Icon(Icons.open_in_new, size: 16),
+                          label: const Text('打开文件'),
+                        ),
+                      ],
+                    ),
+                  ),
               ],
             ),
           ),
@@ -326,6 +342,19 @@ class _HistoryScreenState extends State<HistoryScreen> {
   // ---------------------------------------------------------------------------
   // Helpers
   // ---------------------------------------------------------------------------
+
+  /// L15: 用系统查看器打开已接收的文件；失败时给用户可见的提示。
+  Future<void> _openSavedFile(String path) async {
+    try {
+      await BackgroundReceiveService.openFile(path);
+    } catch (_) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('无法打开该文件（可能已被移动或删除）')),
+        );
+      }
+    }
+  }
 
   Widget _detailRow(String label, String value) {
     return Padding(

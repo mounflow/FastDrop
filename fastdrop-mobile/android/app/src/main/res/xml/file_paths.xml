@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- L15: 覆盖接收文件可能落盘的位置（默认 Download/FastDrop 属 external-path；
+     用户自定义目录可能是应用私有目录或 SD 卡），全部授予临时读权限。 -->
+<paths>
+    <external-path name="external_storage" path="." />
+    <files-path name="internal_files" path="." />
+    <cache-path name="cache" path="." />
+    <external-files-path name="external_files" path="." />
+    <external-cache-path name="external_cache" path="." />
+</paths>

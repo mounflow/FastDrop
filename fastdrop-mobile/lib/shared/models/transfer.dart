@@ -222,6 +222,7 @@ class TransferRow {
     this.completedAt,
     this.errorCode,
     this.errorMessage,
+    this.savedPath,
   });
 
   final String id;
@@ -237,6 +238,10 @@ class TransferRow {
   final String? errorCode;
   final String? errorMessage;
 
+  /// L15: 接收文件的落盘路径（仅接收方向且有落盘的记录才有），
+  /// 历史页据此提供"打开文件"入口。
+  final String? savedPath;
+
   factory TransferRow.fromJson(Map<String, dynamic> json) {
     return TransferRow(
       id: json['id'] as String,
@@ -251,6 +256,7 @@ class TransferRow {
       completedAt: json['completedAt'] as int?,
       errorCode: json['errorCode'] as String?,
       errorMessage: json['errorMessage'] as String?,
+      savedPath: json['savedPath'] as String?,
     );
   }
 
@@ -260,6 +266,7 @@ class TransferRow {
     int? completedAt,
     String? errorCode,
     String? errorMessage,
+    String? savedPath,
   }) {
     return TransferRow(
       id: id,
@@ -274,6 +281,7 @@ class TransferRow {
       completedAt: completedAt ?? this.completedAt,
       errorCode: errorCode ?? this.errorCode,
       errorMessage: errorMessage ?? this.errorMessage,
+      savedPath: savedPath ?? this.savedPath,
     );
   }
 
@@ -290,6 +298,7 @@ class TransferRow {
         if (completedAt != null) 'completedAt': completedAt,
         if (errorCode != null) 'errorCode': errorCode,
         if (errorMessage != null) 'errorMessage': errorMessage,
+        if (savedPath != null) 'savedPath': savedPath,
       };
 
   double get progress => totalBytes > 0 ? transferredBytes / totalBytes : 0.0;
