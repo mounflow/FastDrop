@@ -3,6 +3,7 @@ import 'dart:convert';
 import 'dart:io';
 import 'dart:math';
 import 'package:flutter/foundation.dart';
+import 'package:fastdrop_mobile/core/errors/app_error.dart';
 import 'package:fastdrop_mobile/core/network/http_client.dart';
 import 'package:fastdrop_mobile/core/network/ws_client.dart';
 import 'package:fastdrop_mobile/core/utils/file_utils.dart';
@@ -117,6 +118,8 @@ class TransferService {
 
     try {
       // 1. Validate all files exist and compute SHA-256.
+      // preparing 先行上报，让 UI 在大文件哈希阶段就有占位状态。
+      onStateChange?.call(batchOfferId, 'preparing');
       for (final path in filePaths) {
         final file = File(path);
         if (!await file.exists()) {
@@ -131,9 +134,9 @@ class TransferService {
           size: size,
           sha256: sha256,
         ));
+        // 每个文件哈希完成后检查取消，避免大文件场景下取消响应迟钝。
+        if (cancelToken.isCancelled) return;
       }
-
-      if (cancelToken.isCancelled) return;
 
       // 2. Create the transfer batch on the server.
       final createBody = CreateTransferBody(
@@ -188,8 +191,8 @@ class TransferService {
         ));
       }
 
-      // 4. Upload files with concurrency limits.
-      await _uploadBatch(
+      // 4. Upload files with concurrency limits. 单文件失败不中止整批。
+      final batchResult = await _uploadBatch(
         transferId: createResult.transferId,
         fileTasks: fileTasks,
         cancelToken: cancelToken,
@@ -201,18 +204,34 @@ class TransferService {
         return;
       }
 
+      if (batchResult.failedCount > 0) {
+        // 部分文件失败时整批以 failed 收尾，但保留已完成文件的结果，
+        // errorMessage 注明失败比例（M13）。
+        final errorCode =
+            batchResult.firstError != null && _isSessionError(batchResult.firstError!)
+                ? ErrorCodes.sessionExpired
+                : ErrorCodes.transferFailed;
+        onStateChange?.call(
+          createResult.transferId,
+          'failed',
+          errorCode: errorCode,
+          errorMessage:
+              '${batchResult.failedCount}/${fileTasks.length} 个文件失败',
+        );
+        return;
+      }
+
       onStateChange?.call(createResult.transferId, 'completed');
     } catch (e) {
       debugPrint('[TransferService] uploadFiles error: $e');
       if (cancelToken.isCancelled) {
         onStateChange?.call(callbackTransferId, 'cancelled');
       } else {
-        final code =
-            e is ChunkUploadException ? 'TRANSFER_FAILED' : 'INTERNAL_ERROR';
+        // 会话类错误（401 / SESSION_*）单独标注，供 UI 引导重新配对（L13）。
         onStateChange?.call(
           callbackTransferId,
           'failed',
-          errorCode: code,
+          errorCode: _errorCodeFor(e),
           errorMessage: e.toString(),
         );
       }
@@ -243,6 +262,9 @@ class TransferService {
   ///
   /// Downloads in 4 MB chunks using Range requests, writes to a temp part file,
   /// verifies SHA-256, and moves to the final download path.
+  ///
+  /// 支持断点续传（H10）：`.part` 已存在时按其长度对齐到完整块边界后继续；
+  /// 下载失败保留 `.part` 供下次续传，仅取消与哈希不一致时清理。
   Future<String> downloadFile({
     required String transferId,
     required String fileId,
@@ -253,30 +275,64 @@ class TransferService {
     final partPath = await FileUtils.partFilePath(transferId, fileId);
     final pauseController =
         _pauseControllers.putIfAbsent(transferId, _PauseController.new);
+    // 为下载注册取消令牌（M15）：复用 _cancelTokens 机制，key 用 transferId，
+    // cancelTransfer(transferId) 即可触发。
+    final cancelToken = _cancelTokens.putIfAbsent(transferId, CancelToken.new);
 
     try {
       final chunkSize = FileUtils.chunkSize;
       final totalChunks = (totalBytes + chunkSize - 1) ~/ chunkSize;
 
-      // Download each chunk via Range requests and write to the part file.
-      final file = File(partPath);
-      final raf = await file.open(mode: FileMode.write);
+      // 续传对齐：按已有 .part 长度折算起始块。尾部不足一块的残余数据无法
+      // 保证完整，截断丢弃；异常超长的 .part（> totalBytes）直接作废重传。
+      final partFile = File(partPath);
+      final existingLen = await partFile.exists() ? await partFile.length() : 0;
+      final partChunks = existingLen ~/ chunkSize;
+      final startChunk = partChunks < totalChunks ? partChunks : 0;
 
+      // Dart RAF 语义说明：FileMode.write 打开即截断，无法续传；FileMode.append
+      // 与 write 的区别仅是不截断、初始位置在文件末尾（且 POSIX 实现落在
+      // O_APPEND 上，setPosition 对写入终点不可靠）。因此这里以 append 打开
+      // 后先 truncate 到对齐边界，再逐块顺序写入——每块都紧跟上一块追加，
+      // 不依赖 setPosition，写入顺序由顺序 await 保证。
+      final raf = await partFile.open(mode: FileMode.append);
       try {
-        for (int i = 0; i < totalChunks; i++) {
+        await raf.truncate(startChunk * chunkSize);
+        for (int i = startChunk; i < totalChunks; i++) {
+          if (cancelToken.isCancelled) {
+            throw const _TransferCancelledException();
+          }
           await pauseController.waitWhilePaused();
+
           final start = i * chunkSize;
           final end = ((start + chunkSize - 1) < (totalBytes - 1))
               ? (start + chunkSize - 1)
               : (totalBytes - 1);
 
-          final response = await httpClient.get(
-            '/api/v1/transfers/$transferId/files/$fileId/content',
-            headers: {'Range': 'bytes=$start-$end'},
+          // 与 ChunkUploader 同款 5 次退避重试（500ms..8s），401/403 等会话类
+          // 错误不重试；4 MB 数据请求使用更长的 per-request 超时（L7）。
+          final response = await ChunkUploader.retry(
+            () => httpClient.get(
+              '/api/v1/transfers/$transferId/files/$fileId/content',
+              headers: {'Range': 'bytes=$start-$end'},
+              timeout: FastDropHttpClient.largeTransferTimeout,
+            ),
+            beforeAttempt: () async {
+              await pauseController.waitWhilePaused();
+              if (cancelToken.isCancelled) {
+                throw const _TransferCancelledException();
+              }
+            },
           );
 
           final bodyBytes = response.bodyBytes;
-          await raf.setPosition(start);
+          if (bodyBytes.length != end - start + 1) {
+            throw Exception(
+              'Range response truncated for $fileName: '
+              'expected ${end - start + 1} bytes, got ${bodyBytes.length}',
+            );
+          }
+          // append 模式写入总落在文件末尾，顺序写入即块序。
           await raf.writeFrom(bodyBytes);
 
           onProgress?.call(
@@ -299,6 +355,7 @@ class TransferService {
       if (expectedSha256.isNotEmpty) {
         final actualSha256 = await FileUtils.computeFileSha256(partPath);
         if (actualSha256.toLowerCase() != expectedSha256.toLowerCase()) {
+          // 整个文件内容已损坏，续传无从谈起：删除 .part 让下次全新下载。
           await File(partPath).delete();
           throw Exception(
             'SHA-256 mismatch for $fileName: expected $expectedSha256, got $actualSha256',
@@ -310,16 +367,32 @@ class TransferService {
       final finalPath = await FileUtils.movePartToFinal(partPath, fileName);
       onStateChange?.call(transferId, 'completed');
       return finalPath;
-    } on Exception {
-      // Clean up partial download on failure.
-      final partFile = File(partPath);
-      if (await partFile.exists()) {
-        await partFile.delete();
+    } on Exception catch (e) {
+      if (e is _TransferCancelledException) {
+        // 取消即中止并清理 .part（M15）；cancelTransfer 已删整个临时目录，
+        // 这里兜底处理目录删除失败（如 Windows 下句柄未释放）的情况。
+        try {
+          if (await File(partPath).exists()) {
+            await File(partPath).delete();
+          }
+        } catch (_) {}
+      } else {
+        // 下载失败保留 .part 供断点续传（H10c），仅上报失败状态。
+        debugPrint('[TransferService] downloadFile failed: $e');
+        onStateChange?.call(
+          transferId,
+          'failed',
+          errorCode: _errorCodeFor(e),
+          errorMessage: e.toString(),
+        );
       }
       rethrow;
     } finally {
       if (identical(_pauseControllers[transferId], pauseController)) {
         _pauseControllers.remove(transferId)?.resume();
+      }
+      if (identical(_cancelTokens[transferId], cancelToken)) {
+        _cancelTokens.remove(transferId);
       }
     }
   }
@@ -395,31 +468,45 @@ class TransferService {
   // ---------------------------------------------------------------------------
 
   /// Upload all files in [fileTasks] respecting concurrency limits.
-  Future<void> _uploadBatch({
+  ///
+  /// 单文件失败只计入结果并继续其余文件，不中止整批（M13）。
+  Future<_BatchResult> _uploadBatch({
     required String transferId,
     required List<_FileUploadTask> fileTasks,
     required CancelToken cancelToken,
     required _PauseController pauseController,
   }) async {
+    final result = _BatchResult();
     // Process files in groups of up to _maxConcurrentFiles.
     for (int i = 0; i < fileTasks.length; i += _maxConcurrentFiles) {
-      if (cancelToken.isCancelled) return;
+      if (cancelToken.isCancelled) return result;
       await pauseController.waitWhilePaused();
-      if (cancelToken.isCancelled) return;
+      if (cancelToken.isCancelled) return result;
 
       final group = fileTasks.skip(i).take(_maxConcurrentFiles).toList();
       await Future.wait(
         group.map((task) {
-          Future<void> upload() => _uploadFile(
+          Future<void> upload() async {
+            try {
+              await _uploadFile(
                 transferId: transferId,
                 task: task,
                 cancelToken: cancelToken,
                 pauseController: pauseController,
               );
+            } catch (e) {
+              result.failedCount++;
+              result.firstError ??= e;
+              debugPrint('[TransferService] file ${task.fileInfo.name} '
+                  'failed (${result.failedCount}/${fileTasks.length}): $e');
+            }
+          }
+
           return fileLimiter?.run(upload) ?? upload();
         }),
       );
     }
+    return result;
   }
 
   /// Upload all chunks for a single file, with up to [_maxChunksPerFile]
@@ -587,6 +674,22 @@ class TransferService {
   // Private: helpers
   // ---------------------------------------------------------------------------
 
+  /// Whether [error] is a session-class failure (401 / `SESSION_*` code),
+  /// including ones wrapped by [ChunkUploadException].
+  static bool _isSessionError(Object error) {
+    final appError = error is ChunkUploadException ? error.cause : error;
+    return appError is AppError &&
+        (appError.code.startsWith('SESSION_') || appError.statusCode == 401);
+  }
+
+  /// Map an exception to a stable error code for state callbacks (L13).
+  static String _errorCodeFor(Object error) {
+    if (_isSessionError(error)) return ErrorCodes.sessionExpired;
+    return error is ChunkUploadException
+        ? ErrorCodes.transferFailed
+        : ErrorCodes.internalError;
+  }
+
   static String _generateOfferId() {
     final random = Random.secure();
     final bytes = List<int>.generate(16, (_) => random.nextInt(256));
@@ -678,6 +781,14 @@ class _FileUploadTask {
   final _FileInfo fileInfo;
   final TransferFileResult fileResult;
   final int totalChunks;
+}
+
+/// Aggregated outcome of one upload batch (M13).
+class _BatchResult {
+  int failedCount = 0;
+
+  /// First failure observed, used to classify the batch error code.
+  Object? firstError;
 }
 
 class _FileUploadState {

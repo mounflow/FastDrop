@@ -3,11 +3,13 @@ import 'dart:io';
 
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import 'package:fastdrop_mobile/core/errors/app_error.dart';
 import 'package:fastdrop_mobile/core/network/http_client.dart';
 import 'package:fastdrop_mobile/core/network/ws_client.dart';
 import 'package:fastdrop_mobile/core/providers.dart';
 import 'package:fastdrop_mobile/core/storage/session_store.dart';
 import 'package:fastdrop_mobile/core/storage/transfer_history_store.dart';
+import 'package:fastdrop_mobile/core/utils/file_utils.dart';
 import 'package:fastdrop_mobile/features/transfer/transfer_service.dart';
 import 'package:fastdrop_mobile/shared/models/transfer.dart';
 
@@ -465,6 +467,16 @@ class MultiDeviceConnectionNotifier
   Future<void> acceptOffer(MultiIncomingOffer offer) async {
     final runtime = _runtimes[offer.deviceId];
     if (runtime == null) return;
+
+    // 磁盘空间预检（M18）：空间不足时不接受 offer，逐文件标 failed 并
+    // 通知对端 transfer.failed，避免下载中途才因写盘失败报废整个传输。
+    // availableSpace 返回 -1 表示无法判定，此时不做拒绝。
+    final availableBytes = await FileUtils.availableSpace();
+    if (availableBytes >= 0 && availableBytes < offer.totalBytes) {
+      _rejectOfferForInsufficientStorage(runtime, offer);
+      return;
+    }
+
     _removeOffer(offer);
     runtime.wsClient.send({
       'version': 1,
@@ -521,6 +533,53 @@ class MultiDeviceConnectionNotifier
       offer,
       allSucceeded ? 'completed' : 'failed',
       errorCode: allSucceeded ? null : 'INTERNAL_ERROR',
+    );
+  }
+
+  /// Insufficient-storage rejection path (M18): mark every offered file as
+  /// failed locally, notify the sender, and archive the offer as failed
+  /// without ever starting the downloads.
+  void _rejectOfferForInsufficientStorage(
+    _PeerRuntime runtime,
+    MultiIncomingOffer offer,
+  ) {
+    _removeOffer(offer);
+    final peer = state.peer(offer.deviceId);
+    if (peer != null) {
+      _setPeer(
+        offer.deviceId,
+        peer.copyWith(
+          activeDownloads: [
+            ...peer.activeDownloads,
+            ...offer.files.map(
+              (file) => MultiActiveDownload(
+                deviceId: offer.deviceId,
+                transferId: offer.transferId,
+                fileId: file.fileId,
+                fileName: file.name,
+                totalBytes: file.size,
+                status: 'failed',
+                error: '存储空间不足（INSUFFICIENT_STORAGE）',
+              ),
+            ),
+          ],
+        ),
+      );
+    }
+    runtime.wsClient.send({
+      'version': 1,
+      'type': 'transfer.failed',
+      'timestamp': DateTime.now().millisecondsSinceEpoch,
+      'payload': {
+        'transferId': offer.transferId,
+        'reason': ErrorCodes.insufficientStorage,
+      },
+    });
+    _recordIncomingOffer(
+      runtime,
+      offer,
+      'failed',
+      errorCode: ErrorCodes.insufficientStorage,
     );
   }
 

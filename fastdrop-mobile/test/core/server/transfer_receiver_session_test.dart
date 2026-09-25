@@ -6,6 +6,7 @@ import 'package:fastdrop_mobile/core/server/transfer_receiver.dart';
 import 'package:fastdrop_mobile/core/utils/file_utils.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:path_provider_platform_interface/path_provider_platform_interface.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 import 'package:shelf/shelf.dart';
 
 class _TestPathProvider extends PathProviderPlatform {
@@ -274,5 +275,223 @@ void main() {
     expect(receiver.resumeTransfer(transferId, 'session-b'), isFalse);
     expect(receiver.resumeTransfer(transferId, 'session-a'), isTrue);
     expect(receiver.getTransfer(transferId)?.status, 'transferring');
+  });
+
+  test('complete of one file keeps the batch transferring until all done (H8)',
+      () async {
+    SharedPreferences.setMockInitialValues({});
+    final originalPathProvider = PathProviderPlatform.instance;
+    final temp = await Directory.systemTemp.createTemp('fastdrop-h8-');
+    PathProviderPlatform.instance = _TestPathProvider(temp.path);
+    addTearDown(() async {
+      PathProviderPlatform.instance = originalPathProvider;
+      if (await temp.exists()) await temp.delete(recursive: true);
+    });
+
+    final receiver = TransferReceiver(
+      sessionManager: SessionManager(),
+      availableSpaceProvider: () async => -1,
+    );
+    final created = await receiver.handleCreateTransfer(Request(
+      'POST',
+      Uri.parse('http://localhost/api/v1/transfers'),
+      context: {'fastdrop.sessionId': 'session-a'},
+      headers: {'content-type': 'application/json'},
+      body: jsonEncode({
+        'direction': 'client_to_server',
+        'files': [
+          {'clientFileId': 'a', 'name': 'a.bin', 'size': 1},
+          {'clientFileId': 'b', 'name': 'b.bin', 'size': 1},
+        ],
+      }),
+    ));
+    final result =
+        jsonDecode(await created.readAsString()) as Map<String, dynamic>;
+    final transferId = result['transferId'] as String;
+    final files =
+        (result['files'] as List<dynamic>).cast<Map<String, dynamic>>();
+    await receiver.acceptTransfer(transferId);
+
+    Future<Response> uploadChunk(String fileId) {
+      return receiver.handleChunkUpload(
+        Request(
+          'PUT',
+          Uri.parse('http://localhost/chunk'),
+          context: {'fastdrop.sessionId': 'session-a'},
+          body: [1],
+        ),
+        transferId,
+        fileId,
+        '0',
+      );
+    }
+
+    for (final file in files) {
+      final response = await uploadChunk(file['fileId'] as String);
+      expect(response.statusCode, 200);
+    }
+
+    // 第一个文件 complete 后，批次必须仍是 transferring（H8：verifying 只
+    // 作用于文件级），第二个文件随后 complete 才结束整批。
+    final firstComplete = await receiver.handleFileComplete(
+      Request(
+        'POST',
+        Uri.parse('http://localhost/complete'),
+        context: {'fastdrop.sessionId': 'session-a'},
+      ),
+      transferId,
+      files.first['fileId'] as String,
+    );
+    expect(firstComplete.statusCode, 200);
+    expect(receiver.getTransfer(transferId)!.status, 'transferring');
+    expect(receiver.getTransfer(transferId)!.files.first.status, 'completed');
+
+    final secondComplete = await receiver.handleFileComplete(
+      Request(
+        'POST',
+        Uri.parse('http://localhost/complete'),
+        context: {'fastdrop.sessionId': 'session-a'},
+      ),
+      transferId,
+      files.last['fileId'] as String,
+    );
+    expect(secondComplete.statusCode, 200);
+    expect(receiver.getTransfer(transferId)!.status, 'completed');
+  });
+
+  test('chunk uploads are rejected only for terminal transfer states', () async {
+    SharedPreferences.setMockInitialValues({});
+    final originalPathProvider = PathProviderPlatform.instance;
+    final temp = await Directory.systemTemp.createTemp('fastdrop-term-');
+    PathProviderPlatform.instance = _TestPathProvider(temp.path);
+    addTearDown(() async {
+      PathProviderPlatform.instance = originalPathProvider;
+      if (await temp.exists()) await temp.delete(recursive: true);
+    });
+
+    final receiver = TransferReceiver(
+      sessionManager: SessionManager(),
+      availableSpaceProvider: () async => -1,
+    );
+    final created = await receiver.handleCreateTransfer(Request(
+      'POST',
+      Uri.parse('http://localhost/api/v1/transfers'),
+      context: {'fastdrop.sessionId': 'session-a'},
+      headers: {'content-type': 'application/json'},
+      body: jsonEncode({
+        'direction': 'client_to_server',
+        'files': [
+          {'clientFileId': 'a', 'name': 'a.bin', 'size': 1},
+        ],
+      }),
+    ));
+    final result =
+        jsonDecode(await created.readAsString()) as Map<String, dynamic>;
+    final transferId = result['transferId'] as String;
+    final fileId =
+        ((result['files'] as List<dynamic>).single
+            as Map<String, dynamic>)['fileId'] as String;
+
+    Future<int> uploadStatus() async {
+      final response = await receiver.handleChunkUpload(
+        Request(
+          'PUT',
+          Uri.parse('http://localhost/chunk'),
+          context: {'fastdrop.sessionId': 'session-a'},
+          body: [1],
+        ),
+        transferId,
+        fileId,
+        '0',
+      );
+      return response.statusCode;
+    }
+
+    // 非 accepting 状态下 partPath 尚未创建 → 明确 409 而非 500。
+    expect(await uploadStatus(), 409);
+    await receiver.acceptTransfer(transferId);
+
+    // 终态之外一律放行（含 paused 与文件级 verifying 场景）。
+    for (final status in const ['transferring', 'paused', 'verifying']) {
+      receiver.getTransfer(transferId)!.status = status;
+      expect(await uploadStatus(), 200, reason: 'status=$status 应放行');
+    }
+    for (final status in const ['completed', 'failed', 'cancelled', 'rejected']) {
+      receiver.getTransfer(transferId)!.status = status;
+      expect(await uploadStatus(), 409, reason: 'status=$status 应拒绝');
+    }
+  });
+
+  test('downloads are refused once the transfer is cancelled or failed',
+      () async {
+    final receiver = TransferReceiver(
+      sessionManager: SessionManager(),
+      availableSpaceProvider: () async => -1,
+    );
+    final created = await receiver.handleCreateTransfer(Request(
+      'POST',
+      Uri.parse('http://localhost/api/v1/transfers'),
+      context: {'fastdrop.sessionId': 'session-a'},
+      headers: {'content-type': 'application/json'},
+      body: jsonEncode({
+        'direction': 'server_to_client',
+        'files': [
+          {'clientFileId': 'a', 'name': 'a.bin', 'size': 1},
+        ],
+      }),
+    ));
+    final result =
+        jsonDecode(await created.readAsString()) as Map<String, dynamic>;
+    final transferId = result['transferId'] as String;
+    final fileId =
+        ((result['files'] as List<dynamic>).single
+            as Map<String, dynamic>)['fileId'] as String;
+
+    Future<Response> download() {
+      return receiver.handleFileDownload(
+        Request(
+          'GET',
+          Uri.parse('http://localhost/content'),
+          context: {'fastdrop.sessionId': 'session-a'},
+        ),
+        transferId,
+        fileId,
+      );
+    }
+
+    receiver.getTransfer(transferId)!.status = 'cancelled';
+    expect((await download()).statusCode, 410);
+    receiver.getTransfer(transferId)!.status = 'failed';
+    expect((await download()).statusCode, 409);
+  });
+
+  test('cancelTransfer enforces session ownership', () async {
+    final receiver = TransferReceiver(
+      sessionManager: SessionManager(),
+      availableSpaceProvider: () async => -1,
+    );
+    final created = await receiver.handleCreateTransfer(Request(
+      'POST',
+      Uri.parse('http://localhost/api/v1/transfers'),
+      context: {'fastdrop.sessionId': 'session-a'},
+      headers: {'content-type': 'application/json'},
+      body: jsonEncode({
+        'direction': 'client_to_server',
+        'files': [
+          {'clientFileId': 'a', 'name': 'a.bin', 'size': 1},
+        ],
+      }),
+    ));
+    final transferId =
+        (jsonDecode(await created.readAsString())
+            as Map<String, dynamic>)['transferId'] as String;
+
+    // 跨会话取消：拒绝且状态不变。
+    expect(receiver.cancelTransfer(transferId, sessionId: 'session-b'), isFalse);
+    expect(receiver.getTransfer(transferId)!.status, 'waiting_accept');
+
+    // 属主取消：成功。
+    expect(receiver.cancelTransfer(transferId, sessionId: 'session-a'), isTrue);
+    expect(receiver.getTransfer(transferId)!.status, 'cancelled');
   });
 }

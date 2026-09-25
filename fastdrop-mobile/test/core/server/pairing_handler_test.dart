@@ -51,6 +51,46 @@ void main() {
     expect(accepted['session'], isA<Map<String, dynamic>>());
   });
 
+  test('accepted accessToken is wiped from memory after the first poll (L8)',
+      () async {
+    final handler = PairingHandler(
+      sessionManager: SessionManager(),
+      localDevice: localDevice,
+    );
+
+    final response = await handler.handlePairDiscover(
+      Request(
+        'POST',
+        Uri.parse('http://localhost/api/v1/pair/discover'),
+        body: jsonEncode({'device': remoteDevice.toJson()}),
+      ),
+    );
+    final created =
+        jsonDecode(await response.readAsString()) as Map<String, dynamic>;
+    final requestId = created['requestId'] as String;
+
+    // 首次轮询拿到明文 accessToken。
+    final first = handler.handlePollRequest(
+      Request('GET', Uri.parse('http://localhost/')),
+      requestId,
+    );
+    final firstBody =
+        jsonDecode(await first.readAsString()) as Map<String, dynamic>;
+    final session = firstBody['session'] as Map<String, dynamic>;
+    expect(session['accessToken'], isNotEmpty);
+
+    // 再次轮询：accessToken 已从内存抹除，仅保留 sessionId 等字段。
+    final second = handler.handlePollRequest(
+      Request('GET', Uri.parse('http://localhost/')),
+      requestId,
+    );
+    final secondBody =
+        jsonDecode(await second.readAsString()) as Map<String, dynamic>;
+    final wipedSession = secondBody['session'] as Map<String, dynamic>;
+    expect(wipedSession['accessToken'], isEmpty);
+    expect(wipedSession['sessionId'], session['sessionId']);
+  });
+
   test('pair discover waits when confirmation is enabled', () async {
     var confirmationCount = 0;
     final handler = PairingHandler(

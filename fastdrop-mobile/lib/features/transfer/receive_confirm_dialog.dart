@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:fastdrop_mobile/core/server/server_providers.dart';
 import 'package:fastdrop_mobile/core/server/transfer_providers.dart';
 import 'package:fastdrop_mobile/core/server/transfer_receiver.dart';
@@ -28,6 +30,10 @@ class _ReceiveConfirmDialogWatcherState
     extends ConsumerState<ReceiveConfirmDialogWatcher> {
   final Set<String> _shownTransferIds = {};
 
+  /// 确认超时：与发送端 2 分钟等待超时（multi_device_connection.dart 的
+  /// _waitForTransferReady）对齐，超时未确认按拒绝处理，消除僵尸传输。
+  static const _confirmTimeout = Duration(minutes: 2);
+
   @override
   Widget build(BuildContext context) {
     final transfers = ref.watch(incomingTransfersProvider);
@@ -54,11 +60,11 @@ class _ReceiveConfirmDialogWatcherState
         ? fileNames.join('\n')
         : '${fileNames.take(3).join('\n')}\n... 还有 ${fileNames.length - 3} 个文件';
 
-    Navigator.of(navContext, rootNavigator: true).push(
-      DialogRoute<void>(
-        context: navContext,
-        barrierDismissible: false,
-        builder: (ctx) => AlertDialog(
+    final navigator = Navigator.of(navContext, rootNavigator: true);
+    final route = DialogRoute<void>(
+      context: navContext,
+      barrierDismissible: false,
+      builder: (ctx) => AlertDialog(
         title: const Row(
           children: [
             Icon(Icons.file_download, size: 24),
@@ -116,8 +122,20 @@ class _ReceiveConfirmDialogWatcherState
           ),
         ],
         ),
-      ),
     );
+
+    // 超时自动拒绝（M17）：先按拒绝处理（通知对端），再撤下仍挂着的对话框。
+    final timeout = Timer(_confirmTimeout, () {
+      ref
+          .read(fastdropServerProvider.notifier)
+          .rejectTransfer(transfer.transferId);
+      if (route.navigator != null) {
+        navigator.removeRoute(route);
+      }
+    });
+    // 用户主动确认/拒绝后取消超时。
+    route.popped.whenComplete(timeout.cancel);
+    navigator.push(route);
   }
 
   static String _formatBytes(int bytes) {

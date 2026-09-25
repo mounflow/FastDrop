@@ -57,8 +57,11 @@ class ServerTransfer {
   final List<ServerFileTask> files;
   final DateTime createdAt;
 
-  /// created → waiting_accept → preparing → transferring → verifying → completed
-  /// Also: rejected, cancelled, failed
+  /// created → waiting_accept → preparing → transferring → completed
+  /// Also: rejected, cancelled, failed.
+  ///
+  /// `verifying` 只发生在单个文件任务上（见 [ServerFileTask.status]）；
+  /// 批次状态不再进入 verifying，避免阻塞同批其他文件的分块写入。
   String status = 'waiting_accept';
 
   int get totalBytes => files.fold(0, (sum, f) => sum + f.size);
@@ -160,6 +163,18 @@ class TransferReceiver {
   static const _maxJsonBytes = 1024 * 1024;
   static const _chunkBodySlack = 1024;
 
+  // -- Transfer 终态集合（分块入口与内存淘汰共用） ------------------------------
+  static const _terminalStatuses = {
+    'completed',
+    'failed',
+    'cancelled',
+    'rejected',
+  };
+
+  // -- 内存态保留策略（L8）：终态传输延迟清理 + 数量上限 ------------------------
+  static const _retentionDelay = Duration(minutes: 10);
+  static const _maxRetainedTransfers = 200;
+
   // -- Progress throttle -------------------------------------------------------
   final HashMap<String, DateTime> _lastProgressPush = HashMap();
   static const _progressInterval = Duration(milliseconds: 300);
@@ -196,13 +211,18 @@ class TransferReceiver {
     final transfer = _transfers[transferId];
     if (transfer == null || transfer.status != 'waiting_accept') return;
     transfer.status = 'rejected';
+    _releaseFileSemaphores(transfer);
+    _scheduleRetentionCleanup(transferId);
     _notifyChanged(transfer);
   }
 
-  /// Cancel an active transfer.
-  void cancelTransfer(String transferId) {
+  /// Cancel an active transfer. When [sessionId] is provided, the transfer
+  /// must belong to that session — a mismatch leaves the transfer untouched
+  /// and returns false so the WS layer can report an error to that session.
+  bool cancelTransfer(String transferId, {String? sessionId}) {
     final transfer = _transfers[transferId];
-    if (transfer == null) return;
+    if (transfer == null) return false;
+    if (sessionId != null && transfer.sessionId != sessionId) return false;
     transfer.status = 'cancelled';
     for (final file in transfer.files) {
       if (file.status == 'transferring' || file.status == 'pending') {
@@ -210,7 +230,10 @@ class TransferReceiver {
       }
     }
     _cleanupTempFiles(transfer);
+    _releaseFileSemaphores(transfer);
+    _scheduleRetentionCleanup(transferId);
     _notifyChanged(transfer);
+    return true;
   }
 
   /// Pause an active transfer owned by [sessionId]. Chunks already accepted
@@ -327,6 +350,7 @@ class TransferReceiver {
       createdAt: DateTime.now(),
     );
     _transfers[transferId] = transfer;
+    _evictOverflowTransfers();
     _notifyChanged(transfer);
 
     // Notify UI for user confirmation.
@@ -364,14 +388,20 @@ class TransferReceiver {
       return _error(
           403, 'SESSION_INVALID', 'Transfer belongs to another session');
     }
-    if (transfer.status != 'transferring' && transfer.status != 'paused') {
+    // 仅拒绝终态传输（H8）：同批某个文件在校验中（文件级 verifying）时
+    // 批次保持 transferring，其他文件的分块写入不受阻塞。
+    if (_terminalStatuses.contains(transfer.status)) {
       return _error(
-          409, 'INVALID_REQUEST', 'Transfer is not in transferring state');
+          409, 'INVALID_REQUEST', 'Transfer is already ${transfer.status}');
     }
 
     final file = transfer.files.where((f) => f.fileId == fileId).firstOrNull;
     if (file == null) {
       return _error(404, 'FILE_NOT_FOUND', 'File not found in transfer');
+    }
+    // acceptTransfer 之前 .part 尚未创建，无法落盘，明确拒绝而非 500。
+    if (file.partPath == null) {
+      return _error(409, 'INVALID_REQUEST', 'Transfer is not accepted yet');
     }
 
     final chunkIndex = int.tryParse(chunkIndexStr);
@@ -439,10 +469,13 @@ class TransferReceiver {
     } finally {
       fileSem.release();
       _globalSem.release();
+      // 只递减在途计数，不在这里移除 _fileSems（L6）：两个请求交错时
+      // （A 的 finally 恰好排在 B 的 putIfAbsent 之后），移除会让后来者
+      // 拿到全新的空信号量，单文件 3 并发上限被击穿。信号量统一在传输
+      // 终态时通过 [_releaseFileSemaphores] 清理。
       final remaining = (_fileInFlight[fileId] ?? 1) - 1;
       if (remaining <= 0) {
         _fileInFlight.remove(fileId);
-        _fileSems.remove(fileId);
       } else {
         _fileInFlight[fileId] = remaining;
       }
@@ -466,6 +499,10 @@ class TransferReceiver {
     if (transfer.status == 'paused') {
       return _error(409, 'INVALID_REQUEST', 'Transfer is paused');
     }
+    if (_terminalStatuses.contains(transfer.status)) {
+      return _error(
+          409, 'INVALID_REQUEST', 'Transfer is already ${transfer.status}');
+    }
 
     final file = transfer.files.where((f) => f.fileId == fileId).firstOrNull;
     if (file == null) {
@@ -478,7 +515,8 @@ class TransferReceiver {
           'Missing chunks: ${file.receivedChunks.length}/${file.totalChunks}');
     }
 
-    transfer.status = 'verifying';
+    // verifying 只作用于单个文件任务（H8）；批次状态保持 transferring，
+    // 其余文件的分块写入不因此被拒。
     file.status = 'verifying';
 
     try {
@@ -487,9 +525,11 @@ class TransferReceiver {
 
       if (file.sha256 != null &&
           actualSha.toLowerCase() != file.sha256!.toLowerCase()) {
+        // 对齐 Go 端 CompleteFile 的文件级语义：哈希不一致只标失败该文件，
+        // 不把整个批次拖入 failed。
         file.status = 'failed';
-        transfer.status = 'failed';
         _notifyChanged(transfer);
+        _scheduleRetentionCleanupIfSettled(transfer);
         return _error(400, 'FILE_HASH_MISMATCH',
             'SHA-256 mismatch: expected ${file.sha256}, got $actualSha');
       }
@@ -505,10 +545,10 @@ class TransferReceiver {
       if (allDone) {
         transfer.status = 'completed';
         _cleanupTempFiles(transfer);
-      } else {
-        transfer.status = 'transferring';
+        _releaseFileSemaphores(transfer);
       }
       _notifyChanged(transfer);
+      _scheduleRetentionCleanupIfSettled(transfer);
 
       // Push final progress.
       onProgress?.call(TransferProgressEvent(
@@ -528,9 +568,11 @@ class TransferReceiver {
     } catch (e, s) {
       debugPrint('[Transfer] File complete failed: $e');
       debugPrint('[Transfer] Stack: $s');
+      // 文件级失败：批次保持 transferring（Go 端语义），由发送端决定整批
+      // 的最终状态。
       file.status = 'failed';
-      transfer.status = 'failed';
       _notifyChanged(transfer);
+      _scheduleRetentionCleanupIfSettled(transfer);
       return _error(500, 'INTERNAL_ERROR', 'File completion failed: $e');
     }
   }
@@ -548,6 +590,14 @@ class TransferReceiver {
     if (!_isOwnedByRequest(request, transfer)) {
       return _error(
           403, 'SESSION_INVALID', 'Transfer belongs to another session');
+    }
+
+    // 终态传输不再提供下载（M15）：对端在取消/失败后不应继续拉取数据。
+    if (transfer.status == 'cancelled') {
+      return _error(410, 'TRANSFER_CANCELLED', 'Transfer has been cancelled');
+    }
+    if (transfer.status == 'failed') {
+      return _error(409, 'INVALID_REQUEST', 'Transfer has failed');
     }
 
     final file = transfer.files.where((f) => f.fileId == fileId).firstOrNull;
@@ -669,6 +719,63 @@ class TransferReceiver {
       transfer,
       _sessionManager.get(transfer.sessionId),
     );
+  }
+
+  /// Release the per-file semaphores owned by [transfer]'s files.
+  ///
+  /// Called only at transfer-terminal (or settled) points — see the comment
+  /// in [handleChunkUpload]'s finally block for why per-chunk removal is
+  /// unsafe.
+  void _releaseFileSemaphores(ServerTransfer transfer) {
+    for (final file in transfer.files) {
+      _fileSems.remove(file.fileId);
+      _fileInFlight.remove(file.fileId);
+    }
+  }
+
+  /// Whether a transfer has nothing left in flight (batch settled even if
+  /// the batch status itself was left at `transferring`).
+  static bool _isSettled(ServerTransfer transfer) {
+    return _terminalStatuses.contains(transfer.status) ||
+        transfer.files
+            .every((f) => f.status == 'completed' || f.status == 'failed');
+  }
+
+  /// Delayed in-memory cleanup (L8): drop a settled transfer from `_transfers`
+  /// after a retention window so the map cannot grow without bound on a
+  /// long-running server. Terminal statuses are set through paths that call
+  /// this helper.
+  void _scheduleRetentionCleanupIfSettled(ServerTransfer transfer) {
+    if (!_isSettled(transfer)) return;
+    _scheduleRetentionCleanup(transfer.transferId);
+  }
+
+  void _scheduleRetentionCleanup(String transferId) {
+    Timer(_retentionDelay, () {
+      final transfer = _transfers[transferId];
+      if (transfer == null || !_isSettled(transfer)) return;
+      _releaseFileSemaphores(transfer);
+      _transfers.remove(transferId);
+    });
+  }
+
+  /// Hard cap on retained transfers (L8): evict the oldest settled transfer
+  /// whenever the map exceeds [_maxRetainedTransfers]. Active transfers are
+  /// never evicted.
+  void _evictOverflowTransfers() {
+    while (_transfers.length > _maxRetainedTransfers) {
+      ServerTransfer? oldestSettled;
+      for (final transfer in _transfers.values) {
+        if (!_isSettled(transfer)) continue;
+        if (oldestSettled == null ||
+            transfer.createdAt.isBefore(oldestSettled.createdAt)) {
+          oldestSettled = transfer;
+        }
+      }
+      if (oldestSettled == null) break;
+      _releaseFileSemaphores(oldestSettled);
+      _transfers.remove(oldestSettled.transferId);
+    }
   }
 
   void _cleanupTempFiles(ServerTransfer transfer) {

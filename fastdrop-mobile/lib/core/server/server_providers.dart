@@ -83,7 +83,12 @@ class FastDropServerNotifier extends StateNotifier<ServerState> {
   bool get isEnabled => _enabled;
 
   Future<void> _loadEnabled() async {
-    await TransferHistoryStore().markInterruptedTransfersFailed();
+    // 历史记录修复失败不应阻塞 server 启动（M16）。
+    try {
+      await TransferHistoryStore().markInterruptedTransfersFailed();
+    } catch (e) {
+      debugPrint('[Server] markInterruptedTransfersFailed failed: $e');
+    }
     final prefs = await SharedPreferences.getInstance();
     _enabled = prefs.getBool(_enabledKey) ?? true;
     _requirePairConfirmation =

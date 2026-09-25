@@ -57,6 +57,11 @@ class FastDropHttpClient {
 
   /// Default timeout for all HTTP requests.
   final Duration timeout;
+
+  /// Longer timeout for 4 MB data requests (chunk PUT / Range GET): 慢链路
+  /// 下一个完整分块的传输时间远超 30 s 默认值，需要按请求放宽。
+  static const Duration largeTransferTimeout = Duration(seconds: 120);
+
   final HttpRequestLimiter? requestLimiter;
 
   Future<T> _limited<T>(Future<T> Function() action) {
@@ -163,13 +168,16 @@ class FastDropHttpClient {
     String path, {
     Map<String, String>? queryParams,
     Map<String, String>? headers,
+    Duration? timeout,
   }) async {
     var uri = _resolve(path);
     if (queryParams != null && queryParams.isNotEmpty) {
       uri = uri.replace(queryParameters: queryParams);
     }
     final response = await _limited(
-      () => _client.get(uri, headers: _headers(headers)).timeout(timeout),
+      () => _client
+          .get(uri, headers: _headers(headers))
+          .timeout(timeout ?? this.timeout),
     );
     return _handle(response);
   }
@@ -234,12 +242,15 @@ class FastDropHttpClient {
     Uint8List bytes, {
     String contentType = 'application/octet-stream',
     Map<String, String>? headers,
+    Duration? timeout,
   }) async {
     final uri = _resolve(path);
     final allHeaders = _headers(headers);
     allHeaders[HttpHeaders.contentTypeHeader] = contentType;
     final response = await _limited(
-      () => _client.put(uri, headers: allHeaders, body: bytes).timeout(timeout),
+      () => _client
+          .put(uri, headers: allHeaders, body: bytes)
+          .timeout(timeout ?? this.timeout),
     );
     return _handle(response);
   }

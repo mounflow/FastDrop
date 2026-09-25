@@ -3,11 +3,15 @@ import 'dart:convert';
 import 'dart:io';
 import 'dart:typed_data';
 
+import 'package:crypto/crypto.dart';
+import 'package:fastdrop_mobile/core/errors/app_error.dart';
 import 'package:fastdrop_mobile/core/network/http_client.dart';
 import 'package:fastdrop_mobile/core/utils/file_utils.dart';
 import 'package:fastdrop_mobile/features/transfer/transfer_service.dart';
 import 'package:fastdrop_mobile/shared/models/transfer.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:path_provider_platform_interface/path_provider_platform_interface.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
 /// A minimal mock HTTP server that records every chunk upload it receives.
 class _MockTransferServer {
@@ -29,6 +33,12 @@ class _MockTransferServer {
   String fileName = 'test.bin';
   Duration chunkDelay = Duration.zero;
   int chunkRequestCount = 0;
+
+  /// When set, chunk PUTs respond with this HTTP status and [chunkErrorCode]
+  /// instead of accepting the chunk (used to simulate non-retryable errors).
+  int? chunkFailureStatus;
+  String chunkErrorCode = 'INTERNAL_ERROR';
+
   final Completer<void> firstChunkReceived = Completer<void>();
   late HttpServer server;
 
@@ -65,18 +75,25 @@ class _MockTransferServer {
         if (!firstChunkReceived.isCompleted) firstChunkReceived.complete();
         if (chunkDelay > Duration.zero) await Future<void>.delayed(chunkDelay);
         final chunkIndex = int.parse(request.uri.pathSegments.last);
-        final bytes = await request.fold<List<int>>(
-          <int>[],
-          (all, chunk) => all..addAll(chunk),
-        );
-        chunkSizes[chunkIndex] = bytes.length;
-        if (recordData) {
-          chunkData[chunkIndex] = Uint8List.fromList(bytes);
+        if (chunkFailureStatus != null) {
+          request.response.statusCode = chunkFailureStatus!;
+          request.response.write(jsonEncode({
+            'error': {'code': chunkErrorCode, 'message': 'mock failure'},
+          }));
+        } else {
+          final bytes = await request.fold<List<int>>(
+            <int>[],
+            (all, chunk) => all..addAll(chunk),
+          );
+          chunkSizes[chunkIndex] = bytes.length;
+          if (recordData) {
+            chunkData[chunkIndex] = Uint8List.fromList(bytes);
+          }
+          request.response.write(jsonEncode({
+            'chunkIndex': chunkIndex,
+            'received': true,
+          }));
         }
-        request.response.write(jsonEncode({
-          'chunkIndex': chunkIndex,
-          'received': true,
-        }));
       } else if (request.method == 'POST' && path.endsWith('/complete')) {
         await request.drain<void>();
         request.response.write(jsonEncode({
@@ -104,6 +121,91 @@ Future<File> _createSparseFile(Directory dir, String name, int size) async {
   await handle.truncate(size);
   await handle.close();
   return file;
+}
+
+/// Deterministic pseudo-random byte pattern (for download content).
+Uint8List _patternBytes(int length) {
+  return Uint8List.fromList(
+    List<int>.generate(length, (i) => (i * 31 + 7) % 251),
+  );
+}
+
+/// Redirects path_provider to a temp root so FileUtils temp/download dirs
+/// land inside the per-test temp directory.
+class _TestPathProvider extends PathProviderPlatform {
+  _TestPathProvider(this.root);
+
+  final String root;
+
+  @override
+  Future<String?> getApplicationDocumentsPath() async => root;
+}
+
+/// Minimal mock server for [TransferService.downloadFile]: serves raw bytes
+/// over Range requests the same way the embedded receiver does.
+class _MockDownloadServer {
+  _MockDownloadServer(this.content);
+
+  final Uint8List content;
+
+  /// Every served Range header, in request order.
+  final List<String> ranges = [];
+
+  final Completer<void> firstRangeRequest = Completer<void>();
+
+  /// Artificial delay before answering each Range request.
+  Duration responseDelay = Duration.zero;
+
+  /// When non-zero, Range GETs respond with this status instead of data.
+  int failureStatus = 0;
+
+  late HttpServer server;
+
+  String get baseUrl => 'http://${server.address.address}:${server.port}';
+
+  Future<void> start() async {
+    server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+    server.listen((request) async {
+      final path = request.uri.path;
+      if (request.method == 'POST' && path.endsWith('/cancel')) {
+        await request.drain<void>();
+        request.response.write(jsonEncode({'status': 'cancelled'}));
+        await request.response.close();
+        return;
+      }
+      if (request.method == 'GET' && path.endsWith('/content')) {
+        if (!firstRangeRequest.isCompleted) firstRangeRequest.complete();
+        if (responseDelay > Duration.zero) {
+          await Future<void>.delayed(responseDelay);
+        }
+        final range =
+            request.headers.value(HttpHeaders.rangeHeader) ?? '';
+        if (failureStatus != 0) {
+          request.response.statusCode = failureStatus;
+          request.response.write(jsonEncode({
+            'error': {'code': 'INVALID_REQUEST', 'message': 'mock failure'},
+          }));
+          await request.response.close();
+          return;
+        }
+        ranges.add(range);
+        final spec = range.substring('bytes='.length);
+        final parts = spec.split('-');
+        final start = int.parse(parts[0]);
+        final end = int.parse(parts[1]);
+        request.response.statusCode = 206;
+        request.response.add(content.sublist(start, end + 1));
+        await request.response.close();
+        return;
+      }
+      request.response.statusCode = HttpStatus.notFound;
+      await request.response.close();
+    });
+  }
+
+  Future<void> stop() async {
+    await server.close(force: true);
+  }
 }
 
 void main() {
@@ -358,7 +460,7 @@ void main() {
     );
   });
 
-  test('SHA-256 mismatch from server throws', () async {
+  test('SHA-256 mismatch from server marks the batch failed (M13)', () async {
     final sourceFile =
         await _createSparseFile(tempDir, 'mismatch.bin', 1024);
 
@@ -395,15 +497,259 @@ void main() {
       await request.response.close();
     });
 
+    final stateEvents = <Map<String, String?>>[];
     final service = TransferService(
       httpClient: FastDropHttpClient(
           baseUrl: 'http://${server.address.address}:${server.port}'),
+      onStateChange: (tid, status, {errorCode, errorMessage}) =>
+          stateEvents.add({
+            'status': status,
+            'errorCode': errorCode,
+            'errorMessage': errorMessage,
+          }),
+    );
+    addTearDown(service.dispose);
+
+    // 部分失败语义（M13）：单个文件失败不再向上抛出，整批以 failed 收尾。
+    await service.uploadFiles([sourceFile.path]);
+
+    final failed = stateEvents.last;
+    expect(failed['status'], 'failed');
+    expect(failed['errorCode'], 'TRANSFER_FAILED');
+    expect(failed['errorMessage'], '1/1 个文件失败');
+  });
+
+  // ---------------------------------------------------------------------------
+  // Partial batch failure (M13) & session errors (L13)
+  // ---------------------------------------------------------------------------
+
+  test('one failing file does not abort the batch and reports 1/2', () async {
+    final fileA = await _createSparseFile(tempDir, 'good.bin', 1024);
+    final fileB = await _createSparseFile(tempDir, 'bad.bin', 2048);
+
+    final chunkCounts = <String, int>{};
+    final completes = <String>[];
+    final shaByFileId = <String, String>{};
+    final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+    addTearDown(() => server.close(force: true));
+    server.listen((request) async {
+      final path = request.uri.path;
+      if (request.method == 'POST' && path == '/api/v1/transfers') {
+        final body =
+            jsonDecode(await utf8.decoder.bind(request).join())
+                as Map<String, dynamic>;
+        final files =
+            (body['files'] as List<dynamic>).cast<Map<String, dynamic>>();
+        for (final f in files) {
+          shaByFileId[f['name'] as String] = f['sha256'] as String;
+        }
+        request.response.statusCode = HttpStatus.created;
+        request.response.write(jsonEncode({
+          'transferId': 't-partial',
+          'files': [
+            for (final f in files)
+              {
+                'fileId': f['name'],
+                'name': f['name'],
+                'chunkSize': FileUtils.chunkSize,
+                'totalChunks': 1,
+              },
+          ],
+        }));
+      } else if (request.method == 'PUT' && path.contains('/chunks/')) {
+        final fileId = request.uri.pathSegments[5];
+        chunkCounts[fileId] = (chunkCounts[fileId] ?? 0) + 1;
+        await request.drain<void>();
+        if (fileId == 'bad.bin') {
+          request.response.statusCode = HttpStatus.notFound;
+          request.response.write(jsonEncode({
+            'error': {'code': 'INVALID_REQUEST', 'message': 'nope'},
+          }));
+        } else {
+          request.response.write(jsonEncode({'received': true}));
+        }
+      } else if (request.method == 'POST' && path.endsWith('/complete')) {
+        await request.drain<void>();
+        final fileId = request.uri.pathSegments[5];
+        completes.add(fileId);
+        request.response
+            .write(jsonEncode({'fileId': fileId, 'sha256': shaByFileId[fileId]}));
+      } else {
+        request.response.statusCode = HttpStatus.notFound;
+      }
+      await request.response.close();
+    });
+
+    final stateEvents = <Map<String, String?>>[];
+    final service = TransferService(
+      httpClient: FastDropHttpClient(
+          baseUrl: 'http://${server.address.address}:${server.port}'),
+      onStateChange: (tid, status, {errorCode, errorMessage}) =>
+          stateEvents.add({
+            'status': status,
+            'errorCode': errorCode,
+            'errorMessage': errorMessage,
+          }),
+    );
+    addTearDown(service.dispose);
+
+    await service.uploadFiles([fileA.path, fileB.path]);
+
+    expect(stateEvents.first['status'], 'preparing',
+        reason: '哈希阶段开始时上报 preparing');
+    expect(stateEvents.last['status'], 'failed');
+    expect(stateEvents.last['errorCode'], 'TRANSFER_FAILED');
+    expect(stateEvents.last['errorMessage'], '1/2 个文件失败');
+    expect(chunkCounts['good.bin'], 1);
+    expect(chunkCounts['bad.bin'], 1,
+        reason: '非重试错误不应触发退避重试');
+    expect(completes, ['good.bin'],
+        reason: '成功文件应照常 complete，失败文件不应走到 complete');
+  });
+
+  test('session-class chunk failure reports SESSION_EXPIRED (L13)', () async {
+    final sourceFile = await _createSparseFile(tempDir, 'session.bin', 512);
+    final mock = _MockTransferServer(1)
+      ..chunkFailureStatus = HttpStatus.unauthorized
+      ..chunkErrorCode = 'SESSION_INVALID';
+    await mock.start();
+    addTearDown(mock.stop);
+
+    final stateEvents = <Map<String, String?>>[];
+    final service = TransferService(
+      httpClient: FastDropHttpClient(baseUrl: mock.baseUrl),
+      onStateChange: (tid, status, {errorCode, errorMessage}) =>
+          stateEvents.add({
+            'status': status,
+            'errorCode': errorCode,
+            'errorMessage': errorMessage,
+          }),
+    );
+    addTearDown(service.dispose);
+
+    await service.uploadFiles([sourceFile.path]);
+
+    final failed = stateEvents.last;
+    expect(failed['status'], 'failed');
+    expect(failed['errorCode'], 'SESSION_EXPIRED',
+        reason: '401/SESSION_* 应映射为 SESSION_EXPIRED 供 UI 引导重新配对');
+    expect(failed['errorMessage'], '1/1 个文件失败');
+    expect(mock.chunkRequestCount, 1,
+        reason: '会话类错误不重试');
+  });
+
+  // ---------------------------------------------------------------------------
+  // Download resume / failure retention / cancellation (H10, M15)
+  // ---------------------------------------------------------------------------
+
+  test('downloadFile resumes from an existing partial .part file', () async {
+    final originalPathProvider = PathProviderPlatform.instance;
+    PathProviderPlatform.instance = _TestPathProvider(tempDir.path);
+    SharedPreferences.setMockInitialValues({});
+    addTearDown(() => PathProviderPlatform.instance = originalPathProvider);
+
+    final content = _patternBytes(FileUtils.chunkSize + 100);
+    final mock = _MockDownloadServer(content);
+    await mock.start();
+    addTearDown(mock.stop);
+
+    // 预置上次中断留下的完整第一块。
+    final partPath = await FileUtils.partFilePath('dl-resume', 'file-1');
+    await File(partPath).writeAsBytes(content.sublist(0, FileUtils.chunkSize));
+
+    final states = <String>[];
+    final service = TransferService(
+      httpClient: FastDropHttpClient(baseUrl: mock.baseUrl),
+      onStateChange: (tid, status, {errorCode, errorMessage}) =>
+          states.add(status),
+    );
+    addTearDown(service.dispose);
+
+    final expectedSha = sha256.convert(content).toString();
+    final finalPath = await service.downloadFile(
+      transferId: 'dl-resume',
+      fileId: 'file-1',
+      fileName: 'resume.bin',
+      totalBytes: content.length,
+      expectedSha256: expectedSha,
+    );
+
+    expect(mock.ranges,
+        ['bytes=${FileUtils.chunkSize}-${FileUtils.chunkSize + 99}'],
+        reason: '续传只应请求缺失的第二个块');
+    expect(states, ['completed']);
+    expect(await File(finalPath).readAsBytes(), content);
+    expect(File(partPath).existsSync(), isFalse,
+        reason: '成功后 .part 应被搬离临时目录');
+  });
+
+  test('downloadFile keeps the .part file after a failure', () async {
+    final originalPathProvider = PathProviderPlatform.instance;
+    PathProviderPlatform.instance = _TestPathProvider(tempDir.path);
+    SharedPreferences.setMockInitialValues({});
+    addTearDown(() => PathProviderPlatform.instance = originalPathProvider);
+
+    final content = _patternBytes(1024);
+    final mock = _MockDownloadServer(content)..failureStatus = 404;
+    await mock.start();
+    addTearDown(mock.stop);
+
+    final partPath = await FileUtils.partFilePath('dl-fail', 'file-1');
+    final errorCodes = <String, String?>{};
+    final service = TransferService(
+      httpClient: FastDropHttpClient(baseUrl: mock.baseUrl),
+      onStateChange: (tid, status, {errorCode, errorMessage}) =>
+          errorCodes[status] = errorCode,
     );
     addTearDown(service.dispose);
 
     await expectLater(
-      service.uploadFiles([sourceFile.path]),
-      throwsA(isA<Exception>()),
+      service.downloadFile(
+        transferId: 'dl-fail',
+        fileId: 'file-1',
+        fileName: 'fail.bin',
+        totalBytes: content.length,
+        expectedSha256: sha256.convert(content).toString(),
+      ),
+      throwsA(isA<AppError>()),
     );
+
+    expect(File(partPath).existsSync(), isTrue,
+        reason: '失败必须保留 .part 供断点续传（H10c）');
+    expect(errorCodes['failed'], 'INTERNAL_ERROR');
+  });
+
+  test('cancelTransfer aborts a download and removes the .part file',
+      () async {
+    final originalPathProvider = PathProviderPlatform.instance;
+    PathProviderPlatform.instance = _TestPathProvider(tempDir.path);
+    SharedPreferences.setMockInitialValues({});
+    addTearDown(() => PathProviderPlatform.instance = originalPathProvider);
+
+    final content = _patternBytes(FileUtils.chunkSize * 2);
+    final mock = _MockDownloadServer(content)
+      ..responseDelay = const Duration(milliseconds: 250);
+    await mock.start();
+    addTearDown(mock.stop);
+
+    final partPath = await FileUtils.partFilePath('dl-cancel', 'file-1');
+    final service = TransferService(
+      httpClient: FastDropHttpClient(baseUrl: mock.baseUrl),
+    );
+    addTearDown(service.dispose);
+
+    final download = service.downloadFile(
+      transferId: 'dl-cancel',
+      fileId: 'file-1',
+      fileName: 'cancel.bin',
+      totalBytes: content.length,
+      expectedSha256: sha256.convert(content).toString(),
+    );
+
+    await mock.firstRangeRequest.future;
+    await service.cancelTransfer('dl-cancel');
+    await expectLater(download, throwsA(isA<Exception>()));
+
+    expect(File(partPath).existsSync(), isFalse, reason: '取消后应清理 .part（M15）');
   });
 }

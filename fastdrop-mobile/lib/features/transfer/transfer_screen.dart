@@ -4,6 +4,7 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import 'package:fastdrop_mobile/core/errors/app_error.dart';
 import 'package:fastdrop_mobile/core/providers.dart';
 import 'package:fastdrop_mobile/core/storage/session_store.dart';
 import 'package:fastdrop_mobile/features/devices/multi_device_connection.dart';
@@ -27,6 +28,7 @@ class TransferItemState {
     required this.speed,
     required this.status,
     this.errorMessage,
+    this.errorCode,
   });
 
   final String deviceId;
@@ -38,6 +40,7 @@ class TransferItemState {
   final int speed;
   final String status;
   final String? errorMessage;
+  final String? errorCode;
 
   TransferItemState copyWith({
     String? deviceId,
@@ -49,6 +52,7 @@ class TransferItemState {
     int? speed,
     String? status,
     String? errorMessage,
+    String? errorCode,
   }) {
     return TransferItemState(
       deviceId: deviceId ?? this.deviceId,
@@ -60,6 +64,7 @@ class TransferItemState {
       speed: speed ?? this.speed,
       status: status ?? this.status,
       errorMessage: errorMessage,
+      errorCode: errorCode,
     );
   }
 }
@@ -282,9 +287,15 @@ class TransferScreenNotifier extends StateNotifier<TransferScreenState> {
     final updated = Map<String, TransferItemState>.from(state.transfers);
     for (final key in updated.keys) {
       if (key.startsWith('$transferId::')) {
+        // 整批改写 failed 时跳过已完成的行（M13）：部分失败场景下
+        // 已成功文件的结果不能被批次级失败状态覆盖。
+        if (status == 'failed' && updated[key]!.status == 'completed') {
+          continue;
+        }
         updated[key] = updated[key]!.copyWith(
           status: status,
           errorMessage: errorMessage,
+          errorCode: errorCode,
         );
       }
     }
@@ -497,10 +508,17 @@ class MultiTransferScreenNotifier extends StateNotifier<TransferScreenState> {
     for (final entry in updated.entries.toList()) {
       if (entry.value.deviceId == deviceId &&
           entry.value.transferId == transferId) {
+        // 整批改写 failed 时跳过已完成的行（M13）；只要该批次存在行就算
+        // matched，避免落入下方合成失败行的分支。
+        if (status == 'failed' && entry.value.status == 'completed') {
+          matched = true;
+          continue;
+        }
         matched = true;
         updated[entry.key] = entry.value.copyWith(
           status: status,
           errorMessage: errorMessage,
+          errorCode: errorCode,
         );
       }
     }
@@ -522,6 +540,7 @@ class MultiTransferScreenNotifier extends StateNotifier<TransferScreenState> {
         speed: 0,
         status: 'failed',
         errorMessage: errorMessage ?? errorCode,
+        errorCode: errorCode,
       );
       state = state.copyWith(
         transfers: updated,
@@ -981,7 +1000,19 @@ class _TransferScreenState extends ConsumerState<TransferScreen> {
                 child: Row(
                   mainAxisAlignment: MainAxisAlignment.end,
                   children: [
-                    if (item.errorMessage != null)
+                    // 会话过期（L13）：重试无意义，固定文案引导重新配对。
+                    if (item.errorCode == ErrorCodes.sessionExpired)
+                      Expanded(
+                        child: Text(
+                          '会话已失效，请重新配对',
+                          style: theme.textTheme.bodySmall?.copyWith(
+                            color: Colors.red,
+                          ),
+                          maxLines: 2,
+                          overflow: TextOverflow.ellipsis,
+                        ),
+                      )
+                    else if (item.errorMessage != null)
                       Expanded(
                         child: Text(
                           item.errorMessage!,
@@ -992,19 +1023,29 @@ class _TransferScreenState extends ConsumerState<TransferScreen> {
                           overflow: TextOverflow.ellipsis,
                         ),
                       ),
-                    TextButton.icon(
-                      onPressed: () {
-                        notifier.retryTransfer(key);
-                        ScaffoldMessenger.of(context).showSnackBar(
-                          const SnackBar(
-                            content: Text(
-                                'Transfer cancelled. Reselect files to retry.'),
-                          ),
-                        );
-                      },
-                      icon: const Icon(Icons.refresh, size: 18),
-                      label: const Text('重试'),
-                    ),
+                    if (item.errorCode == ErrorCodes.sessionExpired)
+                      TextButton.icon(
+                        onPressed: () {
+                          Navigator.of(context)
+                              .pushNamedAndRemoveUntil('/devices', (_) => false);
+                        },
+                        icon: const Icon(Icons.link, size: 18),
+                        label: const Text('去重新配对'),
+                      )
+                    else
+                      TextButton.icon(
+                        onPressed: () {
+                          notifier.retryTransfer(key);
+                          ScaffoldMessenger.of(context).showSnackBar(
+                            const SnackBar(
+                              content: Text(
+                                  'Transfer cancelled. Reselect files to retry.'),
+                            ),
+                          );
+                        },
+                        icon: const Icon(Icons.refresh, size: 18),
+                        label: const Text('重试'),
+                      ),
                   ],
                 ),
               ),

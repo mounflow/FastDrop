@@ -156,8 +156,28 @@ class WsServer {
         final payload = msg['payload'] as Map<String, dynamic>?;
         final transferId = payload?['transferId'] as String?;
         if (transferId != null) {
-          _transferReceiver?.cancelTransfer(transferId);
-          broadcast('transfer.cancelled', {'transferId': transferId});
+          // 属主校验：会话只能取消自己的传输（对齐 pause/resume 与 Go 端行为），
+          // 不匹配时向该会话回错误；回执用 sendToSession 定向发送而非广播。
+          final cancelled = _transferReceiver?.cancelTransfer(
+                transferId,
+                sessionId: conn.sessionId,
+              ) ??
+              false;
+          if (!cancelled) {
+            _send(conn, {
+              'type': 'error',
+              'payload': {
+                'code': 'SESSION_INVALID',
+                'message': 'Transfer cannot be cancelled by this session',
+              },
+            });
+            break;
+          }
+          sendToSession(
+            conn.sessionId,
+            'transfer.cancelled',
+            {'transferId': transferId},
+          );
         }
         break;
 

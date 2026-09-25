@@ -1,5 +1,6 @@
 import 'dart:convert';
 
+import 'package:flutter/foundation.dart';
 import 'package:fastdrop_mobile/shared/models/transfer.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
@@ -32,6 +33,8 @@ class TransferHistoryStore {
   Future<void> upsertAll(Iterable<TransferRow> rows) {
     final incoming = rows.toList(growable: false);
     if (incoming.isEmpty) return Future<void>.value();
+    // 写链每步都要继续（M16）：单次写失败只记录日志，不中断后续写入，
+    // 否则一次失败会让 _writeTail 永久带着错误、拖垮之后所有落盘。
     _writeTail = _writeTail.then((_) async {
       final current = await load();
       final merged = <String, TransferRow>{
@@ -45,6 +48,8 @@ class TransferHistoryStore {
         _key,
         jsonEncode(ordered.take(_maxRows).map((row) => row.toJson()).toList()),
       );
+    }).catchError((Object e) {
+      debugPrint('[TransferHistory] write failed: $e');
     });
     return _writeTail;
   }
@@ -72,6 +77,8 @@ class TransferHistoryStore {
         _key,
         jsonEncode(updated.map((row) => row.toJson()).toList()),
       );
+    }).catchError((Object e) {
+      debugPrint('[TransferHistory] write failed: $e');
     });
     return _writeTail;
   }

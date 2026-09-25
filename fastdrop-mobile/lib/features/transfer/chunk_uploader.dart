@@ -33,20 +33,60 @@ class ChunkUploader {
     final path =
         '/api/v1/transfers/$transferId/files/$fileId/chunks/$chunkIndex';
 
-    int attempt = 0;
-    Exception? lastError;
+    // Attempts are counted inside the action so ChunkUploadException can
+    // still report how many network tries were made.
+    var attempts = 0;
+    try {
+      await retry(
+        () {
+          attempts++;
+          // 4 MB 数据请求使用更长的 per-request 超时（L7）。
+          return client.putBytes(
+            path,
+            data,
+            timeout: FastDropHttpClient.largeTransferTimeout,
+          );
+        },
+        maxRetries: maxRetries,
+        beforeAttempt: beforeAttempt,
+        delay: delay,
+        random: random,
+      );
+    } on Exception catch (e) {
+      throw ChunkUploadException(
+        transferId: transferId,
+        fileId: fileId,
+        chunkIndex: chunkIndex,
+        attempts: attempts,
+        cause: e,
+      );
+    }
+  }
 
-    while (attempt <= maxRetries) {
+  /// Run [action] with the shared retry policy: at most [maxRetries] retries
+  /// (5 by default) with exponential backoff (500ms, 1s, 2s, 4s, 8s).
+  ///
+  /// Session/validation errors are not retried ([_isRetryable]); the last
+  /// error is rethrown to the caller. Shared by chunk upload and Range
+  /// download so both sides follow the same backoff curve.
+  static Future<T> retry<T>(
+    Future<T> Function() action, {
+    int maxRetries = _maxRetries,
+    Future<void> Function()? beforeAttempt,
+    Future<void> Function(Duration duration)? delay,
+    Random? random,
+  }) async {
+    int attempt = 0;
+
+    while (true) {
       // Pause/cancel gates run outside the retry catch so their exceptions do
       // not consume a network retry attempt.
       await beforeAttempt?.call();
       try {
-        await client.putBytes(path, data);
-        return; // success
+        return await action();
       } on Exception catch (e) {
-        lastError = e;
         attempt++;
-        if (attempt > maxRetries || !_isRetryable(e)) break;
+        if (attempt > maxRetries || !_isRetryable(e)) throw e;
 
         // Exponential backoff with jitter.
         final backoffIndex = (attempt - 1).clamp(0, _backoffMs.length - 1);
@@ -56,14 +96,6 @@ class ChunkUploader {
         await (delay ?? Future<void>.delayed)(duration);
       }
     }
-
-    throw ChunkUploadException(
-      transferId: transferId,
-      fileId: fileId,
-      chunkIndex: chunkIndex,
-      attempts: attempt,
-      cause: lastError,
-    );
   }
 
   static bool _isRetryable(Exception error) {

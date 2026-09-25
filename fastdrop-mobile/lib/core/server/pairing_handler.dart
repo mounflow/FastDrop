@@ -101,6 +101,10 @@ class PairingHandler {
 
   final HashMap<String, ServerPairRequest> _requests = HashMap();
 
+  // 已决议请求的保留策略（L8）：延迟清理 + 数量上限，防止长期运行无界增长。
+  static const _resolvedRetention = Duration(minutes: 10);
+  static const _maxRequests = 200;
+
   /// Callback for when a request is accepted/rejected so WS can notify.
   void Function(String requestId, String status)? onRequestResolved;
 
@@ -188,6 +192,7 @@ class PairingHandler {
   /// Create a pair request (from QR or discover flow).
   ServerPairRequest _createRequest(DeviceInfo device,
       {bool viaDiscover = false}) {
+    _evictOverflowRequests();
     final requestId = TokenManager.generateToken();
     final request = ServerPairRequest(
       requestId: requestId,
@@ -209,6 +214,7 @@ class PairingHandler {
       if (r != null && r.status == 'waiting_confirmation') {
         r.status = 'expired';
         onRequestResolved?.call(requestId, 'expired');
+        _scheduleRequestCleanup(requestId);
       }
     });
 
@@ -240,6 +246,7 @@ class PairingHandler {
     );
 
     onRequestResolved?.call(requestId, 'accepted');
+    _scheduleRequestCleanup(requestId);
   }
 
   /// Reject a pending pair request.
@@ -248,6 +255,29 @@ class PairingHandler {
     if (request == null || request.status != 'waiting_confirmation') return;
     request.status = 'rejected';
     onRequestResolved?.call(requestId, 'rejected');
+    _scheduleRequestCleanup(requestId);
+  }
+
+  /// Drop a resolved request from memory after the retention window.
+  void _scheduleRequestCleanup(String requestId) {
+    Timer(_resolvedRetention, () => _requests.remove(requestId));
+  }
+
+  /// Hard cap on retained pair requests: evict the oldest resolved request
+  /// when [maxRequests] would be exceeded. Waiting requests are never evicted.
+  void _evictOverflowRequests() {
+    while (_requests.length >= _maxRequests) {
+      ServerPairRequest? oldestResolved;
+      for (final request in _requests.values) {
+        if (request.status == 'waiting_confirmation') continue;
+        if (oldestResolved == null ||
+            request.createdAt.isBefore(oldestResolved.createdAt)) {
+          oldestResolved = request;
+        }
+      }
+      if (oldestResolved == null) break;
+      _requests.remove(oldestResolved.requestId);
+    }
   }
 
   // ---------------------------------------------------------------------------
@@ -345,13 +375,21 @@ class PairingHandler {
     }
 
     if (pairRequest.status == 'accepted') {
-      return _json(
-          200,
-          PairAccepted(
-            status: 'accepted',
-            session: pairRequest.sessionInfo!,
-            server: pairRequest.serverInfo!,
-          ).toJson());
+      final sessionInfo = pairRequest.sessionInfo!;
+      final response = PairAccepted(
+        status: 'accepted',
+        session: sessionInfo,
+        server: pairRequest.serverInfo!,
+      ).toJson();
+      // 明文 accessToken 只随本次响应投递一次（L8）：响应生成后立即从内存
+      // 抹掉，仅保留 sessionId 等字段——accessToken 校验只发生在会话建立时，
+      // 之后服务端不再读取这份明文副本。
+      pairRequest.sessionInfo = SessionInfo(
+        sessionId: sessionInfo.sessionId,
+        accessToken: '',
+        expiresIn: sessionInfo.expiresIn,
+      );
+      return _json(200, response);
     }
 
     return _json(200, {

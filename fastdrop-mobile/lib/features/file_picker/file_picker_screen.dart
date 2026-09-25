@@ -393,8 +393,19 @@ class _FilePickerScreenState extends ConsumerState<FilePickerScreen>
       if (pf.path == null) continue;
       try {
         final src = File(pf.path!);
-        final destPath =
-            '${uploadDir.path}${Platform.pathSeparator}${DateTime.now().millisecondsSinceEpoch}_${pf.name}';
+        // 目标名冲突时追加序号（name (1).ext 风格，M14）：私有拷贝目录里
+        // 同名文件很常见，毫秒时间戳命名会随反复选择无限堆积拷贝。
+        final destDir = uploadDir.path;
+        final separator = Platform.pathSeparator;
+        var destPath = '$destDir$separator${pf.name}';
+        var counter = 1;
+        while (File(destPath).existsSync()) {
+          final dotIndex = pf.name.lastIndexOf('.');
+          final stem = dotIndex > 0 ? pf.name.substring(0, dotIndex) : pf.name;
+          final ext = dotIndex > 0 ? pf.name.substring(dotIndex) : '';
+          destPath = '$destDir$separator$stem ($counter)$ext';
+          counter++;
+        }
         await src.copy(destPath);
         // Delete the file_picker cache copy immediately.
         try {

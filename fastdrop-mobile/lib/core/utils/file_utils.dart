@@ -199,7 +199,15 @@ class FileUtils {
     finalPath = renameOnConflict(finalPath);
 
     final partFile = File(partPath);
-    await partFile.rename(finalPath);
+    try {
+      await partFile.rename(finalPath);
+    } on FileSystemException {
+      // 跨卷（目标目录与临时目录不在同一分区，EXDEV）或权限受限时裸
+      // rename 会失败：退化为流式拷贝到目标分区，成功后删除 .part，
+      // 保证任意存储布局下接收文件都能落盘。
+      await _copyToFinal(partFile, finalPath);
+      await partFile.delete();
+    }
 
     // Clean up the transfer temp directory if empty.
     final transferDir = partFile.parent;
@@ -209,6 +217,28 @@ class FileUtils {
     }
 
     return finalPath;
+  }
+
+  /// Stream-copy a `.part` file to [finalPath] (cross-volume rename fallback).
+  static Future<void> _copyToFinal(File partFile, String finalPath) async {
+    final target = File(finalPath);
+    // 目标父目录确保存在（rename 路径同样受益于目录已创建的假设）。
+    await target.parent.create(recursive: true);
+    final sink = target.openWrite();
+    try {
+      await sink.addStream(partFile.openRead());
+      await sink.flush();
+    } catch (copyError) {
+      try {
+        await sink.close();
+      } catch (_) {}
+      // 半成品目标文件不能留在下载目录。
+      try {
+        if (target.existsSync()) target.deleteSync();
+      } catch (_) {}
+      rethrow;
+    }
+    await sink.close();
   }
 
   // -- Storage check ----------------------------------------------------------
