@@ -10,6 +10,7 @@ import {
   getNearbyDevices,
   getServerInfo,
   getSettings,
+  listLocalTransferHistory,
   listPairRequests,
   pollPairStatus,
   rejectPair,
@@ -652,6 +653,45 @@ async function loadHistory() {
 
 // Keep the transfer drawer bounded: drop terminal rows already reflected in
 // history, then cap the list at the 20 most recent entries.
+// 问题 7 收尾：来件（手机→PC）的实时进度不能依赖 WS 会话采纳（配对请求
+// 保留期有限，桌面 UI 未必有那条 WS）——直接轮询本机服务的本地传输记录，
+// 非终态的接收行渲染成"当前传输"卡片（显示 + 进度），终态交给历史。
+let incomingPollBusy = false
+async function pollIncomingTransfers() {
+  if (incomingPollBusy) return
+  incomingPollBusy = true
+  try {
+    const rows = await listLocalTransferHistory()
+    let historyDirty = false
+    for (const row of rows) {
+      if (row.direction !== 'client_to_server' || isTerminal(row.status)) continue
+      const item = ensureIncomingCard(row.peerDeviceId, row.id)
+      item.peerName = row.peerName || item.peerName
+      item.filename = row.totalFiles > 1 ? `${row.totalFiles} 个文件` : '接收文件'
+      item.totalBytes = row.totalBytes
+      item.transferredBytes = row.transferredBytes
+      item.status = row.status === 'verifying' ? 'verifying' : 'transferring'
+      item.error = row.errorMessage
+    }
+    // 已变为终态的卡片：标记最终状态并刷新历史（随后由 prune 清理）。
+    for (const item of activeTransfers.value) {
+      if (isTerminal(item.status)) continue
+      const row = rows.find((r) => r.id === item.transferId)
+      if (row && isTerminal(row.status)) {
+        item.status = row.status
+        item.error = row.errorMessage
+        item.transferredBytes = row.transferredBytes
+        historyDirty = true
+      }
+    }
+    if (historyDirty) void loadHistory()
+  } catch {
+    // 本机服务重启间隙：下个轮询周期自然恢复。
+  } finally {
+    incomingPollBusy = false
+  }
+}
+
 function pruneActiveTransfers() {
   const settledIds = new Set(
     transfers.value
@@ -807,6 +847,8 @@ function readableError(error: unknown): string {
   return labels[message] || message || '操作失败，请重试'
 }
 
+let incomingPollTimer: ReturnType<typeof setInterval> | null = null
+
 onMounted(async () => {
   peerPool.restore()
   await Promise.all([loadSettings(), checkServiceHealth()])
@@ -815,6 +857,9 @@ onMounted(async () => {
   qrTimer = setInterval(refreshQR, 50_000)
   countdownTimer = setInterval(tickCountdown, 1000)
   healthTimer = setInterval(checkServiceHealth, 5000)
+  // 问题 7 关联：来件（手机→PC）的实时进度不依赖 WS 会话采纳——直接轮询
+  // 本机服务的本地传输记录，让"当前传输"区始终能显示接收进度。
+  incomingPollTimer = setInterval(() => { void pollIncomingTransfers() }, 1500)
 })
 
 onUnmounted(() => {
@@ -822,6 +867,7 @@ onUnmounted(() => {
   if (qrTimer) clearInterval(qrTimer)
   if (countdownTimer) clearInterval(countdownTimer)
   if (healthTimer) clearInterval(healthTimer)
+  if (incomingPollTimer) clearInterval(incomingPollTimer)
   peerPool.close()
 })
 </script>
