@@ -48,6 +48,15 @@ interface IncomingOffer extends PeerIncomingOffer {
   }>
 }
 
+interface ActiveTransferFile {
+  fileId: string
+  name: string
+  totalBytes: number
+  transferredBytes: number
+  status: string
+  error?: string
+}
+
 interface ActiveTransfer {
   peerId: string
   peerName: string
@@ -59,6 +68,9 @@ interface ActiveTransfer {
   speedBps: number
   status: string
   error?: string
+  /** 批次内逐文件明细（多文件批次才有；单文件传输省略）。 */
+  files?: ActiveTransferFile[]
+  expanded?: boolean
 }
 
 const activePage = ref<DesktopPage>('home')
@@ -268,29 +280,36 @@ function toggleRecipient(peerId: string) {
 }
 
 function handlePoolProgress(progress: PeerTransferProgress) {
-  const existing = activeTransfers.value.find((item) =>
-    item.peerId === progress.peerId
-      && item.transferId === progress.transferId
-      && item.fileId === progress.fileId,
+  // 批次卡片按 (peerId, transferId) 唯一——fileId 不再参与匹配。
+  let item: ActiveTransfer | undefined = activeTransfers.value.find((entry) =>
+    entry.peerId === progress.peerId
+      && entry.transferId === progress.transferId,
   )
-  if (existing) {
-    existing.transferredBytes = progress.transferredBytes
-    existing.status = progress.status
-    existing.error = progress.error
+  if (!item) {
+    item = reactive({
+      peerId: progress.peerId,
+      peerName: progress.peerName,
+      transferId: progress.transferId,
+      fileId: progress.fileId,
+      filename: progress.fileName,
+      totalBytes: progress.totalBytes,
+      transferredBytes: progress.transferredBytes,
+      speedBps: 0,
+      status: progress.status,
+      error: progress.error,
+      files: progress.files?.map((file) => ({ ...file })),
+      expanded: false,
+    })
+    activeTransfers.value.unshift(item)
     return
   }
-  activeTransfers.value.unshift({
-    peerId: progress.peerId,
-    peerName: progress.peerName,
-    transferId: progress.transferId,
-    fileId: progress.fileId,
-    filename: progress.fileName,
-    totalBytes: progress.totalBytes,
-    transferredBytes: progress.transferredBytes,
-    speedBps: 0,
-    status: progress.status,
-    error: progress.error,
-  })
+  item.transferredBytes = progress.transferredBytes
+  item.totalBytes = progress.totalBytes
+  item.status = progress.status
+  item.error = progress.error
+  if (progress.files) {
+    item.files = progress.files.map((file) => ({ ...file }))
+  }
 }
 
 function handleWSMessage(peerId: string, raw: unknown) {
@@ -379,6 +398,23 @@ function ensureIncomingCard(peerId: string, transferId: string): ActiveTransfer 
   }
   activeTransfers.value.unshift(card)
   return card
+}
+
+function toggleTransferExpanded(item: ActiveTransfer) {
+  // 单文件没有可展开的明细。
+  if (!item.files || item.files.length <= 1) return
+  item.expanded = !item.expanded
+}
+
+function fileStatusLabel(status: string) {
+  const map: Record<string, string> = {
+    pending: '等待中',
+    transferring: '传输中',
+    completed: '已完成',
+    failed: '失败',
+    paused: '已暂停',
+  }
+  return map[status] ?? status
 }
 
 function updateTransferStatus(peerId: string, transferId: string, status: string, error?: string) {
@@ -896,17 +932,24 @@ onUnmounted(() => {
             <div><span class="status-dot online"></span><strong>当前传输</strong><small>{{ liveTransfers.length }} 个进行中</small></div>
             <button class="text-button" @click="selectPage('history')">查看全部</button>
           </div>
-          <article v-for="item in activeTransfers.slice(0, 4)" :key="`${item.peerId}:${item.transferId}:${item.fileId}`" class="transfer-row">
+          <article v-for="item in activeTransfers.slice(0, 4)" :key="`${item.peerId}:${item.transferId}`" class="transfer-row" :class="{ expandable: (item.files?.length ?? 0) > 1 }" @click="toggleTransferExpanded(item)">
             <div class="file-avatar"><AppIcon name="file" :size="20" /></div>
             <div class="transfer-main">
               <div class="transfer-title"><strong>{{ item.filename }}</strong><span>{{ statusLabel(item.status) }}</span></div>
               <div class="progress-track"><span :class="item.status" :style="{ width: `${progressPercent(item)}%` }"></span></div>
-              <div class="transfer-meta"><span>到 {{ item.peerName }} · {{ formatSize(item.transferredBytes) }} / {{ formatSize(item.totalBytes) }}</span><span>{{ formatSpeed(item.speedBps) || `${progressPercent(item)}%` }}</span></div>
+              <div class="transfer-meta"><span>到 {{ item.peerName }} · {{ formatSize(item.transferredBytes) }} / {{ formatSize(item.totalBytes) }}<template v-if="(item.files?.length ?? 0) > 1"> · {{ item.files!.filter((f) => f.status === 'completed').length }}/{{ item.files!.length }} 个文件</template></span><span>{{ formatSpeed(item.speedBps) || `${progressPercent(item)}%` }}</span></div>
+              <div v-if="item.expanded && item.files?.length" class="transfer-files" @click.stop>
+                <div v-for="file in item.files" :key="file.fileId" class="transfer-file-row">
+                  <span class="tf-name" :title="file.name">{{ file.name }}</span>
+                  <div class="progress-track mini"><span :class="file.status" :style="{ width: `${file.totalBytes ? (file.transferredBytes / file.totalBytes) * 100 : 0}%` }"></span></div>
+                  <span class="tf-status" :class="file.status">{{ fileStatusLabel(file.status) }}</span>
+                </div>
+              </div>
             </div>
             <div class="row-actions">
-              <button v-if="item.status === 'transferring'" class="icon-button" title="暂停" @click="pauseTransfer(item)"><AppIcon name="pause" :size="17" /></button>
-              <button v-if="item.status === 'paused'" class="icon-button" title="继续" @click="resumeTransfer(item)"><AppIcon name="play" :size="17" /></button>
-              <button v-if="!isTerminal(item.status)" class="icon-button danger" title="取消" @click="cancelTransfer(item)"><AppIcon name="x" :size="17" /></button>
+              <button v-if="item.status === 'transferring'" class="icon-button" title="暂停" @click.stop="pauseTransfer(item)"><AppIcon name="pause" :size="17" /></button>
+              <button v-if="item.status === 'paused'" class="icon-button" title="继续" @click.stop="resumeTransfer(item)"><AppIcon name="play" :size="17" /></button>
+              <button v-if="!isTerminal(item.status)" class="icon-button danger" title="取消" @click.stop="cancelTransfer(item)"><AppIcon name="x" :size="17" /></button>
             </div>
           </article>
         </section>

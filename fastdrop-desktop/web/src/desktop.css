@@ -400,3 +400,32 @@ button:focus-visible, input:focus-visible, select:focus-visible { outline: 3px s
 .nearby-device:disabled { opacity: 0.55; cursor: default; }
 .nearby-device strong { font-size: 14px; color: #23272e; }
 .nearby-device small { color: #8a8f98; margin-left: auto; }
+
+/* 批次卡片展开：逐文件明细 */
+.transfer-row.expandable { cursor: pointer; }
+.transfer-files {
+  margin-top: 8px;
+  padding-top: 8px;
+  border-top: 1px dashed #e6e8ee;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.transfer-file-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.tf-name {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 12px;
+  color: #4a4f57;
+}
+.progress-track.mini { height: 4px; flex: 0 0 120px; }
+.tf-status { font-size: 11px; color: #8a8f98; flex: 0 0 auto; }
+.tf-status.completed { color: #16a34a; }
+.tf-status.failed { color: #dc2626; }

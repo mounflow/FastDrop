@@ -34,6 +34,15 @@ export interface PeerView extends PeerSession {
   status: WSStatus
 }
 
+export interface PeerFileProgress {
+  fileId: string
+  name: string
+  totalBytes: number
+  transferredBytes: number
+  status: string
+  error?: string
+}
+
 export interface PeerTransferProgress {
   peerId: string
   peerName: string
@@ -44,6 +53,8 @@ export interface PeerTransferProgress {
   totalBytes: number
   status: string
   error?: string
+  /** 批次内的逐文件状态（批次卡片展开明细用；简单传输无此字段）。 */
+  files?: PeerFileProgress[]
 }
 
 export interface PeerHistoryRow extends TransferRow {
@@ -413,13 +424,41 @@ export function usePeerPool(handlers: PeerPoolHandlers = {}): PeerPool {
       result.files.map((f) => [f.clientFileId, f]),
     )
 
+    // 逐文件状态：批次卡片展开明细的数据源，随分块/完成实时更新。
+    const fileStates: PeerFileProgress[] = files.map((file) => ({
+      fileId: '',
+      name: file.name,
+      totalBytes: file.size,
+      transferredBytes: 0,
+      status: 'pending',
+    }))
+    result.files.forEach((remoteFile, index) => {
+      if (fileStates[index]) fileStates[index].fileId = remoteFile.fileId
+    })
+
     let completedFilesBytes = 0
     let failedCount = 0
     const failureNames: string[] = []
 
+    // 批次快照：卡片只按 (peerId, transferId) 建一张，files 数组供展开明细。
+    const emitSnapshot = (status: string, error?: string, clearFiles = false) => {
+      const transferred = fileStates.reduce((sum, f) => sum + f.transferredBytes, 0)
+      handlers.onProgress?.({
+        peerId: session.id,
+        peerName: session.name,
+        transferId: result.transferId,
+        fileId: '',
+        fileName: batchName,
+        transferredBytes: transferred,
+        totalBytes,
+        status,
+        error,
+        files: clearFiles ? undefined : fileStates.map((f) => ({ ...f })),
+      })
+    }
+
     try {
-      emitProgressRaw(session, result.transferId, result.files[0]?.fileId ?? '',
-        batchName, totalBytes, 0,
+      emitSnapshot(
         directUpload && isConfirmationPlatform(session.platform)
           ? 'waiting_accept'
           : 'preparing')
@@ -430,19 +469,19 @@ export function usePeerPool(handlers: PeerPoolHandlers = {}): PeerPool {
 
       // 3. Upload per file (sequential), 3 chunks in flight per file — the
       //    server-side scheduler caps the global budget anyway.
-      for (const entry of entries) {
+      for (let index = 0; index < entries.length; index++) {
+        const entry = entries[index]
         await waitWhilePaused(control)
         if (control.cancelled) throw new DOMException('Transfer cancelled', 'AbortError')
         const remoteFile = fileByClientFileId.get(entry.clientFileId)
         if (!remoteFile) throw new Error('server missing file mapping')
-        let fileTransferred = 0
+        fileStates[index].status = 'transferring'
+        emitSnapshot('transferring')
         try {
           await uploadFileChunks(session, result, remoteFile.fileId, entry.file, control,
             (bytes) => {
-              fileTransferred = bytes
-              emitProgressRaw(session, result.transferId, remoteFile.fileId,
-                batchName, totalBytes, completedFilesBytes + fileTransferred,
-                control.paused ? 'paused' : 'transferring')
+              fileStates[index].transferredBytes = bytes
+              emitSnapshot(control.paused ? 'paused' : 'transferring')
             })
           if (directUpload) {
             await httpLimiter.run(() => completeFile(
@@ -453,33 +492,31 @@ export function usePeerPool(handlers: PeerPoolHandlers = {}): PeerPool {
               session,
             ))
           }
-          completedFilesBytes += entry.file.size
-          emitProgressRaw(session, result.transferId, remoteFile.fileId,
-            batchName, totalBytes, completedFilesBytes,
-            control.paused ? 'paused' : 'transferring')
+          fileStates[index].status = 'completed'
+          fileStates[index].transferredBytes = entry.file.size
+          emitSnapshot(control.paused ? 'paused' : 'transferring')
         } catch (error) {
           if (control.cancelled) throw error
           // 单文件失败不中止整批（问题 11 M13 语义）：跳过继续。
+          fileStates[index].status = 'failed'
+          fileStates[index].error =
+            error instanceof Error ? error.message : String(error)
           failedCount++
           failureNames.push(entry.file.name)
-          emitProgressRaw(session, result.transferId, remoteFile.fileId,
-            batchName, totalBytes, completedFilesBytes + fileTransferred,
-            'transferring', `${entry.file.name} 失败`)
+          emitSnapshot('transferring')
         }
       }
 
       if (failedCount > 0) {
         // 整批按失败收尾并让服务端清理，消息注明比例。
         await cancelTransferOnServer(result.transferId, session).catch(() => {})
-        emitProgressRaw(session, result.transferId, '', batchName, totalBytes,
-          completedFilesBytes, 'failed',
+        emitSnapshot('failed',
           `${failedCount}/${files.length} 个文件失败（${failureNames.join('、')}）`)
         return
       }
 
       if (directUpload) {
-        emitProgressRaw(session, result.transferId, '', batchName, totalBytes,
-          totalBytes, 'completed')
+        emitSnapshot('completed')
         return
       }
 
@@ -487,21 +524,19 @@ export function usePeerPool(handlers: PeerPoolHandlers = {}): PeerPool {
       //    for the recipient's single accept (M7) so a silent recipient does
       //    not linger as waiting_accept.
       await httpLimiter.run(() => announceTransfer(result.transferId, session))
-      emitProgressRaw(session, result.transferId, '', batchName, totalBytes,
-        totalBytes, 'waiting_accept')
+      // 接受后清空本地 files 快照：之后的进度以服务端（对端下载）事件为准。
+      emitSnapshot('waiting_accept', undefined, true)
       try {
         await waitForAcceptance(session.id, result.transferId)
-        emitProgressRaw(session, result.transferId, '', batchName, totalBytes,
-          totalBytes, 'transferring')
+        emitSnapshot('transferring', undefined, true)
       } catch {
         if (control.cancelled) throw new Error('Transfer cancelled')
         await cancelTransferOnServer(result.transferId, session).catch(() => {})
         throw new Error('对方未响应')
       }
     } catch (error) {
-      emitProgressRaw(session, result.transferId, '', batchName, totalBytes,
-        completedFilesBytes,
-        control.cancelled ? 'cancelled' : 'failed', readableTransferError(error))
+      emitSnapshot(control.cancelled ? 'cancelled' : 'failed',
+        readableTransferError(error))
     } finally {
       resumeControl(control)
       transferControls.delete(controlKey)
