@@ -13,7 +13,7 @@ import (
 // endpoint on the LAN anyway), but it is slow and pointless for LAN clients,
 // so it stays off the authenticated surface.
 func (s *Server) handleDiscoveryNearby(w http.ResponseWriter, r *http.Request) {
-	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
+	ctx, cancel := context.WithTimeout(r.Context(), 25*time.Second)
 	defer cancel()
 	devices, err := discovery.DiscoverNearby(ctx, s.Cfg.Server.DeviceID)
 	if err != nil {
