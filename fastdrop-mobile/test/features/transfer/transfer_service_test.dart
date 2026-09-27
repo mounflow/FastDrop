@@ -95,10 +95,13 @@ class _MockTransferServer {
           }));
         }
       } else if (request.method == 'POST' && path.endsWith('/complete')) {
-        await request.drain<void>();
+        // 真实服务器返回它计算出的哈希；mock 直接回显 complete 请求体里
+        // 发送方提交的哈希（发送方在上传前逐文件计算，语义等价）。
+        final body = jsonDecode(await utf8.decoder.bind(request).join())
+            as Map<String, dynamic>;
         request.response.write(jsonEncode({
           'fileId': 'file-1',
-          'sha256': expectedSha256,
+          'sha256': (body['sha256'] as String?) ?? expectedSha256 ?? '',
           'size': fileSize,
         }));
       } else {
@@ -593,11 +596,16 @@ void main() {
           request.response.write(jsonEncode({'received': true}));
         }
       } else if (request.method == 'POST' && path.endsWith('/complete')) {
-        await request.drain<void>();
+        // 回显 complete 请求体里发送方提交的哈希（等价真实服务器行为）。
+        final body =
+            jsonDecode(await utf8.decoder.bind(request).join())
+                as Map<String, dynamic>;
         final fileId = request.uri.pathSegments[5];
         completes.add(fileId);
-        request.response
-            .write(jsonEncode({'fileId': fileId, 'sha256': shaByFileId[fileId]}));
+        request.response.write(jsonEncode({
+          'fileId': fileId,
+          'sha256': (body['sha256'] as String?) ?? shaByFileId[fileId] ?? '',
+        }));
       } else {
         request.response.statusCode = HttpStatus.notFound;
       }

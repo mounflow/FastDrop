@@ -279,13 +279,16 @@ class _FilePickerScreenState extends ConsumerState<FilePickerScreen>
 
       if (result == null || result.files.isEmpty) return;
 
-      // Immediately relocate picked files to app-private temp storage so
-      // Android's MediaScanner never sees the file_picker cache copies
-      // (prevents duplicate photos in the gallery).
-      final relocated = await _relocateToPrivateCache(result.files);
+      // 选取后不再整批拷贝到私有目录（问题：大批次选完卡住数分钟）——
+      // 搬迁挪到上传时逐文件进行（TransferService._uploadFile 内的
+      // FileUtils.relocateToUploadDir）。这里仅放置 .nomedia 关闭
+      // MediaScanner，防止 file_picker 缓存副本出现在相册。
+      if (result.files.isNotEmpty && result.files.first.path != null) {
+        _ensureNoMedia(File(result.files.first.path!).parent);
+      }
 
       setState(() {
-        for (final pf in relocated) {
+        for (final pf in result.files) {
           // Avoid duplicates by path.
           final alreadyIn =
               _selected.any((s) => s.platformFile.path == pf.path);
@@ -360,69 +363,7 @@ class _FilePickerScreenState extends ConsumerState<FilePickerScreen>
   // Helpers
   // ---------------------------------------------------------------------------
 
-  /// Copy picked files into the app's private temp directory and delete
-  /// the file_picker cache originals. The private temp dir is never
-  /// scanned by MediaScanner, so no gallery duplicates appear.
-  ///
-  /// Returns a new list of [PlatformFile] pointing at the private copies.
-  Future<List<PlatformFile>> _relocateToPrivateCache(
-      List<PlatformFile> files) async {
-    // Use application support (files) dir, NOT cache. Android can delete
-    // cache files at any time — a 200 MB upload takes ~30 s and the cache
-    // copy gets yanked mid-read (FileSystemException errno 0).
-    final tempBase = await getApplicationSupportDirectory();
-    final uploadDir =
-        Directory('${tempBase.path}${Platform.pathSeparator}fastdrop_upload');
-    if (!uploadDir.existsSync()) {
-      uploadDir.createSync(recursive: true);
-    }
-    // Prevent Android MediaScanner from indexing temp copies (avoids
-    // duplicate photos appearing in the gallery).
-    _ensureNoMedia(uploadDir);
-
-    // Also place .nomedia in the file_picker cache directory to close the
-    // race window between file_picker writing its cache copy and our
-    // delete below.
-    if (files.isNotEmpty && files.first.path != null) {
-      final pickerCacheDir = File(files.first.path!).parent;
-      _ensureNoMedia(pickerCacheDir);
-    }
-
-    final result = <PlatformFile>[];
-    for (final pf in files) {
-      if (pf.path == null) continue;
-      try {
-        final src = File(pf.path!);
-        // 目标名冲突时追加序号（name (1).ext 风格，M14）：私有拷贝目录里
-        // 同名文件很常见，毫秒时间戳命名会随反复选择无限堆积拷贝。
-        final destDir = uploadDir.path;
-        final separator = Platform.pathSeparator;
-        var destPath = '$destDir$separator${pf.name}';
-        var counter = 1;
-        while (File(destPath).existsSync()) {
-          final dotIndex = pf.name.lastIndexOf('.');
-          final stem = dotIndex > 0 ? pf.name.substring(0, dotIndex) : pf.name;
-          final ext = dotIndex > 0 ? pf.name.substring(dotIndex) : '';
-          destPath = '$destDir$separator$stem ($counter)$ext';
-          counter++;
-        }
-        await src.copy(destPath);
-        // Delete the file_picker cache copy immediately.
-        try {
-          await src.delete();
-        } catch (_) {}
-        result.add(PlatformFile(
-          name: pf.name,
-          size: pf.size,
-          path: destPath,
-        ));
-      } catch (_) {
-        // If copy fails, fall back to the original path.
-        result.add(pf);
-      }
-    }
-    return result;
-  }
+  // （搬迁逻辑已挪至 FileUtils.relocateToUploadDir，上传时逐文件懒执行。）
 
   /// Create a `.nomedia` file in [dir] so Android's MediaScanner skips it.
   static void _ensureNoMedia(Directory dir) {

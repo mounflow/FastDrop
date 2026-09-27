@@ -128,28 +128,30 @@ class TransferService {
     final fileInfos = <_FileInfo>[];
 
     try {
-      // 1. Validate all files exist and compute SHA-256.
-      // preparing 先行上报，让 UI 在大文件哈希阶段就有占位状态。
+      // 1. 校验文件存在（廉价 stat，不做全量哈希/拷贝）——批次立即创建，
+      //    传输页秒出"准备中"卡片；搬迁与哈希逐文件懒执行（B 方案）。
       onStateChange?.call(batchOfferId, 'preparing');
       for (final path in filePaths) {
         final file = File(path);
         if (!await file.exists()) {
-          throw FileSystemException('File not found', path);
+          debugPrint('[TransferService] skip missing file: $path');
+          continue;
         }
-        final size = await file.length();
-        final sha256 = await FileUtils.computeFileSha256(path);
-        final name = _extractFileName(path);
         fileInfos.add(_FileInfo(
           path: path,
-          name: name,
-          size: size,
-          sha256: sha256,
+          name: _extractFileName(path),
+          size: await file.length(),
+          sha256: '',
         ));
-        // 每个文件哈希完成后检查取消，避免大文件场景下取消响应迟钝。
         if (cancelToken.isCancelled) return;
+      }
+      if (fileInfos.isEmpty) {
+        throw FileSystemException('No selectable files remain', filePaths.first);
       }
 
       // 2. Create the transfer batch on the server.
+      //    sha256 留空：每个文件的哈希在其上传前计算、complete 时提交，
+      //    服务端按该哈希校验完整性（安全语义不变）。
       final createBody = CreateTransferBody(
         offerId: batchOfferId,
         direction: 'client_to_server',
@@ -572,6 +574,18 @@ class TransferService {
     debugPrint('[TransferService] _uploadFile: ${fi.name} '
         '(size=${fi.size}, chunks=$totalChunks, fileId=${fr.fileId})');
 
+    // B(方案)：搬迁与哈希按文件懒执行——创建批次不再等待全量拷贝与
+    // 全量哈希；complete 时服务端按此处计算的哈希校验完整性。
+    // 搬迁：file_picker 缓存 → 应用私有稳定目录（.nomedia 防相册重复，
+    // 不被系统回收）；哈希对稳定副本计算。
+    if (cancelToken.isCancelled) return;
+    final readPath = await FileUtils.relocateToUploadDir(fi.path, fi.name);
+    fi.path = readPath;
+    if (cancelToken.isCancelled) return;
+    if (fi.sha256.isEmpty) {
+      fi.sha256 = await FileUtils.computeFileSha256(readPath);
+    }
+
     try {
       final file = File(fi.path);
       int chunkIndex = 0;
@@ -802,17 +816,19 @@ class TransferService {
 // ---------------------------------------------------------------------------
 
 class _FileInfo {
-  const _FileInfo({
+  _FileInfo({
     required this.path,
     required this.name,
     required this.size,
     required this.sha256,
   });
 
-  final String path;
+  /// 可变：批次创建后逐文件搬迁（缓存 → 应用私有稳定目录）会更新该路径，
+  /// 哈希也在搬迁后的稳定副本上计算（创建批次时留空、complete 时提交）。
+  String path;
   final String name;
   final int size;
-  final String sha256;
+  String sha256;
 }
 
 class _FileUploadTask {

@@ -173,6 +173,53 @@ class FileUtils {
     return prefs.getString(_downloadDirKey);
   }
 
+  // -- Upload relocation (B 方案：逐文件懒搬迁) -------------------------------
+
+  /// 将 file_picker 缓存中的选取文件搬迁到应用私有上传目录（稳定、不被
+  /// 系统回收、.nomedia 防相册重复），返回稳定路径供上传读取。
+  /// 源缺失/拷贝失败时返回原路径（尽力上传）；重名追加序号（M14）。
+  static Future<String> relocateToUploadDir(
+      String sourcePath, String fileName) async {
+    try {
+      final src = File(sourcePath);
+      if (!src.existsSync()) return sourcePath;
+      final support = await getApplicationSupportDirectory();
+      final uploadDir =
+          Directory('${support.path}${Platform.pathSeparator}fastdrop_upload');
+      if (!uploadDir.existsSync()) {
+        uploadDir.createSync(recursive: true);
+      }
+      _ensureNoMedia(uploadDir);
+
+      final separator = Platform.pathSeparator;
+      var destPath = '${uploadDir.path}$separator$fileName';
+      var counter = 1;
+      while (File(destPath).existsSync()) {
+        final dotIndex = fileName.lastIndexOf('.');
+        final stem = dotIndex > 0 ? fileName.substring(0, dotIndex) : fileName;
+        final ext = dotIndex > 0 ? fileName.substring(dotIndex) : '';
+        destPath = '${uploadDir.path}$separator$stem ($counter)$ext';
+        counter++;
+      }
+      await src.copy(destPath);
+      // 删除 file_picker 缓存副本（立即回收，关闭 MediaScanner 竞态窗口）。
+      try {
+        await src.delete();
+      } catch (_) {}
+      return destPath;
+    } catch (_) {
+      // 搬迁失败（缓存副本被系统回收等）：回退用原路径尽力上传。
+      return sourcePath;
+    }
+  }
+
+  static void _ensureNoMedia(Directory dir) {
+    try {
+      final marker = File('${dir.path}${Platform.pathSeparator}.nomedia');
+      if (!marker.existsSync()) marker.createSync();
+    } catch (_) {}
+  }
+
   // -- Part-file helpers ------------------------------------------------------
 
   /// Generate the path for a `.part` temp file.

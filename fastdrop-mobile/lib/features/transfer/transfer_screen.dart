@@ -69,6 +69,55 @@ class TransferItemState {
   }
 }
 
+/// 一次发送批次的任务级状态（此前 69 个文件在传输页是 69 张独立卡片，
+/// 没有"任务"视图——用户反馈：应该是一个任务，能看到准备/传输/结束与
+/// 21/69 式的文件数进度）。
+///
+/// 生命周期：preparing（搬迁/哈希）→ transferring（显示当前文件名）→
+/// completed / failed / cancelled。
+class ActiveUploadBatch {
+  const ActiveUploadBatch({
+    required this.totalFiles,
+    required this.status,
+    this.completedFiles = 0,
+    this.failedFiles = 0,
+    this.currentFileName,
+    this.transferredBytes = 0,
+    this.totalBytes = 0,
+    this.errorMessage,
+  });
+
+  final int totalFiles;
+  final int completedFiles;
+  final int failedFiles;
+  final String? currentFileName;
+  final int transferredBytes;
+  final int totalBytes;
+  final String status;
+  final String? errorMessage;
+
+  ActiveUploadBatch copyWith({
+    int? completedFiles,
+    int? failedFiles,
+    String? currentFileName,
+    int? transferredBytes,
+    int? totalBytes,
+    String? status,
+    String? errorMessage,
+  }) {
+    return ActiveUploadBatch(
+      totalFiles: totalFiles,
+      completedFiles: completedFiles ?? this.completedFiles,
+      failedFiles: failedFiles ?? this.failedFiles,
+      currentFileName: currentFileName ?? this.currentFileName,
+      transferredBytes: transferredBytes ?? this.transferredBytes,
+      totalBytes: totalBytes ?? this.totalBytes,
+      status: status ?? this.status,
+      errorMessage: errorMessage ?? this.errorMessage,
+    );
+  }
+}
+
 /// A batch of transfer items archived from the "current" view.
 ///
 /// Each batch corresponds to one visit to TransferScreen with files to
@@ -96,6 +145,7 @@ class TransferScreenState {
     this.history = const [],
     this.currentPeerName,
     this.serviceReady = false,
+    this.activeBatch,
   });
 
   /// All transfer items, keyed by `"transferId::fileId"`. Items stay
@@ -110,12 +160,16 @@ class TransferScreenState {
   final String? currentPeerName;
   final bool serviceReady;
 
+  /// 当前发送批次的任务级状态（一次选择 = 一个任务卡片）。
+  final ActiveUploadBatch? activeBatch;
+
   TransferScreenState copyWith({
     Map<String, TransferItemState>? transfers,
     Set<String>? currentBatchKeys,
     List<TransferHistoryBatch>? history,
     String? currentPeerName,
     bool? serviceReady,
+    ActiveUploadBatch? activeBatch,
   }) {
     return TransferScreenState(
       transfers: transfers ?? this.transfers,
@@ -123,6 +177,7 @@ class TransferScreenState {
       history: history ?? this.history,
       currentPeerName: currentPeerName ?? this.currentPeerName,
       serviceReady: serviceReady ?? this.serviceReady,
+      activeBatch: activeBatch ?? this.activeBatch,
     );
   }
 }
@@ -199,24 +254,49 @@ class TransferScreenNotifier extends StateNotifier<TransferScreenState> {
     // archive-on-leave path.
     archiveCurrentToHistory();
     _pendingFilePaths = paths;
+    // 立即创建批次任务卡片（preparing）——用户点完发送马上有反馈，
+    // 不再等到哈希/上传开始才出现（用户反馈：传输页迟迟没反应）。
+    if (mounted) {
+      state = state.copyWith(
+        activeBatch: ActiveUploadBatch(
+          totalFiles: paths.length,
+          status: 'preparing',
+        ),
+      );
+    }
     _tryStartUpload();
   }
 
   /// Move every key in `currentBatchKeys` into a new HistoryBatch and
   /// clear the current set. The items themselves stay in
   /// `state.transfers` so any in-flight progress updates still land.
+  /// 批次任务卡片：非终态保留（继续展示进度），终态归档时清除——
+  /// 下一批发送会创建新卡片。
   void archiveCurrentToHistory() {
-    if (state.currentBatchKeys.isEmpty) return;
-    final batch = TransferHistoryBatch(
-      peerName: state.currentPeerName ?? 'PC',
-      direction: '→',
-      archivedAt: DateTime.now(),
-      itemKeys: Set<String>.from(state.currentBatchKeys),
-    );
-    state = state.copyWith(
-      currentBatchKeys: <String>{},
-      history: [...state.history, batch],
-    );
+    final batch = state.activeBatch;
+    if (state.currentBatchKeys.isEmpty && batch == null) return;
+    if (state.currentBatchKeys.isNotEmpty) {
+      final historyBatch = TransferHistoryBatch(
+        peerName: state.currentPeerName ?? 'PC',
+        direction: '→',
+        archivedAt: DateTime.now(),
+        itemKeys: Set<String>.from(state.currentBatchKeys),
+      );
+      state = state.copyWith(
+        currentBatchKeys: <String>{},
+        history: [...state.history, historyBatch],
+      );
+    }
+    if (batch != null &&
+        (batch.status == 'completed' ||
+            batch.status == 'failed' ||
+            batch.status == 'cancelled')) {
+      state = TransferScreenState(
+        transfers: state.transfers,
+        currentPeerName: state.currentPeerName,
+        serviceReady: state.serviceReady,
+      );
+    }
   }
 
   void _tryStartUpload() {
@@ -275,6 +355,37 @@ class TransferScreenNotifier extends StateNotifier<TransferScreenState> {
       newKeys = Set<String>.from(state.currentBatchKeys)..add(key);
     }
     state = state.copyWith(transfers: updated, currentBatchKeys: newKeys);
+    _refreshBatchFromItems(updated, currentFileName: progress.fileName ?? '');
+  }
+
+  /// 从逐文件条目聚合批次任务状态（字节数/完成数/当前文件）。
+  void _refreshBatchFromItems(Map<String, TransferItemState> transfers,
+      {String? currentFileName}) {
+    final batch = state.activeBatch;
+    if (batch == null) return;
+    var transferred = 0;
+    var total = 0;
+    var completed = 0;
+    var failed = 0;
+    String? currentFile;
+    for (final key in state.currentBatchKeys) {
+      final item = transfers[key];
+      if (item == null) continue;
+      transferred += item.bytesTransferred;
+      total += item.totalBytes;
+      if (item.status == 'completed') completed++;
+      if (item.status == 'failed') failed++;
+      if (item.status == 'transferring') currentFile ??= item.fileName;
+    }
+    state = state.copyWith(
+      activeBatch: batch.copyWith(
+        transferredBytes: transferred,
+        totalBytes: total,
+        completedFiles: completed,
+        failedFiles: failed,
+        currentFileName: currentFileName ?? currentFile,
+      ),
+    );
   }
 
   void _onStateChange(
@@ -299,7 +410,26 @@ class TransferScreenNotifier extends StateNotifier<TransferScreenState> {
         );
       }
     }
-    state = state.copyWith(transfers: updated);
+    // 批次任务卡片状态同步（21/69 式进度承载在这里）。
+    final batch = state.activeBatch;
+    ActiveUploadBatch? newBatch;
+    if (batch != null) {
+      if (status == 'completed') {
+        newBatch = batch.copyWith(
+          status: 'completed',
+          completedFiles: batch.totalFiles,
+          transferredBytes: batch.totalBytes,
+        );
+      } else if (status == 'failed') {
+        newBatch = batch.copyWith(status: 'failed', errorMessage: errorMessage);
+      } else if (status == 'cancelled') {
+        newBatch = batch.copyWith(status: 'cancelled');
+      } else {
+        newBatch = batch.copyWith(status: status);
+      }
+    }
+    state = state.copyWith(transfers: updated, activeBatch: newBatch);
+    _refreshBatchFromItems(updated);
   }
 
   Future<void> cancelTransfer(String itemKey) async {
@@ -726,7 +856,10 @@ class _TransferScreenState extends ConsumerState<TransferScreen> {
       body: ListView(
         padding: const EdgeInsets.fromLTRB(0, 8, 0, 24),
         children: [
-          if (currentEntries.isEmpty)
+          // 批次任务卡片：一次选择 = 一个任务（用户要求的 21/69 式视图）。
+          if (state.activeBatch != null)
+            _buildBatchCard(theme, state.activeBatch!, state.currentPeerName ?? 'PC')
+          else if (currentEntries.isEmpty)
             _buildEmptyState(theme)
           else
             ...currentEntries.map(
@@ -743,6 +876,115 @@ class _TransferScreenState extends ConsumerState<TransferScreen> {
   }
 
   // -- Sections ---------------------------------------------------------------
+
+  /// 批次任务卡片：一个任务展示整批状态（准备中/传输中/完成/失败）、
+  /// 文件数进度（21/69）、当前文件名与字节进度。
+  Widget _buildBatchCard(
+      ThemeData theme, ActiveUploadBatch batch, String peerName) {
+    const statusLabels = {
+      'preparing': '准备中',
+      'transferring': '传输中',
+      'completed': '已完成',
+      'failed': '失败',
+      'cancelled': '已取消',
+    };
+    final statusLabel = statusLabels[batch.status] ?? batch.status;
+    final statusColor = switch (batch.status) {
+      'completed' => Colors.green,
+      'failed' => Colors.red,
+      'cancelled' => Colors.grey,
+      _ => theme.colorScheme.primary,
+    };
+    final progress = batch.totalBytes > 0
+        ? (batch.transferredBytes / batch.totalBytes).clamp(0.0, 1.0)
+        : (batch.status == 'completed' ? 1.0 : 0.0);
+
+    return Container(
+      margin: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+      padding: const EdgeInsets.all(16),
+      decoration: BoxDecoration(
+        color: theme.colorScheme.surface,
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: theme.dividerColor),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+            children: [
+              Text(
+                '发送到 $peerName',
+                style: theme.textTheme.titleMedium,
+              ),
+              Container(
+                padding:
+                    const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+                decoration: BoxDecoration(
+                  color: statusColor.withOpacity(0.15),
+                  borderRadius: BorderRadius.circular(6),
+                ),
+                child: Text(
+                  statusLabel,
+                  style: TextStyle(
+                    fontSize: 12,
+                    fontWeight: FontWeight.w600,
+                    color: statusColor,
+                  ),
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 10),
+          Text(
+            '${batch.completedFiles}/${batch.totalFiles} 个文件',
+            style: theme.textTheme.titleSmall
+                ?.copyWith(fontWeight: FontWeight.w600),
+          ),
+          if (batch.currentFileName != null &&
+              batch.status == 'transferring') ...[
+            const SizedBox(height: 4),
+            Text(
+              '正在传输：${batch.currentFileName}',
+              style: theme.textTheme.bodySmall,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+            ),
+          ],
+          const SizedBox(height: 10),
+          ClipRRect(
+            borderRadius: BorderRadius.circular(4),
+            child: LinearProgressIndicator(
+              value: progress,
+              minHeight: 6,
+              backgroundColor: theme.dividerColor,
+            ),
+          ),
+          const SizedBox(height: 8),
+          Row(
+            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+            children: [
+              Text(
+                '${_formatBytes(batch.transferredBytes)} / ${_formatBytes(batch.totalBytes)}',
+                style: theme.textTheme.bodySmall,
+              ),
+              Text(
+                '${(progress * 100).toStringAsFixed(0)}%',
+                style: theme.textTheme.bodySmall,
+              ),
+            ],
+          ),
+          if (batch.errorMessage != null) ...[
+            const SizedBox(height: 8),
+            Text(
+              batch.errorMessage!,
+              style: theme.textTheme.bodySmall?.copyWith(color: Colors.red),
+            ),
+          ],
+        ],
+      ),
+    );
+  }
 
   Widget _buildEmptyState(ThemeData theme) {
     return Center(
