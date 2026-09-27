@@ -4,6 +4,7 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import 'package:fastdrop_mobile/app/routes.dart';
 import 'package:fastdrop_mobile/core/errors/app_error.dart';
 import 'package:fastdrop_mobile/core/providers.dart';
 import 'package:fastdrop_mobile/core/storage/session_store.dart';
@@ -270,27 +271,41 @@ class TransferScreenNotifier extends StateNotifier<TransferScreenState> {
   /// Move every key in `currentBatchKeys` into a new HistoryBatch and
   /// clear the current set. The items themselves stay in
   /// `state.transfers` so any in-flight progress updates still land.
-  /// 批次任务卡片：非终态保留（继续展示进度），终态归档时清除——
-  /// 下一批发送会创建新卡片。
+  /// 归档规则（问题 2/3 修复）：只归档**已终态**的条目；进行中的条目
+  /// 留在"当前"继续展示——反复进出页面不再产生重复的历史批次，
+  /// 未完成的传输也不会出现在历史里。批次任务卡片：非终态保留
+  /// （继续展示进度），终态清除——下一批发送会创建新卡片。
   void archiveCurrentToHistory() {
     final batch = state.activeBatch;
-    if (state.currentBatchKeys.isEmpty && batch == null) return;
-    if (state.currentBatchKeys.isNotEmpty) {
-      final historyBatch = TransferHistoryBatch(
-        peerName: state.currentPeerName ?? 'PC',
-        direction: '→',
-        archivedAt: DateTime.now(),
-        itemKeys: Set<String>.from(state.currentBatchKeys),
+    final terminalKeys = state.currentBatchKeys
+        .where((key) => _isTerminalItemStatus(state.transfers[key]?.status))
+        .toSet();
+    final keepBatch = batch != null && !_isTerminalBatchStatus(batch);
+    if (terminalKeys.isEmpty && !keepBatch) {
+      // 没有可归档的内容：重置为干净状态（清掉空批次视图）。
+      state = TransferScreenState(
+        transfers: state.transfers,
+        currentPeerName: state.currentPeerName,
+        serviceReady: state.serviceReady,
       );
+      return;
+    }
+    if (terminalKeys.isNotEmpty) {
       state = state.copyWith(
-        currentBatchKeys: <String>{},
-        history: [...state.history, historyBatch],
+        currentBatchKeys: state.currentBatchKeys.difference(terminalKeys),
+        history: [
+          ...state.history,
+          TransferHistoryBatch(
+            peerName: state.currentPeerName ?? 'PC',
+            direction: '→',
+            archivedAt: DateTime.now(),
+            itemKeys: terminalKeys,
+          ),
+        ],
       );
     }
-    if (batch != null &&
-        (batch.status == 'completed' ||
-            batch.status == 'failed' ||
-            batch.status == 'cancelled')) {
+    if (batch != null && _isTerminalBatchStatus(batch)) {
+      // 终态批次任务卡片随归档清除（明细在历史里仍可查看）。
       state = TransferScreenState(
         transfers: state.transfers,
         currentPeerName: state.currentPeerName,
@@ -298,6 +313,15 @@ class TransferScreenNotifier extends StateNotifier<TransferScreenState> {
       );
     }
   }
+
+  static bool _isTerminalItemStatus(String? status) =>
+      status == 'completed' || status == 'failed' || status == 'cancelled';
+
+  static bool _isTerminalBatchStatus(ActiveUploadBatch? batch) =>
+      batch == null ||
+      batch.status == 'completed' ||
+      batch.status == 'failed' ||
+      batch.status == 'cancelled';
 
   void _tryStartUpload() {
     if (!state.serviceReady || _pendingFilePaths == null || _service == null) {
@@ -832,7 +856,6 @@ class _TransferScreenState extends ConsumerState<TransferScreen> {
     final currentEntries = state.transfers.entries
         .where((e) => state.currentBatchKeys.contains(e.key))
         .toList();
-    final historyBatches = state.history.reversed.toList(); // newest first
 
     return Scaffold(
       appBar: AppBar(
@@ -865,10 +888,17 @@ class _TransferScreenState extends ConsumerState<TransferScreen> {
             ...currentEntries.map(
               (e) => _buildTransferCard(theme, notifier, e.key, e.value),
             ),
-          if (state.history.isNotEmpty) ...[
-            const SizedBox(height: 8),
-            _buildHistorySection(theme, historyBatches, state.transfers),
-          ],
+          // 持久化传输记录统一在 HistoryScreen 查看（含手机→PC 的发送记录）。
+          const SizedBox(height: 8),
+          Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 16),
+            child: OutlinedButton.icon(
+              onPressed: () =>
+                  Navigator.of(context).pushNamed(AppRoutes.history),
+              icon: const Icon(Icons.history),
+              label: const Text('查看传输记录'),
+            ),
+          ),
         ],
       ),
       bottomNavigationBar: const FastDropNavigationBar(currentIndex: 1),
@@ -1007,81 +1037,6 @@ class _TransferScreenState extends ConsumerState<TransferScreen> {
             ),
           ],
         ),
-      ),
-    );
-  }
-
-  Widget _buildHistorySection(
-    ThemeData theme,
-    List<TransferHistoryBatch> batches,
-    Map<String, TransferItemState> transfers,
-  ) {
-    return ExpansionTile(
-      title: Text(
-        '历史 (${batches.length})',
-        style:
-            theme.textTheme.titleSmall?.copyWith(fontWeight: FontWeight.w600),
-      ),
-      initiallyExpanded: false,
-      tilePadding: const EdgeInsets.symmetric(horizontal: 16),
-      childrenPadding: const EdgeInsets.only(bottom: 8),
-      children: batches
-          .map((b) => _buildHistoryBatchCard(theme, b, transfers))
-          .toList(),
-    );
-  }
-
-  Widget _buildHistoryBatchCard(
-    ThemeData theme,
-    TransferHistoryBatch batch,
-    Map<String, TransferItemState> transfers,
-  ) {
-    final items = batch.itemKeys
-        .map((k) => transfers[k])
-        .whereType<TransferItemState>()
-        .toList();
-
-    return Container(
-      margin: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
-      padding: const EdgeInsets.all(12),
-      decoration: BoxDecoration(
-        color: theme.colorScheme.surfaceContainerHighest.withOpacity(0.4),
-        borderRadius: BorderRadius.circular(8),
-        border: Border.all(color: theme.dividerColor),
-      ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          // Direction + peer name header.
-          Row(
-            children: [
-              Icon(
-                batch.direction == '→'
-                    ? Icons.arrow_forward_rounded
-                    : Icons.arrow_back_rounded,
-                size: 18,
-                color: batch.direction == '→' ? Colors.blue : Colors.green,
-              ),
-              const SizedBox(width: 6),
-              Expanded(
-                child: Text(
-                  batch.peerName,
-                  style: theme.textTheme.bodyMedium?.copyWith(
-                    fontWeight: FontWeight.w600,
-                  ),
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                ),
-              ),
-              Text(
-                _formatArchiveTime(batch.archivedAt),
-                style: theme.textTheme.bodySmall?.copyWith(color: Colors.grey),
-              ),
-            ],
-          ),
-          const Divider(height: 12),
-          ...items.map((item) => _buildHistoryItemRow(theme, item)),
-        ],
       ),
     );
   }
