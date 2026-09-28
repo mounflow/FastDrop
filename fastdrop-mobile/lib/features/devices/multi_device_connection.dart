@@ -481,30 +481,33 @@ class MultiDeviceConnectionNotifier
           onProgress?.call(deviceId, transferId, fileId, progress);
         },
         onStateChange: (transferId, status, {errorCode, errorMessage}) {
+          // 只把终态写入持久历史（问题 7② 关联修复）：preparing/transferring
+          // 是瞬态，写历史会产生孤儿行（后续真实 transferId 写入时 id 不同，
+          // preparing 行永远不会被更新）。
           final isTerminal = const {
             'completed',
             'failed',
             'cancelled',
             'rejected',
           }.contains(status);
-          unawaited(_historyStore.upsert(TransferRow(
-            id: transferId,
-            sessionId: runtime.device.sessionId,
-            peerDeviceId: runtime.device.id,
-            direction: 'client_to_server',
-            status: status,
-            totalFiles: filePaths.length,
-            totalBytes: totalBytes,
-            transferredBytes: status == 'completed'
-                ? totalBytes
-                : transferredByFile.values.fold(0, (sum, value) => sum + value),
-            createdAt: createdAt,
-            completedAt: isTerminal
-                ? DateTime.now().millisecondsSinceEpoch ~/ 1000
-                : null,
-            errorCode: errorCode,
-            errorMessage: errorMessage,
-          )));
+          if (isTerminal) {
+            unawaited(_historyStore.upsert(TransferRow(
+              id: transferId,
+              sessionId: runtime.device.sessionId,
+              peerDeviceId: runtime.device.id,
+              direction: 'client_to_server',
+              status: status,
+              totalFiles: filePaths.length,
+              totalBytes: totalBytes,
+              transferredBytes: status == 'completed'
+                  ? totalBytes
+                  : transferredByFile.values.fold(0, (sum, value) => sum + value),
+              createdAt: createdAt,
+              completedAt: DateTime.now().millisecondsSinceEpoch ~/ 1000,
+              errorCode: errorCode,
+              errorMessage: errorMessage,
+            )));
+          }
           onStateChange?.call(
             deviceId,
             transferId,
