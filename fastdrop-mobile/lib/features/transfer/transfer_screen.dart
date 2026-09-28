@@ -304,14 +304,9 @@ class TransferScreenNotifier extends StateNotifier<TransferScreenState> {
         ],
       );
     }
-    if (batch != null && _isTerminalBatchStatus(batch)) {
-      // 终态批次任务卡片随归档清除（明细在历史里仍可查看）。
-      state = TransferScreenState(
-        transfers: state.transfers,
-        currentPeerName: state.currentPeerName,
-        serviceReady: state.serviceReady,
-      );
-    }
+    // 终态批次任务卡片保留展示（"已完成 N/N"汇总），下一批发送时被
+    // setPendingFiles 创建的新批次替换——用户要求的"一个任务"视图
+    // 在完成后依然成立。
   }
 
   static bool _isTerminalItemStatus(String? status) =>
