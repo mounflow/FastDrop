@@ -411,10 +411,15 @@ class MultiDeviceConnectionNotifier
     try {
       final createResp = await client.post(
         '/api/v1/pair/discover',
+        // 服务端契约要求 device 包一层（Go 端 pairDiscoverPayload.Device /
+        // 手机端 handlePairDiscover 都读 body['device']）；扁平结构会被
+        // 400 拒绝（device.deviceId and device.deviceName required）。
         body: {
-          'deviceId': myDeviceId,
-          'deviceName': myDeviceName,
-          'platform': 'android',
+          'device': {
+            'deviceId': myDeviceId,
+            'deviceName': myDeviceName,
+            'platform': 'android',
+          },
         },
       );
       final created = jsonDecode(createResp.body) as Map<String, dynamic>;

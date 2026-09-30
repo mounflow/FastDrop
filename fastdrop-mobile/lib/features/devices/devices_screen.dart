@@ -958,6 +958,17 @@ class _DevicesScreenState extends ConsumerState<DevicesScreen>
       _onNearbyDevicesChanged(devices, connState);
     });
 
+    // 反向配对（对端主动连接后本机补配对）会在后台新增已配对设备；
+    // 监听连接池中出现的新设备 id 并重载列表，否则"发送文件"按钮和
+    // 设备卡片要等手动下拉刷新才出现。
+    ref.listen<MultiDeviceConnectionState>(multiDeviceConnectionProvider,
+        (_, next) {
+      final knownIds = _devices.map((device) => device.id).toSet();
+      final hasNew = next.peers.values
+          .any((peer) => !knownIds.contains(peer.device.id));
+      if (hasNew) unawaited(_loadDevices());
+    });
+
     return Scaffold(
       appBar: AppBar(
         title: Row(
