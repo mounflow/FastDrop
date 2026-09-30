@@ -28,6 +28,10 @@ export interface PeerSession extends ApiTarget {
   baseUrl: string
   websocketUrl?: string
   role: 'local-session' | 'remote-server'
+  /// 对端稳定设备 ID：同一台设备的两条连接（发送用 remote-server、接收用
+  /// local-session）deviceId 相同，UI 据此聚合成一行，避免"同一台手机
+  /// 显示成两台设备"以及重复发送。
+  deviceId?: string
 }
 
 export interface PeerView extends PeerSession {

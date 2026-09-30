@@ -72,6 +72,8 @@ interface ActiveTransfer {
   speedBps: number
   status: string
   error?: string
+  /** 来件（手机→PC）：明细行写"来自 X"而不是"到 X"。 */
+  incoming?: boolean
   /** 批次内逐文件明细（多文件批次才有；单文件传输省略）。 */
   files?: ActiveTransferFile[]
   expanded?: boolean
@@ -395,6 +397,9 @@ function ensureIncomingCard(peerId: string, transferId: string): ActiveTransfer 
     transferId,
     fileId: '',
     filename: `来自 ${peerNameFor(peerId)} 的文件`,
+    // 方向标记：来件卡片的明细行必须写"来自 X"，不能写"到 X"（此前来件
+    // 卡片标题是"来自"、明细却是"到"，自相矛盾）。
+    incoming: true,
     totalBytes: 0,
     transferredBytes: 0,
     speedBps: 0,
@@ -489,6 +494,7 @@ async function pollPairRequests() {
         accessToken: request.session.accessToken,
         websocketUrl: request.session.websocketUrl,
         role: 'local-session',
+        deviceId: request.deviceId,
       })
     }
     pendingRequests.value = (result.requests || []).filter((item) => item.status === 'waiting_confirmation')
@@ -510,6 +516,7 @@ async function handleAccept(request: PendingPairRequest) {
       accessToken: accepted.session.accessToken,
       websocketUrl: accepted.session.websocketUrl,
       role: 'local-session',
+      deviceId: request.deviceId,
     })
     pendingRequests.value = pendingRequests.value.filter((item) => item.requestId !== request.requestId)
     showPairDialog.value = pendingRequests.value.length > 0
@@ -585,6 +592,7 @@ async function autoRepairRemotePair(baseUrl: string, name: string) {
           accessToken: accepted.session.accessToken,
           websocketUrl: accepted.session.websocketUrl,
           role: 'remote-server',
+          deviceId: remote.deviceId,
         })
         uploadStatus.value = `已自动重新连接 ${accepted.server.deviceName || remote.name}`
         return
@@ -626,6 +634,7 @@ async function connectRemotePeer() {
           accessToken: accepted.session.accessToken,
           websocketUrl: accepted.session.websocketUrl,
           role: 'remote-server',
+          deviceId: remote.deviceId,
         })
         remoteAddress.value = ''
         remotePairStatus.value = `已连接 ${accepted.server.deviceName || remote.name}`
@@ -651,27 +660,76 @@ function peerCapabilityLabel(peer: { role?: string; status?: string }): string {
   return peer.role === 'remote-server' ? '双向可发送' : '仅接收（本机尚未取得发送权限）'
 }
 
-/// 用户删除设备 = 双向真正断开 + 清除配对记录 + 不自动恢复（PC 侧）。
-/// 调用本机专用路由：吊销该设备在本机的会话、断开其 WS、打忽略标记；
-/// **不触碰传输记录**。
-async function onRemoveDevice(peerId: string, name: string) {
-  const peer = peerViews.value.find((item) => item.id === peerId)
+/// 一台物理设备 = 一行（此前同一台手机的两条连接会显示成"两台设备"，
+/// 且都被选中导致重复发送）：
+///  - remote-server：本机作为客户端连对方 server → 本机能发送；
+///  - local-session：对方连进本机 server → 本机只能接收。
+/// 发送目标只取 remote-server 那条（唯一的发送通道），local-session 仅
+/// 用于接收能力展示。
+interface DeviceRow {
+  key: string
+  name: string
+  platform: string
+  label: string
+  sendable: boolean
+  sendPeerId?: string
+  peerIds: string[]
+}
+
+const deviceRows = computed<DeviceRow[]>(() => {
+  const rows = new Map<string, DeviceRow>()
+  for (const peer of peerViews.value) {
+    // 设备身份：优先 deviceId，退化到设备名（同一台设备名稳定）。
+    const key = peer.deviceId || peer.name
+    let row = rows.get(key)
+    if (!row) {
+      row = {
+        key,
+        name: peer.name,
+        platform: peer.platform,
+        label: '离线',
+        sendable: false,
+        peerIds: [],
+      }
+      rows.set(key, row)
+    }
+    row.peerIds.push(peer.id)
+    if (peer.role === 'remote-server' && peer.status === 'connected') {
+      row.sendable = true
+      row.sendPeerId = peer.id
+      row.label = '双向可发送'
+    } else if (!row.sendable && peer.status === 'connected') {
+      row.label = '仅接收（本机尚未取得发送权限）'
+    }
+  }
+  return [...rows.values()]
+})
+
+/// 删除一行设备 = 删除该设备的**全部连接**（remote-server 发送通道 +
+/// local-session 接收通道），并调用本机路由真正断开（吊销会话 + 忽略标记）。
+async function onRemoveRow(row: DeviceRow) {
   const confirmed = window.confirm(
-    `与「${name}」完全断开？\n\n` +
+    `与「${row.name}」完全断开？\n\n` +
       '将吊销对方在本机的访问权限并删除配对信息。\n' +
       '删除后不会自动重新连接；需要时请重新配对。\n' +
       '（传输记录不受影响。）',
   )
   if (!confirmed) return
   try {
-    // peer.id 形如 "<deviceId>@<baseUrl>"；本机设备表以 deviceId 为准。
-    const deviceId = peerId.includes('@') ? peerId.split('@')[0] : peerId
+    // 设备身份：优先 deviceId；退化到用行内任一 peer 的 id 前缀。
+    const deviceId =
+      row.key ||
+      (row.peerIds[0]?.includes('@')
+        ? row.peerIds[0].split('@')[0]
+        : (row.peerIds[0]?.split('::')[0] ?? ''))
     const result = await deleteLocalDevice(deviceId)
-    peerPool.removePeer(peerId)
-    incomingOffers.value = incomingOffers.value.filter((o) => o.peerId !== peerId)
-    uploadStatus.value = `已删除 ${name}（吊销 ${result.revokedSessions} 个会话，不再自动重连）`
+    for (const peerId of row.peerIds) peerPool.removePeer(peerId)
+    incomingOffers.value = incomingOffers.value.filter(
+      (o) => !row.peerIds.includes(o.peerId),
+    )
+    uploadStatus.value = `已删除 ${row.name}（吊销 ${result.revokedSessions} 个会话，不再自动重连）`
   } catch (error) {
-    uploadStatus.value = `${name} 删除失败：${readableError(error)}`
+    uploadStatus.value = `${row.name} 删除失败：${readableError(error)}`
   }
 }
 
@@ -1072,18 +1130,18 @@ onUnmounted(() => {
           <button class="text-button" @click="openConnectPanel"><AppIcon name="plus" :size="17" />添加设备</button>
         </div>
 
-        <div v-if="peerViews.length" class="device-grid">
-          <div v-for="peer in peerViews" :key="peer.id" class="device-card-wrap">
+        <div v-if="deviceRows.length" class="device-grid">
+          <div v-for="row in deviceRows" :key="row.key" class="device-card-wrap">
             <button
-              :class="['device-card', { selected: selectedRecipientIds.includes(peer.id), offline: peer.status !== 'connected' }]"
-              :disabled="peer.status !== 'connected'"
-              @click="toggleRecipient(peer.id)"
+              :class="['device-card', { selected: row.sendPeerId ? selectedRecipientIds.includes(row.sendPeerId) : false, offline: !row.sendable }]"
+              :disabled="!row.sendable"
+              @click="row.sendPeerId && toggleRecipient(row.sendPeerId)"
             >
-              <span class="device-avatar"><AppIcon :name="peer.platform === 'windows' ? 'computer' : 'phone'" :size="26" /></span>
-              <span class="device-copy"><strong>{{ peer.name }}</strong><small>{{ peer.platform }} · {{ peerCapabilityLabel(peer) }}</small></span>
-              <span class="device-check"><AppIcon v-if="selectedRecipientIds.includes(peer.id)" name="check" :size="15" /></span>
+              <span class="device-avatar"><AppIcon :name="row.platform === 'windows' ? 'computer' : 'phone'" :size="26" /></span>
+              <span class="device-copy"><strong>{{ row.name }}</strong><small>{{ row.platform }} · {{ row.label }}</small></span>
+              <span class="device-check"><AppIcon v-if="row.sendPeerId && selectedRecipientIds.includes(row.sendPeerId)" name="check" :size="15" /></span>
             </button>
-            <button class="icon-button danger device-remove" title="删除设备（断开双向连接且不再自动重连）" @click="onRemoveDevice(peer.id, peer.name)"><AppIcon name="x" :size="15" /></button>
+            <button class="icon-button danger device-remove" title="删除设备（断开双向连接且不再自动重连）" @click="onRemoveRow(row)"><AppIcon name="x" :size="15" /></button>
           </div>
         </div>
 
@@ -1109,7 +1167,7 @@ onUnmounted(() => {
             <div class="transfer-main">
               <div class="transfer-title"><strong>{{ item.filename }}</strong><span>{{ statusLabel(item.status) }}</span></div>
               <div class="progress-track"><span :class="item.status" :style="{ width: `${progressPercent(item)}%` }"></span></div>
-              <div class="transfer-meta"><span>到 {{ item.peerName }} · {{ formatSize(item.transferredBytes) }} / {{ formatSize(item.totalBytes) }}<template v-if="(item.files?.length ?? 0) > 1"> · {{ item.files!.filter((f) => f.status === 'completed').length }}/{{ item.files!.length }} 个文件</template></span><span>{{ formatSpeed(item.speedBps) || `${progressPercent(item)}%` }}</span></div>
+              <div class="transfer-meta"><span>{{ item.incoming ? '来自' : '到' }} {{ item.peerName }} · {{ formatSize(item.transferredBytes) }} / {{ formatSize(item.totalBytes) }}<template v-if="(item.files?.length ?? 0) > 1"> · {{ item.files!.filter((f) => f.status === 'completed').length }}/{{ item.files!.length }} 个文件</template></span><span>{{ formatSpeed(item.speedBps) || `${progressPercent(item)}%` }}</span></div>
               <div v-if="item.expanded && item.files?.length" class="transfer-files" @click.stop>
                 <div v-for="file in item.files" :key="file.fileId" class="transfer-file-row">
                   <span class="tf-name" :title="file.name">{{ file.name }}</span>
