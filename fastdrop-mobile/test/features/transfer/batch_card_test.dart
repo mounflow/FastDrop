@@ -11,6 +11,7 @@ TransferItemState item({
   required String status,
   int transferred = 0,
   int total = 0,
+  int speed = 0,
   String name = 'a.mp4',
 }) {
   return TransferItemState(
@@ -20,7 +21,7 @@ TransferItemState item({
     fileName: name,
     bytesTransferred: transferred,
     totalBytes: total,
-    speed: 0,
+    speed: speed,
     status: status,
   );
 }
@@ -130,6 +131,70 @@ void main() {
       expect(next.totalFiles, 69);
       expect(next.totalBytes, 4700000000);
       expect(next.status, 'preparing');
+      expect(next.speedBytesPerSec, 0);
+    });
+  });
+
+  group('网速与剩余时间', () {
+    test('速率 = 传输中文件速率之和，并给出剩余时间估算', () {
+      final batch = const ActiveUploadBatch(
+        totalFiles: 3,
+        status: 'transferring',
+        totalBytes: 1300, // 预统计总量（= 三个文件大小之和）
+      );
+      final next = aggregateBatchFromItems(batch, [
+        item(status: 'transferring', transferred: 200, total: 400, speed: 100),
+        item(status: 'transferring', transferred: 100, total: 600, speed: 50),
+        item(status: 'completed', transferred: 300, total: 300, speed: 999),
+      ]);
+      expect(next.speedBytesPerSec, 150); // 仅统计传输中的文件
+      expect(next.transferredBytes, 600);
+      // 剩余 1300-600 = 700 字节 / 150 B/s ≈ 4.67 → 向上取整 5 秒
+      expect(next.etaSeconds, 5);
+    });
+
+    test('非传输态不显示速率（完成/失败后清零）', () {
+      final batch = const ActiveUploadBatch(
+        totalFiles: 1,
+        status: 'transferring',
+        totalBytes: 100,
+        speedBytesPerSec: 500,
+      );
+      final done = aggregateBatchFromItems(
+        batch,
+        [item(status: 'completed', transferred: 100, total: 100, speed: 500)],
+        status: 'completed',
+      );
+      expect(done.status, 'completed');
+      expect(done.speedBytesPerSec, 0);
+      expect(done.etaSeconds, isNull);
+    });
+
+    test('无速率时不估算剩余时间', () {
+      final batch = const ActiveUploadBatch(
+        totalFiles: 1,
+        status: 'transferring',
+        totalBytes: 1000,
+      );
+      final next = aggregateBatchFromItems(
+        batch,
+        [item(status: 'transferring', transferred: 100, total: 1000)],
+      );
+      expect(next.speedBytesPerSec, 0);
+      expect(next.etaSeconds, isNull);
+    });
+
+    test('已传满时不给剩余时间', () {
+      final batch = const ActiveUploadBatch(
+        totalFiles: 1,
+        status: 'transferring',
+        totalBytes: 100,
+      );
+      final next = aggregateBatchFromItems(
+        batch,
+        [item(status: 'transferring', transferred: 100, total: 100, speed: 10)],
+      );
+      expect(next.etaSeconds, isNull);
     });
   });
 }

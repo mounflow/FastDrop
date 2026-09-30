@@ -691,6 +691,8 @@ async function loadHistory() {
 // 保留期有限，桌面 UI 未必有那条 WS）——直接轮询本机服务的本地传输记录，
 // 非终态的接收行渲染成"当前传输"卡片（显示 + 进度），终态交给历史。
 let incomingPollBusy = false
+/// 来件进度采样（transferId → 上次字节数与采样时刻），用于推算接收速率。
+const incomingSamples = new Map<string, { bytes: number; at: number }>()
 async function pollIncomingTransfers() {
   if (incomingPollBusy) return
   incomingPollBusy = true
@@ -703,6 +705,16 @@ async function pollIncomingTransfers() {
       item.peerName = row.peerName || item.peerName
       item.filename = row.totalFiles > 1 ? `${row.totalFiles} 个文件` : '接收文件'
       item.totalBytes = row.totalBytes
+      // 来件方向没有 WS 进度事件（接收进度靠轮询），速率由两次采样的
+      // 字节差 / 时间差算出——本地传输记录里没有瞬时速率字段。
+      const previous = incomingSamples.get(row.id)
+      const now = Date.now()
+      if (previous && now > previous.at && row.transferredBytes > previous.bytes) {
+        const bps = ((row.transferredBytes - previous.bytes) * 1000) / (now - previous.at)
+        // 轻度平滑，避免单次采样抖动导致数字乱跳。
+        item.speedBps = item.speedBps > 0 ? Math.round(item.speedBps * 0.4 + bps * 0.6) : Math.round(bps)
+      }
+      incomingSamples.set(row.id, { bytes: row.transferredBytes, at: now })
       item.transferredBytes = row.transferredBytes
       item.status = row.status === 'verifying' ? 'verifying' : 'transferring'
       item.error = row.errorMessage

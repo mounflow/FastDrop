@@ -86,6 +86,8 @@ class ActiveUploadBatch {
     this.currentFileName,
     this.transferredBytes = 0,
     this.totalBytes = 0,
+    this.speedBytesPerSec = 0,
+    this.etaSeconds,
     this.errorMessage,
   });
 
@@ -95,6 +97,13 @@ class ActiveUploadBatch {
   final String? currentFileName;
   final int transferredBytes;
   final int totalBytes;
+
+  /// 整批聚合速率（字节/秒）：各文件速率之和，用于卡片上的网速显示。
+  final int speedBytesPerSec;
+
+  /// 预计剩余秒数（由速率与剩余字节推算）；未知时为 null。
+  final int? etaSeconds;
+
   final String status;
   final String? errorMessage;
 
@@ -104,6 +113,8 @@ class ActiveUploadBatch {
     String? currentFileName,
     int? transferredBytes,
     int? totalBytes,
+    int? speedBytesPerSec,
+    int? etaSeconds,
     String? status,
     String? errorMessage,
   }) {
@@ -114,6 +125,8 @@ class ActiveUploadBatch {
       currentFileName: currentFileName ?? this.currentFileName,
       transferredBytes: transferredBytes ?? this.transferredBytes,
       totalBytes: totalBytes ?? this.totalBytes,
+      speedBytesPerSec: speedBytesPerSec ?? this.speedBytesPerSec,
+      etaSeconds: etaSeconds ?? this.etaSeconds,
       status: status ?? this.status,
       errorMessage: errorMessage ?? this.errorMessage,
     );
@@ -1080,6 +1093,38 @@ class _TransferScreenState extends ConsumerState<TransferScreen> {
               ),
             ],
           ),
+          // 网速与预计剩余时间（传输中且速率已知时才显示）。
+          if (batch.status == 'transferring' &&
+              batch.speedBytesPerSec > 0) ...[
+            const SizedBox(height: 4),
+            Row(
+              mainAxisAlignment: MainAxisAlignment.spaceBetween,
+              children: [
+                Row(
+                  children: [
+                    Icon(
+                      Icons.speed_rounded,
+                      size: 13,
+                      color: theme.colorScheme.primary,
+                    ),
+                    const SizedBox(width: 4),
+                    Text(
+                      _formatSpeed(batch.speedBytesPerSec),
+                      style: theme.textTheme.bodySmall?.copyWith(
+                        color: theme.colorScheme.primary,
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
+                  ],
+                ),
+                if (batch.etaSeconds != null)
+                  Text(
+                    '剩余约 ${_formatEta(batch.etaSeconds!)}',
+                    style: theme.textTheme.bodySmall,
+                  ),
+              ],
+            ),
+          ],
           if (batch.errorMessage != null) ...[
             const SizedBox(height: 8),
             Text(
@@ -1383,6 +1428,23 @@ class _TransferScreenState extends ConsumerState<TransferScreen> {
     }
     return '${(bytes / (1024 * 1024 * 1024)).toStringAsFixed(1)} GB';
   }
+
+  /// 速率显示（例：28.3 MB/s）。
+  static String _formatSpeed(int bytesPerSec) =>
+      '${_formatBytes(bytesPerSec)}/s';
+
+  /// 预计剩余时间（例：2 分 10 秒 / 1 小时 5 分）。
+  static String _formatEta(int seconds) {
+    if (seconds < 60) return '$seconds 秒';
+    final minutes = seconds ~/ 60;
+    if (minutes < 60) {
+      final rest = seconds % 60;
+      return rest == 0 ? '$minutes 分' : '$minutes 分 $rest 秒';
+    }
+    final hours = minutes ~/ 60;
+    final restMin = minutes % 60;
+    return restMin == 0 ? '$hours 小时' : '$hours 小时 $restMin 分';
+  }
 }
 
 /// 从逐文件条目聚合批次任务卡片状态（纯函数，便于单测）。
@@ -1404,6 +1466,7 @@ ActiveUploadBatch aggregateBatchFromItems(
   var startedTotal = 0;
   var completed = 0;
   var failed = 0;
+  var speed = 0;
   String? currentFile;
   var anyTransferring = false;
   for (final item in items) {
@@ -1413,6 +1476,7 @@ ActiveUploadBatch aggregateBatchFromItems(
     if (item.status == 'failed') failed++;
     if (item.status == 'transferring') {
       anyTransferring = true;
+      speed += item.speed;
       currentFile ??= item.fileName;
     }
   }
@@ -1425,11 +1489,20 @@ ActiveUploadBatch aggregateBatchFromItems(
   final denominator =
       startedTotal > batch.totalBytes ? startedTotal : batch.totalBytes;
 
+  // 剩余时间估算：仅在传输中有速率时给出（完成/失败/取消后清空）。
+  int? eta;
+  if (nextStatus == 'transferring' && speed > 0 && denominator > transferred) {
+    final remaining = denominator - transferred;
+    eta = (remaining / speed).ceil();
+  }
+
   return batch.copyWith(
     transferredBytes: transferred,
     totalBytes: denominator,
     completedFiles: nextStatus == 'completed' ? batch.totalFiles : completed,
     failedFiles: failed,
+    speedBytesPerSec: nextStatus == 'transferring' ? speed : 0,
+    etaSeconds: eta,
     currentFileName: currentFileName ?? currentFile,
     status: nextStatus,
   );
