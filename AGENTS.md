@@ -2,6 +2,22 @@
 
 This file provides guidance to Codex (Codex.ai/code) when working with code in this repository.
 
+## Memory Rules（记忆规则 —— 必须遵守）
+
+- 本项目的所有记忆读写，**只使用前缀为 `mcp__hindsight-fastdrop__` 的工具**（retain / recall / reflect 等）
+- **禁止使用其他 `hindsight-*` 前缀的记忆工具**（那是其他项目/个人的记忆库，混用会污染两边的记忆）
+- 存记忆时带上 `tags: ["project:fastdrop"]`
+- 优先记录：**技术选型及理由、踩坑与解决方案、接口约定、构建/部署要点**
+
+上述四类优先内容的仓库载体（写记忆前先在此确认事实来源，避免把臆测写进长期记忆）：
+
+| 类别 | 载体 |
+|------|------|
+| 技术选型及理由 | `FastDrop_局域网文件快传App_详细开发设计.md`（spec 是契约来源）+ 本文件 "Tech Stack" / "Two-Channel Design" / "Critical Protocol Constants" |
+| 踩坑与解决方案 | `USER_FEEDBACK.md`（每个问题都记：现象 → 根因 → 修复 → **客观证据**） |
+| 接口约定 | spec §6 / §8 / §20 / §21；新增端点须登记（含本机专用 `/api/v1/local/*`） |
+| 构建/部署要点 | `ENV_LOCAL.md`（构建命令、环境变量、adb 部署、第三方依赖补丁等） |
+
 ## Project Status
 
 This repo is in the **design phase**. The only artifact is `FastDrop_局域网文件快传App_详细开发设计.md` — the full product spec. No source code exists yet. When starting implementation, treat that document as the source of truth for protocol, architecture, and conventions; do not contradict it without explicit approval.
