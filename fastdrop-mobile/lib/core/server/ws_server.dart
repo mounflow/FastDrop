@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:collection';
 import 'dart:convert';
+import 'dart:io';
 
 import 'package:fastdrop_mobile/core/server/session_manager.dart';
 import 'package:fastdrop_mobile/core/server/transfer_receiver.dart';
@@ -9,15 +10,39 @@ import 'package:shelf/shelf.dart';
 import 'package:shelf_web_socket/shelf_web_socket.dart';
 import 'package:web_socket_channel/web_socket_channel.dart';
 
+/// 固定的服务端口（spec 约定）：入站连接的对端地址由其 IP + 本端口推导。
+const int fastDropServerPort = 9527;
+
+/// 从入站 shelf 请求推导对端的基址（`http://<ip>:9527`）。
+///
+/// 用于"一次连接即建立双向通道"：被连方从**入站连接本身**取得对端地址，
+/// 从而可直接回连，不必依赖 mDNS 发现（mDNS 仍是常规发现路径）。
+String? peerBaseUrlFromRequest(Request request) {
+  final info = request.context['shelf.io.connection_info'];
+  if (info is! HttpConnectionInfo) return null;
+  final address = info.remoteAddress;
+  if (address.address.isEmpty) return null;
+  final host = address.address.contains(':')
+      ? '[${address.address}]' // IPv6 字面量
+      : address.address;
+  return 'http://$host:$fastDropServerPort';
+}
+
 /// A connected WebSocket client.
 class _WsConnection {
-  _WsConnection(this.channel, this.sessionId);
+  _WsConnection(this.channel, this.sessionId, {this.peerBaseUrl});
 
   final WebSocketChannel channel;
   String sessionId;
   Timer? heartbeatTimer;
   int missedPongs = 0;
   bool authenticated = false;
+
+  /// 认证后填充：该连接所属设备（用于按设备断开其全部连接）。
+  String deviceId = '';
+
+  /// 该连接的来源基址（`http://<ip>:9527`），用于反向回连。
+  final String? peerBaseUrl;
 }
 
 /// Public, token-free view of a device connected to the embedded server.
@@ -27,12 +52,17 @@ class AuthenticatedPeer {
     required this.deviceId,
     required this.deviceName,
     required this.platform,
+    this.remoteBaseUrl,
   });
 
   final String sessionId;
   final String deviceId;
   final String deviceName;
   final String platform;
+
+  /// 该对端连接进来的来源基址（`http://<ip>:9527`）。用于"被连方主动
+  /// 回连"——地址由入站连接直接观测得到，比 mDNS 缓存更可靠。
+  final String? remoteBaseUrl;
 }
 
 typedef PeerConnectedCallback = void Function(AuthenticatedPeer peer);
@@ -79,18 +109,29 @@ class WsServer {
   // ---------------------------------------------------------------------------
 
   /// Returns a shelf Handler for the `/ws/v1` WebSocket endpoint.
+  ///
+  /// 包一层普通 Handler 是为了先读到 `shelf.io.connection_info`（对端地址）
+  /// ——`webSocketHandler` 的回调只拿到 channel，拿不到原始 Request。
+  /// 每次请求现建一个 webSocketHandler，让闭包持有该请求的地址（升级是
+  /// 异步完成的，用实例字段会有竞态）。
   Handler get handler {
-    return webSocketHandler((WebSocketChannel webSocket, String? subprotocol) {
-      _handleConnection(webSocket);
-    });
+    return (Request request) {
+      final peerBaseUrl = peerBaseUrlFromRequest(request);
+      return webSocketHandler(
+        (WebSocketChannel webSocket, String? subprotocol) {
+          _handleConnection(webSocket, peerBaseUrl);
+        },
+      )(request);
+    };
   }
 
-  void _handleConnection(WebSocketChannel webSocket) {
-    debugPrint('[WsServer] New WebSocket connection');
+  void _handleConnection(WebSocketChannel webSocket, String? peerBaseUrl) {
+    debugPrint(
+        '[WsServer] New WebSocket connection (from ${peerBaseUrl ?? '?'})');
 
     // Create a temporary connection (not yet authenticated).
     final connId = DateTime.now().microsecondsSinceEpoch.toString();
-    final conn = _WsConnection(webSocket, connId);
+    final conn = _WsConnection(webSocket, connId, peerBaseUrl: peerBaseUrl);
 
     // Auth timeout: if not authenticated within 10s, disconnect.
     final authTimeout = Timer(const Duration(seconds: 10), () {
@@ -287,6 +328,7 @@ class WsServer {
         .close(4002, 'Replaced by new connection');
 
     conn.sessionId = sessionId;
+    conn.deviceId = session.deviceId;
     _connections[sessionId] = conn;
 
     // Start heartbeat for this connection.
@@ -302,6 +344,7 @@ class WsServer {
       deviceId: session.deviceId,
       deviceName: session.deviceName,
       platform: session.platform,
+      remoteBaseUrl: conn.peerBaseUrl,
     ));
 
     debugPrint(
@@ -355,6 +398,28 @@ class WsServer {
     final conn = _connections[sessionId];
     if (conn != null && conn.authenticated) {
       _send(conn, {'type': type, 'payload': payload});
+    }
+  }
+
+  /// 断开某设备在本机的全部 WebSocket 连接（删除设备时调用）。
+  ///
+  /// 先推 `session.revoked`（spec §8 消息类型）让对端立即收摊，再主动关闭
+  /// 连接——"删除 = 双向真正断开"的 WS 侧动作。
+  void disconnectDeviceSessions(String deviceId,
+      {String reason = 'session revoked by peer'}) {
+    for (final entry in _connections.entries.toList()) {
+      final conn = entry.value;
+      if (conn.deviceId != deviceId) continue;
+      try {
+        _send(conn, {
+          'type': 'session.revoked',
+          'payload': {'reason': reason},
+        });
+      } catch (_) {}
+      try {
+        conn.channel.sink.close(4004, reason);
+      } catch (_) {}
+      _handleDisconnect(conn);
     }
   }
 

@@ -12,6 +12,7 @@ import 'package:fastdrop_mobile/core/network/http_client.dart';
 import 'package:fastdrop_mobile/core/network/ws_client.dart';
 import 'package:fastdrop_mobile/core/providers.dart';
 import 'package:fastdrop_mobile/core/server/pairing_providers.dart';
+import 'package:fastdrop_mobile/core/storage/ignored_device_store.dart';
 import 'package:fastdrop_mobile/core/storage/session_store.dart';
 import 'package:fastdrop_mobile/core/storage/transfer_history_store.dart';
 import 'package:fastdrop_mobile/core/utils/file_utils.dart';
@@ -221,8 +222,14 @@ class MultiDeviceConnectionNotifier
   final HttpRequestLimiter _globalHttpLimiter = HttpRequestLimiter(6);
   final HttpRequestLimiter _globalFileLimiter = HttpRequestLimiter(2);
   final TransferHistoryStore _historyStore = TransferHistoryStore();
+  final IgnoredDeviceStore _ignoredStore = IgnoredDeviceStore();
   final Map<String, int> _historyCreatedAt = {};
   final Map<String, _PeerRuntime> _runtimes = {};
+
+  // 反向配对（双向通道建立）的幂等状态：进行中去重 + 失败退避 + 次数上限。
+  final Set<String> _pairInFlight = {};
+  final Map<String, DateTime> _pairLastAttempt = {};
+  final Map<String, int> _pairAttempts = {};
 
   Future<void> connectAll(List<Device> devices) async {
     final currentIds = devices.map((device) => device.id).toSet();
@@ -337,36 +344,100 @@ class MultiDeviceConnectionNotifier
     await _pairAndSave(
       deviceName: peer.device.name,
       platform: peer.device.platform,
-      discovered: discovered,
+      baseUrl: discovered.baseUrl,
       select: state.selectedDeviceId == deviceId,
       removeDeviceId: peer.device.id,
     );
   }
 
-  /// 对端主动配对成功后的**反向配对**：会话是"每服务器单向"的——对端
-  /// 连到本机只让对端获得本机会话，本机仍无法向对端发送。这里反向走
-  /// 一次 pair/discover（对端默认免确认）拿到对端会话，并把对端保存为
-  /// 已配对设备——这样无论谁发起连接，双向都能发送文件。
-  Future<void> ensurePairedWithPeer({
+  /// 反向配对 / 双向通道建立：会话是"每服务器单向"的——对端连到本机只
+  /// 让对端获得本机会话，本机仍无法向对端发送。这里反向走一次
+  /// pair/discover（对端默认免确认）拿到对端会话并保存为已配对设备，
+  /// 从而"一次连接即建立双向通道"，无论谁发起。
+  ///
+  /// 地址按优先级解析（mDNS 仍然支持，只是不再是唯一来源）：
+  /// 1. [observedBaseUrl]：入站连接直接观测到的地址（最可靠）
+  /// 2. 已存设备记录 / 池中 peer 的 serverBaseUrl
+  /// 3. mDNS 发现结果（含刷新后重试，兼作 IP 变更后的兜底）
+  ///
+  /// 幂等 + 去重 + 退避：已持有效会话（>now+5min）直接返回；同设备进行中
+  /// 的尝试会被跳过；失败按 2s/5s/15s/60s 退避，单轮上限 5 次，遇限流
+  /// 退避 60s。忽略名单中的设备直接跳过（用户明确删除过）。
+  Future<void> ensureMutualSession({
     required String deviceId,
     required String deviceName,
     required String platform,
+    String? observedBaseUrl,
   }) async {
+    if (await _isIgnored(deviceId, deviceName)) return;
+
+    // 已有有效会话 → 无需反向配对。
     String? staleDeviceId;
     for (final d in await _ref.read(deviceStoreProvider).loadDevices()) {
       if (d.id == deviceId || d.name == deviceName) {
-        // 已有记录且会话未临近过期 → 无需反向配对。
         final expiresAt = d.expiresAt;
         if (expiresAt == null ||
-            expiresAt.isAfter(
-                DateTime.now().add(const Duration(minutes: 5)))) {
+            expiresAt.isAfter(DateTime.now().add(const Duration(minutes: 5)))) {
           return;
         }
-        staleDeviceId = d.id; // 会话过期 → 重新配对并替换该记录
+        staleDeviceId = d.id;
         break;
       }
     }
 
+    final key = _pairKey(deviceId, deviceName);
+    if (_pairInFlight.contains(key)) return;
+    final lastAttempt = _pairLastAttempt[key];
+    if (lastAttempt != null &&
+        DateTime.now().difference(lastAttempt) < _pairBackoff(key)) {
+      return;
+    }
+    final attempts = _pairAttempts[key] ?? 0;
+    if (attempts >= 5) return;
+
+    _pairInFlight.add(key);
+    _pairLastAttempt[key] = DateTime.now();
+    _pairAttempts[key] = attempts + 1;
+    try {
+      final baseUrl = await _resolvePeerBaseUrl(
+        deviceId: deviceId,
+        deviceName: deviceName,
+        observedBaseUrl: observedBaseUrl,
+      );
+      if (baseUrl == null) return;
+      await _pairAndSave(
+        deviceName: deviceName,
+        platform: platform,
+        baseUrl: baseUrl,
+        select: false,
+        removeDeviceId: staleDeviceId,
+      );
+      _pairAttempts.remove(key); // 成功重置退避
+    } finally {
+      _pairInFlight.remove(key);
+    }
+  }
+
+  /// 反向配对的地址解析（四源优先级链；mDNS 是其中一环而非唯一依赖）。
+  Future<String?> _resolvePeerBaseUrl({
+    required String deviceId,
+    required String deviceName,
+    String? observedBaseUrl,
+  }) async {
+    // 1. 入站连接观测地址：连接刚发生，地址必然可达。
+    if (observedBaseUrl != null && observedBaseUrl.isNotEmpty) {
+      return observedBaseUrl;
+    }
+    // 2. 已存记录 / 连接池中的地址（含已配对但会话过期的记录）。
+    for (final d in await _ref.read(deviceStoreProvider).loadDevices()) {
+      if (d.id == deviceId || d.name == deviceName) return d.serverBaseUrl;
+    }
+    for (final peer in state.peers.values) {
+      if (peer.device.id == deviceId || peer.device.name == deviceName) {
+        return peer.device.serverBaseUrl;
+      }
+    }
+    // 3. mDNS 发现结果（刷新后重试一次，兼作 IP 变更兜底）。
     DiscoveredDevice? find() {
       for (final d in _ref.read(nearbyDevicesProvider)) {
         if (d.deviceId == deviceId || d.deviceName == deviceName) return d;
@@ -376,7 +447,6 @@ class MultiDeviceConnectionNotifier
 
     var found = find();
     if (found == null) {
-      // 附近列表由 mDNS 持续更新；触发一次刷新后短暂等待再找。
       try {
         await _ref.read(mdnsDiscoveryProvider).refresh();
       } catch (error) {
@@ -385,44 +455,61 @@ class MultiDeviceConnectionNotifier
       await Future<void>.delayed(const Duration(seconds: 2));
       found = find();
     }
-    if (found == null) return;
+    return found?.baseUrl;
+  }
 
-    await _pairAndSave(
-      deviceName: deviceName,
-      platform: platform,
-      discovered: found,
-      select: false,
-      removeDeviceId: staleDeviceId,
+  static String _pairKey(String deviceId, String deviceName) =>
+      deviceId.isNotEmpty ? deviceId : deviceName;
+
+  Duration _pairBackoff(String key) {
+    switch (_pairAttempts[key] ?? 1) {
+      case 1:
+        return const Duration(seconds: 2);
+      case 2:
+        return const Duration(seconds: 5);
+      case 3:
+        return const Duration(seconds: 15);
+      default:
+        return const Duration(seconds: 60);
+    }
+  }
+
+  /// 用户是否明确删除过该设备（忽略名单）。
+  Future<bool> _isIgnored(String deviceId, String deviceName) async {
+    final ignored = await _ignoredStore.load();
+    return ignored.any(
+      (entry) => entry.deviceId == deviceId || entry.name == deviceName,
     );
   }
 
-  /// 对所有当前入站连接的对端做一次反向配对检查（已配对且会话有效的
-  /// 会立即返回）。用于"删除设备后对端仍连着"、"服务重启后对端已连着"
-  /// 等不会重新触发配对回调的场景。
+  /// 对所有当前入站连接的对端做一次双向通道检查（已配对且会话有效的
+  /// 会立即返回）。用于"服务重启后对端已连着"等不会重新触发配对回调
+  /// 的场景。地址优先用入站连接观测值。
   Future<void> ensurePairedWithIncomingPeers() async {
     final peers = _ref.read(incomingPeerConnectionsProvider).values.toList();
     for (final peer in peers) {
-      await ensurePairedWithPeer(
+      await ensureMutualSession(
         deviceId: peer.deviceId,
         deviceName: peer.deviceName,
         platform: peer.platform,
+        observedBaseUrl: peer.remoteBaseUrl,
       );
     }
   }
 
   /// pair/discover → 轮询 → 保存设备 → 连接（autoRepairSession 与反向
-  /// 配对共用）。
+  /// 配对共用）。[baseUrl] 可由入站连接观测、已存记录或 mDNS 发现解析而来。
   Future<void> _pairAndSave({
     required String deviceName,
     required String platform,
-    required DiscoveredDevice discovered,
+    required String baseUrl,
     required bool select,
     required String? removeDeviceId,
   }) async {
     final myDeviceId = await DeviceIdManager.getDeviceId();
     final myDeviceName = DeviceIdManager.anonymousDeviceName(myDeviceId);
 
-    final client = FastDropHttpClient(baseUrl: discovered.baseUrl);
+    final client = FastDropHttpClient(baseUrl: baseUrl);
     try {
       final createResp = await client.post(
         '/api/v1/pair/discover',
@@ -458,9 +545,9 @@ class MultiDeviceConnectionNotifier
 
       // PC 会话 TTL 为 12 小时（spec §7.1）；对端未回过期时间时按此兜底。
       final updated = Device(
-        id: discovered.baseUrl,
+        id: baseUrl,
         name: deviceName,
-        serverBaseUrl: discovered.baseUrl,
+        serverBaseUrl: baseUrl,
         sessionId: session['sessionId'] as String,
         accessToken: session['accessToken'] as String,
         lastSeen: DateTime.now(),
@@ -472,6 +559,8 @@ class MultiDeviceConnectionNotifier
         await store.removeDevice(removeDeviceId);
       }
       await store.saveDevice(updated);
+      // 反向配对成功 = 用户以连接方式重新建立信任 → 清除忽略标记。
+      await _ignoredStore.remove(deviceId: updated.id, name: deviceName);
       await connectDevice(updated, select: select);
     } catch (error) {
       debugPrint('[MultiDevice] pair and save failed: $error');

@@ -10,6 +10,7 @@ import 'package:fastdrop_mobile/core/network/local_network_info.dart';
 import 'package:fastdrop_mobile/core/server/server_providers.dart';
 import 'package:fastdrop_mobile/core/server/pairing_providers.dart';
 import 'package:fastdrop_mobile/core/server/ws_server.dart';
+import 'package:fastdrop_mobile/core/storage/ignored_device_providers.dart';
 import 'package:fastdrop_mobile/core/storage/session_store.dart';
 import 'package:fastdrop_mobile/core/providers.dart';
 import 'package:fastdrop_mobile/features/devices/nearby_devices_sheet.dart';
@@ -615,10 +616,21 @@ class _DevicesScreenState extends ConsumerState<DevicesScreen>
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (mounted) unawaited(_loadDevices());
     });
+    // 前台定时检查：对"连着本机但本机尚未持有其会话"的设备补建双向通道
+    // （配对/连接事件之外的兜底；幂等 + 退避，无事件时也不会产生风暴）。
+    _mutualSessionTimer = Timer.periodic(const Duration(seconds: 60), (_) {
+      if (!mounted) return;
+      unawaited(ref
+          .read(multiDeviceConnectionProvider.notifier)
+          .ensurePairedWithIncomingPeers());
+    });
   }
+
+  Timer? _mutualSessionTimer;
 
   @override
   void dispose() {
+    _mutualSessionTimer?.cancel();
     _tabController?.dispose();
     super.dispose();
   }
@@ -630,6 +642,10 @@ class _DevicesScreenState extends ConsumerState<DevicesScreen>
       ref.invalidate(localNetworkInfoProvider);
       store = ref.read(deviceStoreProvider);
       devices = await store.loadDevices();
+      // 进入/下拉刷新时补建双向通道（对端可能已连着但本机缺其会话）。
+      unawaited(ref
+          .read(multiDeviceConnectionProvider.notifier)
+          .ensurePairedWithIncomingPeers());
     } catch (_) {
       debugPrint('[Devices] Failed to load paired devices');
       if (!mounted) return;
@@ -899,14 +915,23 @@ class _DevicesScreenState extends ConsumerState<DevicesScreen>
     _goToPairing();
   }
 
+  /// 删除设备 = **双向真正断开** + 清除配对记录 + **不自动恢复**。
+  ///
+  /// 用户主动执行的结果必须符合其意愿：
+  /// 1. 断开本机侧连接并向对端推送 `session.revoked`、关闭其 WS 连接；
+  /// 2. 吊销对端在本机服务器上的全部会话（对端立即失去访问权）；
+  /// 3. 删除配对记录（`fastdrop.devices` 条目）——**不触碰传输记录**；
+  /// 4. 加入忽略名单：自动回连不再重建，对端再连时需用户显式确认。
   Future<void> _onDeleteDevice(Device device) async {
     final confirmed = await showDialog<bool>(
       context: context,
       builder: (ctx) => AlertDialog(
         title: const Text('删除设备？'),
         content: Text(
-          '将删除 "${device.name}" 及其会话。'
-          '\n需要再次发送文件请重新扫码配对。',
+          '将与 "${device.name}" 完全断开：吊销对方在本机的访问权限，'
+          '并删除本机保存的配对信息。\n\n'
+          '删除后不会自动重新连接；需要时请重新配对。'
+          '\n（传输记录不受影响，仍可在传输记录中查看。）',
         ),
         actions: [
           TextButton(
@@ -924,13 +949,22 @@ class _DevicesScreenState extends ConsumerState<DevicesScreen>
     if (confirmed != true) return;
 
     final notifier = ref.read(multiDeviceConnectionProvider.notifier);
+
+    // ① 本机侧连接 + 对端 WS 连接
     notifier.disconnectDevice(device.id);
+
+    // ② 吊销对端在本机的会话（对方立即失去访问权，不只是本地删记录）
+    ref.read(fastdropServerProvider.notifier).revokeDeviceAccess(device.id);
+
+    // ③ 删除配对记录（仅设备条目；传输记录完全不动）
     await ref.read(deviceStoreProvider).removeDevice(device.id);
     ref.invalidate(pairedDevicesProvider);
 
-    // 删除设备同时删掉了本机持有的对端会话。若对端此刻仍连着本机
-    // （"对方已连接到本机"），反向补一次配对，保持"发送文件"入口可用。
-    unawaited(notifier.ensurePairedWithIncomingPeers());
+    // ④ 忽略名单：不自动恢复
+    await ref.read(ignoredDevicesProvider.notifier).add(
+          deviceId: device.id,
+          name: device.name,
+        );
 
     final remaining = await ref.read(deviceStoreProvider).loadDevices();
     if (!mounted) return;
@@ -1394,10 +1428,12 @@ class _DevicesScreenState extends ConsumerState<DevicesScreen>
                   borderRadius: BorderRadius.circular(999),
                 ),
                 child: Text(
+                  // 能力可见：本机持有对方会话且连接在线 = 双向可发送
+                  // （本机能发、对方也能发）；连接中 = 正在建立双向通道。
                   connected
-                      ? '已连接'
+                      ? '双向可发送'
                       : connecting
-                          ? '连接中'
+                          ? '正在建立双向连接…'
                           : '离线',
                   style: TextStyle(
                     color: connected
@@ -1488,8 +1524,26 @@ class _DevicesScreenState extends ConsumerState<DevicesScreen>
                   ),
                   const SizedBox(height: 4),
                   Text(
-                    '对方已连接到本机',
+                    '仅接收（对方已连接到本机，本机尚未取得发送权限）',
+                    maxLines: 2,
+                    overflow: TextOverflow.ellipsis,
                     style: Theme.of(context).textTheme.bodySmall,
+                  ),
+                  const SizedBox(height: 8),
+                  OutlinedButton.icon(
+                    onPressed: () => unawaited(ref
+                        .read(multiDeviceConnectionProvider.notifier)
+                        .ensureMutualSession(
+                          deviceId: peer.deviceId,
+                          deviceName: peer.deviceName,
+                          platform: peer.platform,
+                          observedBaseUrl: peer.remoteBaseUrl,
+                        )),
+                    icon: const Icon(Icons.sync_rounded, size: 16),
+                    label: const Text('建立双向连接'),
+                    style: OutlinedButton.styleFrom(
+                      visualDensity: VisualDensity.compact,
+                    ),
                   ),
                 ],
               ),
@@ -1497,13 +1551,13 @@ class _DevicesScreenState extends ConsumerState<DevicesScreen>
             Container(
               padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 5),
               decoration: BoxDecoration(
-                color: const Color(0xFFD6F2E3),
+                color: const Color(0xFFFFF7E8),
                 borderRadius: BorderRadius.circular(999),
               ),
               child: const Text(
-                '已连接',
+                '仅接收',
                 style: TextStyle(
-                  color: Color(0xFF176F4A),
+                  color: Color(0xFF9B5C00),
                   fontSize: 11,
                   fontWeight: FontWeight.w600,
                 ),

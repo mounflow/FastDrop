@@ -23,6 +23,7 @@ class FastDropServer {
     bool requirePairConfirmation = false,
     PairRequestCallback? onPairRequest,
     PeerAcceptedCallback? onPeerAccepted,
+    bool Function(String deviceId, String deviceName)? isIgnoredDevice,
     TransferRequestCallback? onTransferRequest,
     TransferChangedCallback? onTransferChanged,
     PeerConnectedCallback? onPeerConnected,
@@ -36,6 +37,7 @@ class FastDropServer {
       onPairRequest: onPairRequest,
     );
     pairingHandler.onPeerAccepted = onPeerAccepted;
+    pairingHandler.isIgnoredDevice = isIgnoredDevice;
     transferReceiver = TransferReceiver(
       sessionManager: sessionManager,
       onTransferRequest: onTransferRequest,

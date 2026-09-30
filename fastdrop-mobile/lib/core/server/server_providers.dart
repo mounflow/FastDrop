@@ -9,6 +9,7 @@ import 'package:fastdrop_mobile/core/server/fastdrop_server.dart';
 import 'package:fastdrop_mobile/core/server/pairing_providers.dart';
 import 'package:fastdrop_mobile/core/server/transfer_providers.dart';
 import 'package:fastdrop_mobile/core/storage/transfer_history_store.dart';
+import 'package:fastdrop_mobile/core/storage/ignored_device_providers.dart';
 import 'package:fastdrop_mobile/features/devices/multi_device_connection.dart';
 import 'package:fastdrop_mobile/shared/models/device_info.dart';
 import 'package:fastdrop_mobile/shared/models/transfer.dart';
@@ -167,20 +168,28 @@ class FastDropServerNotifier extends StateNotifier<ServerState> {
       final server = FastDropServer(
         localDevice: localDevice,
         requirePairConfirmation: _requirePairConfirmation,
+        // 忽略名单：用户明确删除过的设备不静默接受配对（删除这一主动
+        // 操作的结果必须符合用户意愿）。名单常驻内存缓存，删除时刷新。
+        isIgnoredDevice: (deviceId, deviceName) =>
+            ref.read(ignoredDevicesProvider).any((entry) =>
+                entry.deviceId == deviceId || entry.name == deviceName),
         onPairRequest: (request) {
           debugPrint('[Server] Pair request from ${request.device.deviceName}');
           ref.read(pendingPairRequestsProvider.notifier).addRequest(request);
         },
-        onPeerAccepted: (device) {
+        onPeerAccepted: (device, peerBaseUrl) {
           // 反向配对：对端连进来只让它拿到本机会话；本机要能向对端发送，
-          // 需另外拿到对端会话并把它保存为已配对设备。
-          debugPrint('[Server] Peer paired: ${device.deviceName} → reverse pair');
+          // 需另外拿到对端会话并把它保存为已配对设备。地址优先用入站连接
+          // 观测到的地址（不依赖 mDNS）。
+          debugPrint('[Server] Peer paired: ${device.deviceName} → reverse pair '
+              '(${peerBaseUrl ?? 'no address'})');
           unawaited(ref
               .read(multiDeviceConnectionProvider.notifier)
-              .ensurePairedWithPeer(
+              .ensureMutualSession(
                 deviceId: device.deviceId,
                 deviceName: device.deviceName,
                 platform: device.platform,
+                observedBaseUrl: peerBaseUrl,
               ));
         },
         onTransferRequest: (transfer) {
@@ -228,14 +237,15 @@ class FastDropServerNotifier extends StateNotifier<ServerState> {
         onPeerConnected: (peer) {
           ref.read(incomingPeerConnectionsProvider.notifier).connected(peer);
           // 见到"未配对"的对端连接就反向配对：会话是单向的，对端连进来
-          // 只让它能发给本机；本机要能发给它必须持有对端会话。覆盖用户
-          // 手动删除已配对设备后对端仍连着、或配对回调未覆盖的场景。
+          // 只让它能发给本机；本机要能发给它必须持有对端会话。地址优先用
+          // 入站连接观测到的地址。
           unawaited(ref
               .read(multiDeviceConnectionProvider.notifier)
-              .ensurePairedWithPeer(
+              .ensureMutualSession(
                 deviceId: peer.deviceId,
                 deviceName: peer.deviceName,
                 platform: peer.platform,
+                observedBaseUrl: peer.remoteBaseUrl,
               ));
         },
         onPeerDisconnected: (sessionId) {
@@ -276,6 +286,20 @@ class FastDropServerNotifier extends StateNotifier<ServerState> {
         errorMessage: e.toString(),
       );
     }
+  }
+
+  /// 删除设备时调用：**吊销该设备在本机的全部会话**，并向它推送
+  /// `session.revoked` + 关闭其 WS 连接。
+  ///
+  /// 这是"删除 = 双向真正断开"的服务端侧动作——只清本地设备记录是不够
+  /// 的，对端会继续持有本机会话并可继续发送。
+  void revokeDeviceAccess(String deviceId) {
+    final server = _server;
+    if (server == null) return;
+    server.wsServer.disconnectDeviceSessions(deviceId);
+    final revoked = server.sessionManager.revokeByDeviceId(deviceId);
+    debugPrint('[Server] revoked ${revoked.length} session(s) '
+        'for device $deviceId');
   }
 
   /// Stop the embedded server.

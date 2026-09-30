@@ -87,6 +87,24 @@ class SessionManager {
   /// behaviour).
   void invalidateAll() => _sessions.clear();
 
+  /// 吊销某个设备在本机的全部会话（返回被吊销的会话 id 列表）。
+  ///
+  /// 用于"删除设备 = 双向真正断开"：只清本地设备记录是不够的，必须让对端
+  /// 立即失去访问权（其分块请求会拿到 401 SESSION_REVOKED）。
+  List<String> revokeByDeviceId(String deviceId) {
+    final revoked = <String>[];
+    _sessions.removeWhere((sessionId, session) {
+      if (session.deviceId != deviceId) return false;
+      revoked.add(sessionId);
+      return true;
+    });
+    return revoked;
+  }
+
+  /// 该设备当前是否在本机持有有效会话。
+  bool hasSessionForDevice(String deviceId) => _sessions.values
+      .any((s) => s.deviceId == deviceId && !s.isExpired);
+
   /// Remove expired sessions.
   void purgeExpired() {
     _sessions.removeWhere((_, s) => s.isExpired);

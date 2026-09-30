@@ -6,6 +6,7 @@ import 'dart:io';
 import 'package:fastdrop_mobile/core/security/token.dart';
 import 'package:fastdrop_mobile/core/server/request_reader.dart';
 import 'package:fastdrop_mobile/core/server/session_manager.dart';
+import 'package:fastdrop_mobile/core/server/ws_server.dart' show peerBaseUrlFromRequest;
 import 'package:fastdrop_mobile/shared/models/device_info.dart';
 import 'package:fastdrop_mobile/shared/models/pair_request.dart';
 import 'package:fastdrop_mobile/shared/models/qr_payload.dart';
@@ -19,12 +20,17 @@ class ServerPairRequest {
     required this.device,
     required this.createdAt,
     this.viaDiscover = false,
+    this.peerBaseUrl,
   });
 
   final String requestId;
   final DeviceInfo device;
   final DateTime createdAt;
   final bool viaDiscover;
+
+  /// 对端来源基址（`http://<ip>:9527`），由入站请求的连接信息推导；
+  /// 反向回连时优先使用（不依赖 mDNS 发现）。
+  final String? peerBaseUrl;
 
   /// `waiting_confirmation` | `accepted` | `rejected` | `expired`
   String status = 'waiting_confirmation';
@@ -55,7 +61,10 @@ class ServerPairRequest {
 typedef PairRequestCallback = void Function(ServerPairRequest request);
 
 /// 对端配对被接受时的回调（用于反向配对）。
-typedef PeerAcceptedCallback = void Function(DeviceInfo device);
+/// [peerBaseUrl] 为对端在本机观察到的来源地址（`http://<ip>:9527`），
+/// 由入站 HTTP 连接直接推导——回连时优先使用它，不依赖 mDNS 发现。
+typedef PeerAcceptedCallback = void Function(
+    DeviceInfo device, String? peerBaseUrl);
 
 /// Handles the server side of the pairing handshake.
 ///
@@ -114,7 +123,13 @@ class PairingHandler {
   /// 对端配对被接受时回调（带对端设备信息）。用于反向配对：会话是
   /// "每服务器单向"的，对端连进来只让对端拿到本机会话；本机要能向
   /// 对端发送，必须另外反向配对一次拿到对端会话。
-  void Function(DeviceInfo device)? onPeerAccepted;
+  void Function(DeviceInfo device, String? peerBaseUrl)? onPeerAccepted;
+
+  /// 判断设备是否为"用户明确删除过"（忽略名单）。
+  ///
+  /// 语义：用户主动执行的结果必须符合其意愿——被删除过的设备即使全局
+  /// "免确认"开启，也**不静默接受**，必须走确认流程由用户显式允许。
+  bool Function(String deviceId, String deviceName)? isIgnoredDevice;
 
   // ---------------------------------------------------------------------------
   // QR payload generation
@@ -199,7 +214,7 @@ class PairingHandler {
 
   /// Create a pair request (from QR or discover flow).
   ServerPairRequest _createRequest(DeviceInfo device,
-      {bool viaDiscover = false}) {
+      {bool viaDiscover = false, String? peerBaseUrl}) {
     _evictOverflowRequests();
     final requestId = TokenManager.generateToken();
     final request = ServerPairRequest(
@@ -207,10 +222,15 @@ class PairingHandler {
       device: device,
       createdAt: DateTime.now(),
       viaDiscover: viaDiscover,
+      peerBaseUrl: peerBaseUrl,
     );
     _requests[requestId] = request;
 
-    if (_requireConfirmation) {
+    // 被用户删除过的设备不静默接受（哪怕全局免确认为开）：必须由用户
+    // 显式确认，保证"删除"这一主动操作的结果符合用户意愿。
+    final ignored =
+        isIgnoredDevice?.call(device.deviceId, device.deviceName) ?? false;
+    if (_requireConfirmation || ignored) {
       onPairRequest?.call(request);
     } else {
       acceptRequest(requestId);
@@ -254,7 +274,7 @@ class PairingHandler {
     );
 
     onRequestResolved?.call(requestId, 'accepted');
-    onPeerAccepted?.call(request.device);
+    onPeerAccepted?.call(request.device, request.peerBaseUrl);
     _scheduleRequestCleanup(requestId);
   }
 
@@ -329,7 +349,10 @@ class PairingHandler {
     }
 
     final device = DeviceInfo.fromJson(deviceJson);
-    final pairRequest = _createRequest(device);
+    final pairRequest = _createRequest(
+      device,
+      peerBaseUrl: peerBaseUrlFromRequest(request),
+    );
 
     return _json(
         201,
@@ -360,7 +383,11 @@ class PairingHandler {
     }
 
     final device = DeviceInfo.fromJson(deviceJson);
-    final pairRequest = _createRequest(device, viaDiscover: true);
+    final pairRequest = _createRequest(
+      device,
+      viaDiscover: true,
+      peerBaseUrl: peerBaseUrlFromRequest(request),
+    );
 
     return _json(
         201,
