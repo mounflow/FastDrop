@@ -1214,17 +1214,19 @@ class _DevicesScreenState extends ConsumerState<DevicesScreen>
                   child: _buildIncomingPeerCard(peer),
                 )),
           ],
-          if (connected.isNotEmpty) ...[
+          // 发送按钮：只要有已配对设备就显示（问题：此前依赖
+          // connectedDevices 列表，某些连接路径下该列表为空导致按钮消失）。
+          if (_devices.isNotEmpty) ...[
             const SizedBox(height: 8),
             SizedBox(
               width: double.infinity,
               child: ElevatedButton.icon(
-                onPressed: () => _onSendToConnected(connected),
+                onPressed: () => _onSendToConnected(_devices),
                 icon: const Icon(Icons.send_rounded),
                 label: Text(
-                  connected.length == 1
+                  _devices.length == 1
                       ? '发送文件'
-                      : '发送到 ${connected.length} 台在线设备',
+                      : '发送到 ${_devices.length} 台设备',
                 ),
               ),
             ),
