@@ -387,8 +387,10 @@ function handleWSMessage(peerId: string, raw: unknown) {
 // 来件方向（手机→PC，免确认直传）只会以 WS 事件的形式出现：确保存在
 // 一张进度卡片，首页才能实时反映接收进度（否则完成后才见于传输记录）。
 function ensureIncomingCard(peerId: string, transferId: string): ActiveTransfer {
+  // 按 transferId 唯一：轮询路径用 peerDeviceId、WS 路径用会话派生的 peerId，
+  // 两者不同——若把 peerId 计入身份，同一个传输会被画成两张卡片。
   const existing = activeTransfers.value.find(
-    (entry) => entry.peerId === peerId && entry.transferId === transferId,
+    (entry) => entry.transferId === transferId,
   )
   if (existing) return existing
   const card: ActiveTransfer = {
@@ -761,7 +763,11 @@ async function pollIncomingTransfers() {
       if (row.direction !== 'client_to_server' || isTerminal(row.status)) continue
       const item = ensureIncomingCard(row.peerDeviceId, row.id)
       item.peerName = row.peerName || item.peerName
-      item.filename = row.totalFiles > 1 ? `${row.totalFiles} 个文件` : '接收文件'
+      // 单文件来件显示真实文件名（本地记录里有批次首个文件名）。
+      item.filename =
+        row.totalFiles > 1
+          ? `${row.totalFiles} 个文件`
+          : row.firstFileName || '接收文件'
       item.totalBytes = row.totalBytes
       // 来件方向没有 WS 进度事件（接收进度靠轮询），速率由两次采样的
       // 字节差 / 时间差算出——本地传输记录里没有瞬时速率字段。

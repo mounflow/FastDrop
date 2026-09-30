@@ -362,6 +362,9 @@ type TransferHistoryRow struct {
 	TransferRow
 	PeerName     string `json:"peerName"`
 	PeerPlatform string `json:"peerPlatform"`
+	/// 批次首个文件名：单文件传输时用它显示真实文件名（否则卡片只能写
+	/// "来自 X 的文件"）。多文件批次仍显示"N 个文件"。
+	FirstFileName string `json:"firstFileName"`
 }
 
 func (d *DB) InsertTransfer(ctx context.Context, t TransferRow) error {
@@ -488,7 +491,9 @@ func (d *DB) ListTransferHistory(ctx context.Context) ([]TransferHistoryRow, err
 SELECT t.id, t.session_id, t.peer_device_id, t.direction, t.status,
        t.total_files, t.total_bytes, t.transferred_bytes, t.created_at,
        t.started_at, t.completed_at, t.error_code, t.error_message,
-       COALESCE(d.name, ''), COALESCE(d.platform, 'unknown')
+       COALESCE(d.name, ''), COALESCE(d.platform, 'unknown'),
+       COALESCE((SELECT f.original_name FROM transfer_files f
+                 WHERE f.transfer_id = t.id ORDER BY f.id LIMIT 1), '')
 FROM transfers t
 LEFT JOIN devices d ON d.id = t.peer_device_id
 ORDER BY t.created_at DESC`)
@@ -506,7 +511,7 @@ ORDER BY t.created_at DESC`)
 			&h.ID, &sessionID, &h.PeerDeviceID, &h.Direction, &h.Status,
 			&h.TotalFiles, &h.TotalBytes, &h.TransferredBytes, &h.CreatedAt,
 			&startedAt, &completedAt, &errCode, &errMsg,
-			&h.PeerName, &h.PeerPlatform,
+			&h.PeerName, &h.PeerPlatform, &h.FirstFileName,
 		); err != nil {
 			return nil, err
 		}

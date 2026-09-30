@@ -196,5 +196,38 @@ void main() {
       );
       expect(next.etaSeconds, isNull);
     });
+
+    test('调用方传入的稳定速率优先于逐文件瞬时速率（防闪烁）', () {
+      final batch = const ActiveUploadBatch(
+        totalFiles: 2,
+        status: 'transferring',
+        totalBytes: 1000,
+      );
+      // 逐文件瞬时速率全是 0（chunk 间隙），但批次字节差算出的速率非 0：
+      // 网速行不应因为瞬时 0 而消失。
+      final next = aggregateBatchFromItems(
+        batch,
+        [
+          item(status: 'transferring', transferred: 300, total: 500, speed: 0),
+          item(status: 'transferring', transferred: 200, total: 500, speed: 0),
+        ],
+        speedBytesPerSec: 8 * 1024 * 1024,
+      );
+      expect(next.speedBytesPerSec, 8 * 1024 * 1024);
+      expect(next.etaSeconds, isNotNull);
+    });
+
+    test('未传速率时退化为逐文件速率之和', () {
+      final batch = const ActiveUploadBatch(
+        totalFiles: 1,
+        status: 'transferring',
+        totalBytes: 1000,
+      );
+      final next = aggregateBatchFromItems(
+        batch,
+        [item(status: 'transferring', transferred: 100, total: 1000, speed: 42)],
+      );
+      expect(next.speedBytesPerSec, 42);
+    });
   });
 }

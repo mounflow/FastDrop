@@ -571,6 +571,7 @@ class MultiTransferScreenNotifier extends StateNotifier<TransferScreenState> {
     );
     // 预算批次总大小：卡片从一开始就显示 "已传 / 总量" 而不是 "… / 0"。
     unawaited(_precomputeBatchTotalBytes(paths));
+    _resetBatchSpeed();
     _tryStartUpload();
   }
 
@@ -681,7 +682,69 @@ class MultiTransferScreenNotifier extends StateNotifier<TransferScreenState> {
     );
     // 批次聚合走同一处逻辑（字节数/总数/完成数/当前文件/状态），
     // 避免此处只累加已传字节导致分母恒为 0。
-    _refreshBatchFromItems(updated, currentFileName: progress.fileName);
+    // 速率用批次字节差另算（比逐文件瞬时速率稳定，不再闪烁）。
+    _refreshBatchFromItems(
+      updated,
+      currentFileName: progress.fileName,
+      speedBytesPerSec: _sampleBatchSpeed(updated),
+    );
+  }
+
+  // 批次速率采样状态：两次采样间的字节差 ÷ 时间差，带平滑与保持。
+  DateTime? _speedSampledAt;
+  int _speedSampledBytes = 0;
+  int _speedSmoothed = 0;
+  DateTime? _speedLastNonZeroAt;
+
+  /// 用批次总字节差计算速率（字节/秒）。
+  ///
+  /// 逐文件的瞬时速率只在 chunk 完成时更新，间隔内会算出 0，导致卡片上的
+  /// 网速与剩余时间一行一行地消失（用户实测的闪烁）。这里改为按批次字节
+  /// 差采样 + 指数平滑；短时间内没有新字节时**保持上一个非零值**，
+  /// 只有确实停滞超过 3 秒或进入终态才归零。
+  int _sampleBatchSpeed(Map<String, TransferItemState> transfers) {
+    var bytes = 0;
+    for (final key in state.currentBatchKeys) {
+      bytes += transfers[key]?.bytesTransferred ?? 0;
+    }
+    final now = DateTime.now();
+    final lastAt = _speedSampledAt;
+    if (lastAt == null) {
+      _speedSampledAt = now;
+      _speedSampledBytes = bytes;
+      return _speedSmoothed;
+    }
+    final elapsedMs = now.difference(lastAt).inMilliseconds;
+    // 采样窗口太短会把抖动放大：不足 500ms 先沿用上次结果。
+    if (elapsedMs < 500) return _speedSmoothed;
+
+    final deltaBytes = bytes - _speedSampledBytes;
+    _speedSampledAt = now;
+    _speedSampledBytes = bytes;
+
+    if (deltaBytes <= 0) {
+      // 本轮没有新字节：短暂停顿时保持显示，长时间停滞才归零。
+      final lastNonZero = _speedLastNonZeroAt;
+      if (lastNonZero == null ||
+          now.difference(lastNonZero) > const Duration(seconds: 3)) {
+        _speedSmoothed = 0;
+      }
+      return _speedSmoothed;
+    }
+
+    final instant = (deltaBytes * 1000 / elapsedMs).round();
+    _speedSmoothed =
+        _speedSmoothed > 0 ? (_speedSmoothed * 0.4 + instant * 0.6).round() : instant;
+    _speedLastNonZeroAt = now;
+    return _speedSmoothed;
+  }
+
+  /// 批次结束/取消时清空速率采样，避免下一批沿用上一批的速率。
+  void _resetBatchSpeed() {
+    _speedSampledAt = null;
+    _speedSampledBytes = 0;
+    _speedSmoothed = 0;
+    _speedLastNonZeroAt = null;
   }
 
   void _onStateChange(
@@ -765,7 +828,7 @@ class MultiTransferScreenNotifier extends StateNotifier<TransferScreenState> {
 
   /// 从逐文件条目聚合批次任务状态（字节数/完成数/失败数/当前文件）。
   void _refreshBatchFromItems(Map<String, TransferItemState> transfers,
-      {String? status, String? currentFileName}) {
+      {String? status, String? currentFileName, int? speedBytesPerSec}) {
     final batch = state.activeBatch;
     if (batch == null) return;
     final items = <TransferItemState>[];
@@ -779,6 +842,7 @@ class MultiTransferScreenNotifier extends StateNotifier<TransferScreenState> {
         items,
         status: status,
         currentFileName: currentFileName,
+        speedBytesPerSec: speedBytesPerSec,
       ),
     );
   }
@@ -1095,8 +1159,7 @@ class _TransferScreenState extends ConsumerState<TransferScreen> {
           ),
           // 网速与预计剩余时间（传输中且速率已知时才显示）。
           if (batch.status == 'transferring' &&
-              batch.speedBytesPerSec > 0) ...[
-            const SizedBox(height: 4),
+              batch.speedBytesPerSec > 0) ...[            const SizedBox(height: 4),
             Row(
               mainAxisAlignment: MainAxisAlignment.spaceBetween,
               children: [
@@ -1461,12 +1524,13 @@ ActiveUploadBatch aggregateBatchFromItems(
   Iterable<TransferItemState> items, {
   String? status,
   String? currentFileName,
+  int? speedBytesPerSec,
 }) {
   var transferred = 0;
   var startedTotal = 0;
   var completed = 0;
   var failed = 0;
-  var speed = 0;
+  var itemSpeed = 0;
   String? currentFile;
   var anyTransferring = false;
   for (final item in items) {
@@ -1476,7 +1540,7 @@ ActiveUploadBatch aggregateBatchFromItems(
     if (item.status == 'failed') failed++;
     if (item.status == 'transferring') {
       anyTransferring = true;
-      speed += item.speed;
+      itemSpeed += item.speed;
       currentFile ??= item.fileName;
     }
   }
@@ -1488,6 +1552,12 @@ ActiveUploadBatch aggregateBatchFromItems(
 
   final denominator =
       startedTotal > batch.totalBytes ? startedTotal : batch.totalBytes;
+
+  // 速率：优先用调用方按批次字节差算出的稳定值（避免逐文件瞬时速率
+  // 归零导致网速行闪烁），否则退化为各文件速率之和。
+  final speed = nextStatus == 'transferring'
+      ? (speedBytesPerSec ?? itemSpeed)
+      : 0;
 
   // 剩余时间估算：仅在传输中有速率时给出（完成/失败/取消后清空）。
   int? eta;
@@ -1501,7 +1571,7 @@ ActiveUploadBatch aggregateBatchFromItems(
     totalBytes: denominator,
     completedFiles: nextStatus == 'completed' ? batch.totalFiles : completed,
     failedFiles: failed,
-    speedBytesPerSec: nextStatus == 'transferring' ? speed : 0,
+    speedBytesPerSec: speed,
     etaSeconds: eta,
     currentFileName: currentFileName ?? currentFile,
     status: nextStatus,

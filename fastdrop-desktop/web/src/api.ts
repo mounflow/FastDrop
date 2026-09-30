@@ -156,6 +156,8 @@ export async function listTransfers(target?: ApiTarget): Promise<TransferRow[]> 
 export interface LocalTransferRow extends TransferRow {
   peerName: string
   peerPlatform: string
+  /// 批次首个文件名：单文件传输用它显示真实文件名。
+  firstFileName?: string
 }
 
 export async function listLocalTransferHistory(): Promise<LocalTransferRow[]> {
