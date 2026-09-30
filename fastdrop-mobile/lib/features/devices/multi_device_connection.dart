@@ -452,7 +452,24 @@ class MultiDeviceConnectionNotifier
     final createdAt = DateTime.now().millisecondsSinceEpoch ~/ 1000;
     final futures = <Future<void>>[];
     for (final deviceId in deviceIds.toSet()) {
-      final runtime = _runtimes[deviceId];
+      var candidate = _runtimes[deviceId];
+      if (candidate == null || !candidate.wsClient.isConnected) {
+        // 自动连接已配对但未被 pool 追踪的设备（典型场景：PC 通过附近
+        // 设备主动连接手机，pool 只追踪手机主动发起的连接）。让任意
+        // 方向建立的配对都能发送文件。
+        Device? device;
+        for (final d in await _ref.read(deviceStoreProvider).loadDevices()) {
+          if (d.id == deviceId) {
+            device = d;
+            break;
+          }
+        }
+        if (device != null) {
+          await connectDevice(device, select: false);
+          candidate = _runtimes[deviceId];
+        }
+      }
+      final runtime = candidate;
       if (runtime == null || !runtime.wsClient.isConnected) {
         onStateChange?.call(
           deviceId,

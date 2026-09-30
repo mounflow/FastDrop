@@ -7,6 +7,7 @@ import 'package:flutter/services.dart';
 import 'package:path_provider/path_provider.dart';
 
 import 'package:fastdrop_mobile/core/providers.dart';
+import 'package:fastdrop_mobile/core/server/pairing_providers.dart';
 import 'package:fastdrop_mobile/core/storage/session_store.dart';
 import 'package:fastdrop_mobile/features/devices/multi_device_connection.dart';
 import 'package:fastdrop_mobile/shared/widgets/file_icon.dart';
@@ -160,8 +161,17 @@ class _FilePickerScreenState extends ConsumerState<FilePickerScreen>
               spacing: 8,
               runSpacing: 6,
               children: _devices.map((device) {
-                final connected =
+                // 在线判定覆盖双向连接：pool 追踪的（手机主动连接）+
+                // 入站连接的（PC 主动连接手机，在 map 里即在线）。
+                final poolConnected =
                     connections.peer(device.id)?.isConnected ?? false;
+                final incomingPeers = ref
+                    .watch(incomingPeerConnectionsProvider)
+                    .values
+                    .toList();
+                final incoming = incomingPeers
+                    .any((peer) => peer.deviceName == device.name);
+                final connected = poolConnected || incoming;
                 return FilterChip(
                   selected: _selectedDeviceIds.contains(device.id),
                   onSelected: connected
@@ -317,6 +327,16 @@ class _FilePickerScreenState extends ConsumerState<FilePickerScreen>
         .connectedDevices
         .map((device) => device.id)
         .toSet();
+    // 入站连接的设备（PC 主动连接手机）按名称匹配回 id，同样可作为
+    // 发送目标——在 map 里即在线。
+    final incomingNames = ref
+        .read(incomingPeerConnectionsProvider)
+        .values
+        .map((peer) => peer.deviceName)
+        .toSet();
+    for (final device in _devices) {
+      if (incomingNames.contains(device.name)) connectedIds.add(device.id);
+    }
     final targets = _selectedDeviceIds.intersection(connectedIds).toList();
     if (targets.isEmpty) {
       ScaffoldMessenger.of(context).showSnackBar(
