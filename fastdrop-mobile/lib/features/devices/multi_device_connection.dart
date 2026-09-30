@@ -11,6 +11,7 @@ import 'package:fastdrop_mobile/core/discovery/discovery_providers.dart';
 import 'package:fastdrop_mobile/core/network/http_client.dart';
 import 'package:fastdrop_mobile/core/network/ws_client.dart';
 import 'package:fastdrop_mobile/core/providers.dart';
+import 'package:fastdrop_mobile/core/server/pairing_providers.dart';
 import 'package:fastdrop_mobile/core/storage/session_store.dart';
 import 'package:fastdrop_mobile/core/storage/transfer_history_store.dart';
 import 'package:fastdrop_mobile/core/utils/file_utils.dart';
@@ -393,6 +394,20 @@ class MultiDeviceConnectionNotifier
       select: false,
       removeDeviceId: staleDeviceId,
     );
+  }
+
+  /// 对所有当前入站连接的对端做一次反向配对检查（已配对且会话有效的
+  /// 会立即返回）。用于"删除设备后对端仍连着"、"服务重启后对端已连着"
+  /// 等不会重新触发配对回调的场景。
+  Future<void> ensurePairedWithIncomingPeers() async {
+    final peers = _ref.read(incomingPeerConnectionsProvider).values.toList();
+    for (final peer in peers) {
+      await ensurePairedWithPeer(
+        deviceId: peer.deviceId,
+        deviceName: peer.deviceName,
+        platform: peer.platform,
+      );
+    }
   }
 
   /// pair/discover → 轮询 → 保存设备 → 连接（autoRepairSession 与反向

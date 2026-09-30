@@ -227,6 +227,16 @@ class FastDropServerNotifier extends StateNotifier<ServerState> {
         },
         onPeerConnected: (peer) {
           ref.read(incomingPeerConnectionsProvider.notifier).connected(peer);
+          // 见到"未配对"的对端连接就反向配对：会话是单向的，对端连进来
+          // 只让它能发给本机；本机要能发给它必须持有对端会话。覆盖用户
+          // 手动删除已配对设备后对端仍连着、或配对回调未覆盖的场景。
+          unawaited(ref
+              .read(multiDeviceConnectionProvider.notifier)
+              .ensurePairedWithPeer(
+                deviceId: peer.deviceId,
+                deviceName: peer.deviceName,
+                platform: peer.platform,
+              ));
         },
         onPeerDisconnected: (sessionId) {
           ref

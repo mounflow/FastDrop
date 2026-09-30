@@ -928,6 +928,10 @@ class _DevicesScreenState extends ConsumerState<DevicesScreen>
     await ref.read(deviceStoreProvider).removeDevice(device.id);
     ref.invalidate(pairedDevicesProvider);
 
+    // 删除设备同时删掉了本机持有的对端会话。若对端此刻仍连着本机
+    // （"对方已连接到本机"），反向补一次配对，保持"发送文件"入口可用。
+    unawaited(notifier.ensurePairedWithIncomingPeers());
+
     final remaining = await ref.read(deviceStoreProvider).loadDevices();
     if (!mounted) return;
     setState(() {
