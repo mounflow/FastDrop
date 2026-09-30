@@ -285,10 +285,10 @@ function toggleRecipient(peerId: string) {
 }
 
 function handlePoolProgress(progress: PeerTransferProgress) {
-  // 批次卡片按 (peerId, transferId) 唯一——fileId 不再参与匹配。
-  let item: ActiveTransfer | undefined = activeTransfers.value.find((entry) =>
-    entry.peerId === progress.peerId
-      && entry.transferId === progress.transferId,
+  // 卡片身份统一按 transferId（与来件卡片一致）——否则同一传输可能被
+  // 建出两张卡：轮询/WS 的 peerId 不同、transferId 相同。
+  let item: ActiveTransfer | undefined = activeTransfers.value.find(
+    (entry) => entry.transferId === progress.transferId,
   )
   // 多文件批次：卡片进度必须是**整批**的（逐文件快照求和），否则进度条
   // 显示的是当前单个文件的进度（用户实测反馈）。
@@ -386,9 +386,16 @@ function handleWSMessage(peerId: string, raw: unknown) {
     case 'transfer.progress': {
       // 来件方向（手机→PC）此前从不创建卡片，传输进行中 PC 首页无感知。
       const item = ensureIncomingCard(peerId, transferId)
-      item.totalBytes = Number(payload.totalBytes || item.totalBytes)
-      item.transferredBytes = Number(payload.transferredBytes || item.transferredBytes)
-      item.speedBps = Number(payload.speedBps || 0)
+      // 卡片字节数由**批次级**数据源驱动：出向来自 emitSnapshot（整批
+      // 快照求和）、来向来自本机传输记录轮询。WS 的 transfer.progress 是
+      // **单文件**进度，若用它覆盖，进度条会在"单文件刻度"与"整批刻度"
+      // 之间来回跳（用户实测：时而是单个文件、时而是总文件）。
+      const batchDriven = item.incoming === true || (item.files?.length ?? 0) > 1
+      if (!batchDriven) {
+        item.totalBytes = Number(payload.totalBytes || item.totalBytes)
+        item.transferredBytes = Number(payload.transferredBytes || item.transferredBytes)
+        item.speedBps = Number(payload.speedBps || 0)
+      }
       if (item.status !== 'paused') item.status = 'transferring'
       break
     }
