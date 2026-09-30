@@ -10,13 +10,16 @@ import {
   getNearbyDevices,
   getServerInfo,
   getSettings,
+  listLocalDevices,
   listLocalTransferHistory,
   listPairRequests,
+  deleteLocalDevice,
   pollPairStatus,
   rejectPair,
   requestDiscoverPair,
   localServiceOrigin,
   updateSettings,
+  type LocalDeviceRow,
   type NearbyDevice,
   type PendingPairRequest,
 } from './api'
@@ -641,6 +644,37 @@ async function connectRemotePeer() {
   }
 }
 
+// 设备能力标签（与手机端三态一致）：本机持有对方会话 = 双向可发送；
+// 仅有对方连进来（local-session）= 仅接收。
+function peerCapabilityLabel(peer: { role?: string; status?: string }): string {
+  if (peer.status !== 'connected') return '离线'
+  return peer.role === 'remote-server' ? '双向可发送' : '仅接收（本机尚未取得发送权限）'
+}
+
+/// 用户删除设备 = 双向真正断开 + 清除配对记录 + 不自动恢复（PC 侧）。
+/// 调用本机专用路由：吊销该设备在本机的会话、断开其 WS、打忽略标记；
+/// **不触碰传输记录**。
+async function onRemoveDevice(peerId: string, name: string) {
+  const peer = peerViews.value.find((item) => item.id === peerId)
+  const confirmed = window.confirm(
+    `与「${name}」完全断开？\n\n` +
+      '将吊销对方在本机的访问权限并删除配对信息。\n' +
+      '删除后不会自动重新连接；需要时请重新配对。\n' +
+      '（传输记录不受影响。）',
+  )
+  if (!confirmed) return
+  try {
+    // peer.id 形如 "<deviceId>@<baseUrl>"；本机设备表以 deviceId 为准。
+    const deviceId = peerId.includes('@') ? peerId.split('@')[0] : peerId
+    const result = await deleteLocalDevice(deviceId)
+    peerPool.removePeer(peerId)
+    incomingOffers.value = incomingOffers.value.filter((o) => o.peerId !== peerId)
+    uploadStatus.value = `已删除 ${name}（吊销 ${result.revokedSessions} 个会话，不再自动重连）`
+  } catch (error) {
+    uploadStatus.value = `${name} 删除失败：${readableError(error)}`
+  }
+}
+
 async function loadHistory() {
   historyLoading.value = true
   try {
@@ -847,7 +881,83 @@ function readableError(error: unknown): string {
   return labels[message] || message || '操作失败，请重试'
 }
 
+// 一次连接 = 双向通道（PC 侧对称实现）。
+//
+// 会话是"每服务器单向"的：手机配对进 PC 只让手机拿到 PC 的会话，PC 仍缺
+// 对方会话、发不了文件。这里轮询本机设备表，对"有地址、未持有有效会话、
+// 且未被用户删除"的设备反向走 pair/discover（对端默认免确认）建立双向
+// 通道。幂等 + 退避：同设备进行中跳过，失败按 30s/60s/120s 退避。
+const pcPairInFlight = new Set<string>()
+const pcPairLastAttempt = new Map<string, number>()
+const pcPairAttempts = new Map<string, number>()
+
+function pcPairBackoffMs(deviceId: string): number {
+  const n = pcPairAttempts.get(deviceId) ?? 0
+  if (n <= 1) return 30_000
+  if (n === 2) return 60_000
+  return 120_000
+}
+
+async function ensureMutualSessionWithDevices() {
+  let devices: LocalDeviceRow[] = []
+  try {
+    devices = await listLocalDevices()
+  } catch {
+    return // 服务未就绪：下次轮询再试
+  }
+  for (const device of devices) {
+    // 已被用户删除（ignored）→ 不自动回连：用户主动执行的结果必须被尊重。
+    if (device.ignored) continue
+    if (!device.lastIp) continue
+    // 环回/本机地址不参与回连（历史测试残留行可能出现 127.0.0.1，
+    // 否则会自己连自己）。
+    if (
+      device.lastIp.startsWith('127.') ||
+      device.lastIp === '::1' ||
+      device.lastIp === 'localhost'
+    ) {
+      continue
+    }
+
+    // 判定"本机能否发送给对方"的正确信号：本机在**对方服务器**上的会话
+    // 是否可用，即 peerPool 中该 peer 的 WS 是否处于已连接状态
+    // （注意 /local/devices 的 hasActiveSession 是反方向——对方在本机的
+    // 会话，那是"对方能否发给本机"）。
+    const livePeer = peerViews.value.find(
+      (p) =>
+        p.name === device.deviceName ||
+        (device.lastIp ? p.baseUrl.includes(device.lastIp) : false),
+    )
+    if (livePeer && livePeer.status === 'connected') continue
+
+    const last = pcPairLastAttempt.get(device.deviceId) ?? 0
+    if (Date.now() - last < pcPairBackoffMs(device.deviceId)) continue
+    if (pcPairInFlight.has(device.deviceId)) continue
+
+    pcPairInFlight.add(device.deviceId)
+    pcPairLastAttempt.set(device.deviceId, Date.now())
+    pcPairAttempts.set(
+      device.deviceId,
+      (pcPairAttempts.get(device.deviceId) ?? 0) + 1,
+    )
+    const baseUrl = `http://${device.lastIp}:9527`
+    try {
+      await autoRepairRemotePair(baseUrl, device.deviceName)
+      if (
+        peerViews.value.some(
+          (p) => p.baseUrl === baseUrl && p.status === 'connected',
+        )
+      ) {
+        pcPairAttempts.delete(device.deviceId) // 成功重置退避
+      }
+    } finally {
+      pcPairInFlight.delete(device.deviceId)
+    }
+  }
+}
+
 let incomingPollTimer: ReturnType<typeof setInterval> | null = null
+let devicePollTimer: ReturnType<typeof setInterval> | null = null
 
 onMounted(async () => {
   peerPool.restore()
@@ -860,6 +970,9 @@ onMounted(async () => {
   // 问题 7 关联：来件（手机→PC）的实时进度不依赖 WS 会话采纳——直接轮询
   // 本机服务的本地传输记录，让"当前传输"区始终能显示接收进度。
   incomingPollTimer = setInterval(() => { void pollIncomingTransfers() }, 1500)
+  // 双向通道：对"连过本机但本机缺其会话"的设备反向回连（幂等 + 退避）。
+  void ensureMutualSessionWithDevices()
+  devicePollTimer = setInterval(() => { void ensureMutualSessionWithDevices() }, 5000)
 })
 
 onUnmounted(() => {
@@ -868,6 +981,7 @@ onUnmounted(() => {
   if (countdownTimer) clearInterval(countdownTimer)
   if (healthTimer) clearInterval(healthTimer)
   if (incomingPollTimer) clearInterval(incomingPollTimer)
+  if (devicePollTimer) clearInterval(devicePollTimer)
   peerPool.close()
 })
 </script>
@@ -954,10 +1068,10 @@ onUnmounted(() => {
               @click="toggleRecipient(peer.id)"
             >
               <span class="device-avatar"><AppIcon :name="peer.platform === 'windows' ? 'computer' : 'phone'" :size="26" /></span>
-              <span class="device-copy"><strong>{{ peer.name }}</strong><small>{{ peer.platform }} · {{ peer.status === 'connected' ? '已连接' : '连接中断' }}</small></span>
+              <span class="device-copy"><strong>{{ peer.name }}</strong><small>{{ peer.platform }} · {{ peerCapabilityLabel(peer) }}</small></span>
               <span class="device-check"><AppIcon v-if="selectedRecipientIds.includes(peer.id)" name="check" :size="15" /></span>
             </button>
-            <button class="icon-button danger device-remove" title="移除设备" @click="peerPool.removePeer(peer.id)"><AppIcon name="x" :size="15" /></button>
+            <button class="icon-button danger device-remove" title="删除设备（断开双向连接且不再自动重连）" @click="onRemoveDevice(peer.id, peer.name)"><AppIcon name="x" :size="15" /></button>
           </div>
         </div>
 

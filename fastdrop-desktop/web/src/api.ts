@@ -165,6 +165,50 @@ export async function listLocalTransferHistory(): Promise<LocalTransferRow[]> {
   return data.transfers || []
 }
 
+/// 本机已知设备（含最后观测 IP / 是否仍持有有效会话 / 是否被用户删除过）。
+///
+/// 用途：会话是"每服务器单向"的——手机配对进 PC 只让手机拿到 PC 的会话，
+/// PC 要能发给该手机必须自己持有对方会话。UI 依据这里的 lastIp 反向回连
+/// （pair/discover）建立双向通道；被用户删除过的设备（ignored）不自动回连。
+export interface LocalDeviceRow {
+  deviceId: string
+  deviceName: string
+  platform: string
+  appVersion?: string
+  lastIp?: string
+  lastSeenAt: number
+  ignored: boolean
+  hasActiveSession: boolean
+}
+
+export async function listLocalDevices(): Promise<LocalDeviceRow[]> {
+  const data = await asJson<{ devices: LocalDeviceRow[] }>(
+    await fetch(localUrl('/api/v1/local/devices')),
+  )
+  return data.devices || []
+}
+
+/// 删除设备（本机专用）：吊销该设备在本机的会话 + 断开其 WS + 打忽略标记。
+/// **不触碰传输记录**。返回被吊销的会话数。
+export async function deleteLocalDevice(
+  deviceId: string,
+): Promise<{ revokedSessions: number }> {
+  const data = await asJson<{ revokedSessions: number }>(
+    await fetch(localUrl(`/api/v1/local/devices/${encodeURIComponent(deviceId)}`), {
+      method: 'DELETE',
+    }),
+  )
+  return { revokedSessions: data.revokedSessions ?? 0 }
+}
+
+/// 清除忽略标记（用户主动重新配对时）。
+export async function restoreLocalDevice(deviceId: string): Promise<void> {
+  await fetch(
+    localUrl(`/api/v1/local/devices/${encodeURIComponent(deviceId)}/restore`),
+    { method: 'POST' },
+  )
+}
+
 /// Revoke the current session (DELETE /api/v1/session). Server then
 /// broadcasts session.revoked, which the Vue side already handles by
 /// clearing state and falling back to the QR pairing page. Used by

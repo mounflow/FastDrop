@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	_ "modernc.org/sqlite"
@@ -125,11 +126,26 @@ func Open(path string) (*DB, error) {
 	return db, nil
 }
 
+/// 0002 迁移：devices 增加 ignored_at（用户明确删除过的设备）。
+///
+/// 语义：删除设备 = 双向断开 + 清除配对记录 + 不自动恢复；被删除的设备
+/// 打上 ignored_at，自动回连跳过它，它再连时需用户显式确认。仅影响配对
+/// 凭证，与传输记录表无关。SQLite 的 ADD COLUMN 对既有库可直接执行；
+/// 列已存在时返回 duplicate column 错误，Migrate 会忽略该错误。
+var SchemaSQL2 = `
+ALTER TABLE devices ADD COLUMN ignored_at INTEGER;
+`
+
 // Migrate applies embedded schema if needed.
 func (d *DB) Migrate() error {
 	_, err := d.Exec(SchemaSQL)
 	if err != nil {
 		return fmt.Errorf("apply schema: %w", err)
+	}
+	// 增量迁移：列已存在（新库已由 0001 建全/或已迁移过）时忽略该错误。
+	if _, err := d.Exec(SchemaSQL2); err != nil &&
+		!strings.Contains(strings.ToLower(err.Error()), "duplicate column") {
+		return fmt.Errorf("apply schema 0002: %w", err)
 	}
 	return nil
 }
@@ -148,6 +164,9 @@ type Device struct {
 	LastIP      string
 	FirstSeenAt int64
 	LastSeenAt  int64
+
+	// IgnoredAt 非零表示用户明确删除过该设备（不自动回连、再连需确认）。
+	IgnoredAt int64
 }
 
 // UpsertDevice inserts or refreshes last-seen metadata.
@@ -168,15 +187,87 @@ ON CONFLICT(id) DO UPDATE SET
 
 // GetDevice fetches a device row by ID.
 func (d *DB) GetDevice(ctx context.Context, id string) (*Device, error) {
-	row := d.QueryRowContext(ctx, `SELECT id, name, platform, app_version, last_ip, first_seen_at, last_seen_at FROM devices WHERE id = ?`, id)
+	row := d.QueryRowContext(ctx, `SELECT id, name, platform, app_version, last_ip, first_seen_at, last_seen_at, COALESCE(ignored_at, 0) FROM devices WHERE id = ?`, id)
 	var dev Device
 	var appVersion, lastIP sql.NullString
-	if err := row.Scan(&dev.ID, &dev.Name, &dev.Platform, &appVersion, &lastIP, &dev.FirstSeenAt, &dev.LastSeenAt); err != nil {
+	if err := row.Scan(&dev.ID, &dev.Name, &dev.Platform, &appVersion, &lastIP, &dev.FirstSeenAt, &dev.LastSeenAt, &dev.IgnoredAt); err != nil {
 		return nil, err
 	}
 	dev.AppVersion = appVersion.String
 	dev.LastIP = lastIP.String
 	return &dev, nil
+}
+
+// ListDevices returns every known device (newest first), for the embedded UI.
+func (d *DB) ListDevices(ctx context.Context) ([]Device, error) {
+	rows, err := d.QueryContext(ctx, `
+SELECT id, name, platform, app_version, last_ip, first_seen_at, last_seen_at, COALESCE(ignored_at, 0)
+FROM devices
+ORDER BY last_seen_at DESC`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var out []Device
+	for rows.Next() {
+		var dev Device
+		var appVersion, lastIP sql.NullString
+		if err := rows.Scan(&dev.ID, &dev.Name, &dev.Platform, &appVersion, &lastIP,
+			&dev.FirstSeenAt, &dev.LastSeenAt, &dev.IgnoredAt); err != nil {
+			return nil, err
+		}
+		dev.AppVersion = appVersion.String
+		dev.LastIP = lastIP.String
+		out = append(out, dev)
+	}
+	return out, rows.Err()
+}
+
+// SetDeviceIgnored marks a device as explicitly removed by the user (or clears
+// the mark when the user actively re-pairs).
+func (d *DB) SetDeviceIgnored(ctx context.Context, id string, ignored bool) error {
+	var value any
+	if ignored {
+		value = Now()
+	}
+	_, err := d.ExecContext(ctx,
+		`UPDATE devices SET ignored_at = ? WHERE id = ?`, value, id)
+	return err
+}
+
+// RevokeSessionsForDevice revokes every active session that device holds on
+// this PC ("删除设备 = 双向真正断开" 的服务端侧动作)。
+func (d *DB) RevokeSessionsForDevice(ctx context.Context, deviceID string) (int64, error) {
+	res, err := d.ExecContext(ctx, `
+UPDATE sessions SET revoked_at = ?
+WHERE device_id = ? AND revoked_at IS NULL`, Now(), deviceID)
+	if err != nil {
+		return 0, err
+	}
+	return res.RowsAffected()
+}
+
+// ListActiveSessionsForDevice returns the ids of non-revoked, unexpired
+// sessions held by a device.
+func (d *DB) ListActiveSessionsForDevice(ctx context.Context, deviceID string) ([]string, error) {
+	rows, err := d.QueryContext(ctx, `
+SELECT id FROM sessions
+WHERE device_id = ? AND revoked_at IS NULL AND expires_at > ?`, deviceID, Now())
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var ids []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		ids = append(ids, id)
+	}
+	return ids, rows.Err()
 }
 
 // --- sessions ---

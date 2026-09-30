@@ -75,7 +75,10 @@ func (s *Server) handlePairDiscover(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "INTERNAL_ERROR", err.Error(), requestID(r))
 		return
 	}
-	if !s.Cfg.Security.RequirePairConfirmation {
+	// 用户明确删除过的设备（devices.ignored_at 非零）不静默接受：删除是
+	// 用户的主动操作，其结果必须符合用户意愿——必须由用户在本机 UI 上
+	// 显式确认（请求会以 waiting_confirmation 出现在配对请求列表里）。
+	if !s.Cfg.Security.RequirePairConfirmation && !s.isDeviceIgnored(r.Context(), body.Device.DeviceID, body.Device.DeviceName) {
 		if _, err := s.acceptPairRequest(r.Context(), req.RequestID, clientIP(r)); err != nil {
 			writeError(w, http.StatusInternalServerError, "INTERNAL_ERROR", err.Error(), requestID(r))
 			return
@@ -130,6 +133,10 @@ func (s *Server) handlePairStatus(w http.ResponseWriter, r *http.Request) {
 // handlePairAccept is invoked by the PC user (via Vue UI) to approve.
 func (s *Server) handlePairAccept(w http.ResponseWriter, r *http.Request) {
 	requestID := r.PathValue("requestId")
+	// 用户显式确认 = 主动重新配对 → 清除"已删除"忽略标记（非永久黑名单）。
+	if req, ok := s.Pairing.GetRequest(requestID); ok {
+		s.clearIgnoreOnManualAccept(r.Context(), req.Device.DeviceID, req.Device.DeviceName)
+	}
 	result, err := s.acceptPairRequest(r.Context(), requestID, clientIP(r))
 	if err != nil {
 		if errors.Is(err, pairing.ErrRequestNotFound) || errors.Is(err, pairing.ErrRequestExpired) {

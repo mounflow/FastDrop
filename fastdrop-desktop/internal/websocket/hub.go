@@ -44,6 +44,39 @@ type MessageHandler func(c *Client, env *Envelope)
 // Multiple WS connections may share the same sessionID (e.g. the PC Vue UI
 // and the phone both connect with the session created during pairing). The
 // Hub delivers messages to ALL connected clients on a session.
+// DisconnectDevice closes every non-local (phone) connection belonging to
+// deviceID and notifies it with `session.revoked`.
+//
+// 用于"删除设备 = 双向真正断开"：PC 端用户删除设备时，除了吊销会话，
+// 还要立刻断开对方仍在连着的 WebSocket（否则对方界面会一直显示已连接）。
+// 本机 Vue UI 的连接（local=true）不受影响。
+func (h *Hub) DisconnectDevice(deviceID, reason string) {
+	h.mu.RLock()
+	targets := make([]*Client, 0, 2)
+	for _, set := range h.clients {
+		for c := range set {
+			if c.deviceID == deviceID && !c.local {
+				targets = append(targets, c)
+			}
+		}
+	}
+	h.mu.RUnlock()
+
+	env, err := NewEnvelope(MessageType("session.revoked"), map[string]any{
+		"reason": reason,
+	})
+	if err != nil {
+		return
+	}
+	for _, c := range targets {
+		// 先入队通知，稍后再关闭连接——立刻 Close 会让对端收不到
+		// session.revoked，界面会一直停留在"已连接"。
+		_ = c.sendEnvelope(env)
+		conn := c.conn
+		time.AfterFunc(200*time.Millisecond, func() { _ = conn.Close() })
+	}
+}
+
 type Hub struct {
 	mu          sync.RWMutex
 	clients     map[string]map[*Client]bool // sessionID -> set of clients

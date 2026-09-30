@@ -86,6 +86,13 @@ func New(s *Server) http.Handler {
 	mux.HandleFunc("PUT /api/v1/settings", withLocalDesktop(s.withSizeLimit(64*1024, s.handleUpdateSettings)))
 	mux.HandleFunc("GET /api/v1/local/transfers", withLocalDesktop(s.handleListLocalTransferHistory))
 
+	// --- devices (local PC only)：供内嵌 UI 建立双向通道与"删除设备=真正断开" ---
+	// 会话是每服务器单向的：手机配对进 PC 后 PC 仍缺对方会话，需要 lastIp 反向
+	// 回连；删除设备则需要吊销会话 + 断开 WS + 打忽略标记。
+	mux.HandleFunc("GET /api/v1/local/devices", withLocalDesktop(s.handleListLocalDevices))
+	mux.HandleFunc("DELETE /api/v1/local/devices/{deviceId}", withLocalDesktop(s.handleDeleteLocalDevice))
+	mux.HandleFunc("POST /api/v1/local/devices/{deviceId}/restore", withLocalDesktop(s.handleRestoreLocalDevice))
+
 	// --- LAN discovery (local PC only, 问题 10) ---
 	mux.HandleFunc("GET /api/v1/discovery/nearby", withLocalDesktop(s.handleDiscoveryNearby))
 
