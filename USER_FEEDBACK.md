@@ -295,6 +295,78 @@ WHERE status IN ('created','waiting_accept','preparing','transferring','paused',
 
 ---
 
+## 问题 12：双向通信不成立 + 删除设备是"假删除"（2026-10-01，用户实测反馈）
+
+### 现象
+
+用户反馈（原话要点）：
+
+1. "电脑主动连接手机，手机上没有显示发送文件"——PC 连上手机后，手机端
+   既没有发送入口，也无法向 PC 发送；
+2. "不管谁连接谁都可以相互通信"——期望一次连接即建立双向通道；
+3. 用户手动删除设备后，屏幕上仍显示"对方已连接到本机"且没有发送按钮；
+4. "用户明确删除，双方就需要断开。原则就是用户故意执行的，结果必须符合
+   用户意愿"；
+5. 明确边界："传输记录我可不要（删）"——删除设备不得影响传输记录。
+
+### 根因（逐条定位，均有日志/数据库证据）
+
+| # | 根因 | 证据 |
+|---|------|------|
+| ① | **会话是"每服务器单向"的**：B 连 A 只让 B 拿到 A 的会话；A 要发给 B 必须另持有 B 的会话。此前没有任何机制让被连方反向取得会话 | 手机 `fastdrop.devices` 为空 → 无发送入口 |
+| ② | **反向配对的请求体格式错误**：发送扁平的 `{deviceId, deviceName, platform}`，而服务端契约要求包一层 `{"device": {...}}` → PC 返回 400 `device.deviceId and device.deviceName required`，异常被静默捕获 | logcat：`pair and save failed: AppError(INVALID_REQUEST) [HTTP 400]` |
+| ③ | **回连地址单点依赖 mDNS**：mDNS 无结果（或缓存过期/IP 刚变）时静默失败 | 修复前无任何回退路径 |
+| ④ | **PC 端完全缺回连**：Go 已把对端 IP 落库 `devices.last_ip`，但 Vue 从不据此回连手机 | PC 发不到"手机主动连进来"的手机 |
+| ⑤ | **"删除设备"是假删除**：手机只做 `disconnectDevice` + 清 `fastdrop.devices`，**未吊销对端在本机的会话**（`SessionManager` 仅有 `invalidateAll`）；PC 只从 `peerPool` 移除，无本地删除/吊销路由 | 删除后对端仍持有会话并可继续发送 |
+| ⑥ | **UI 未表达能力状态**：只有"已连接/离线"，无法区分"双向可发送"与"仅接收" | 用户看到"对方已连接到本机"却无发送按钮 |
+
+### 修复
+
+**一次连接 = 双向通道**
+
+- 入站连接地址捕获：手机 `WsServer` 从 shelf `connection_info` 取对端地址 →
+  `AuthenticatedPeer.remoteBaseUrl`；配对请求创建时即记录 `peerBaseUrl`；
+  PC 端 Go `clientIP` 已有并落库 `devices.last_ip`；
+- `ensureMutualSession`（手机）/ Vue 回连重建器（PC）：地址**四源优先级**
+  （入站观测 → `session.websocketUrl` → 已存记录 → mDNS 兜底），幂等 +
+  进行中去重 + 退避 2s/5s/15s/60s + 遵守 20 次/分钟/IP 限流；
+- PC 端新增本机专用 `GET /api/v1/local/devices`（含 `lastIp`/`hasActiveSession`/
+  `ignored`），Vue 据此反向 `pair/discover` 建立发送方向；
+- 触发点：配对被接受、入站 WS 认证、设备页进入/下拉刷新、前台定时、
+  PC 端 5s 轮询。
+
+**删除设备 = 双向真正断开 + 清配对凭证 + 不自动恢复**
+
+- 手机：`SessionManager.revokeByDeviceId` + `WsServer.disconnectDeviceSessions`
+  （推 `session.revoked` 并关闭对端 WS）；PC：`RevokeSessionsForDevice` +
+  `Hub.DisconnectDevice`；新增本机专用 `DELETE /api/v1/local/devices/{id}`；
+- 忽略名单：手机 `fastdrop.ignored_devices.v1`；PC `devices.ignored_at`
+  （迁移 `0002_device_ignored.sql` + 内嵌 schema 同步，既有库幂等 ALTER）；
+- 被删除的设备：自动回连跳过、再次配对**不静默接受**（转人工确认，
+  按 deviceId **与名称**双重匹配防绕过）、用户显式确认或主动配对后清除标记；
+- **传输记录完全不受影响**（有单测回归守卫）。
+
+**UI 三态**：双向可发送 / 正在建立双向连接… / 仅接收（+「建立双向连接」
+按钮）/ 已断开（已删除）。
+
+### 修复状态
+
+✅ 已修复并真机验证（提交 `26c0477`、`a56c12c`、`b119d28`、`f0d5f94`、
+`17ca2e1`、`833…` 系列）：
+
+- 手机日志实测：`[Server] Peer paired: FastDrop-PC-7EED6F → reverse pair
+  (http://192.168.1.11:9527)`——**入站观测地址直接用于回连，与 mDNS 无关**；
+- PC 重启后自动回连手机 → 双方各自持有对方会话（双向成立）；
+- 删除设备：吊销 1 个会话 + `ignored=True` + **35 秒后仍未自动恢复** +
+  同名换 id 再连仍转人工确认 + 显式确认后恢复正常；
+- 单测：Go 4 条（含"删除不影响传输记录"回归守卫）+ Flutter 9 条；
+  `flutter analyze` 0 error、`flutter test` 70/70、`go test ./...` 全绿。
+
+> **产品约定已写入 spec 附录 A**（双向会话、地址优先级、删除语义与传输
+> 记录的边界）。
+
+---
+
 ## 总结优先级
 
 | 优先级 | 问题 | 工作量 |
@@ -303,6 +375,7 @@ WHERE status IN ('created','waiting_accept','preparing','transferring','paused',
 | 🔴 高 | #3 刷新页面状态丢失 | 中（sessionStorage 持久化） |
 | 🔴 高 | #7 上传失败后 PC 端卡"传输中"无法取消 | 部分修复（断线自动失败+取消已通；③④待办） |
 | 🔴 高 | #11 深度审查清单（46 条：41 已修 / 5 延期，详见问题 11） | 已修 P0+P1，延期项见清单 |
+| 🔴 高 | #12 双向通信不成立 + 删除设备是"假删除" | ✅ 已修复并真机验证（详见问题 12） |
 | 🟡 中 | #8 传输中切后台无保活（接收开关关闭时） | ✅ 已修复（03af9a6） |
 | 🟡 中 | #9 Android 后台可靠性与电池优化引导 | 小 → 大（分档） |
 | 🟡 中 | #10 PC 端扫描发现附近设备 | 中 |
