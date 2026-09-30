@@ -547,8 +547,13 @@ class MultiTransferScreenNotifier extends StateNotifier<TransferScreenState> {
         .map((id) => pool.peer(id)?.device.name)
         .whereType<String>()
         .toList();
+    // 立即创建批次任务卡片（preparing）——用户点完发送马上有反馈。
     state = state.copyWith(
       currentPeerName: names.isEmpty ? '多个设备' : names.join('、'),
+      activeBatch: ActiveUploadBatch(
+        totalFiles: paths.length,
+        status: 'preparing',
+      ),
     );
     _tryStartUpload();
   }
@@ -638,9 +643,22 @@ class MultiTransferScreenNotifier extends StateNotifier<TransferScreenState> {
         speed: progress.speed ?? 0,
         status: progress.status ?? 'transferring',
       );
-    state = state.copyWith(
+    // 批次聚合：字节数/当前文件名实时更新到任务卡片。
+    final batch = state.activeBatch;
+    ActiveUploadBatch? newBatch;
+    if (batch != null) {
+      var transferred = 0;
+      for (final item in updated.values) {
+        transferred += item.bytesTransferred;
+      }
+      newBatch = batch.copyWith(
+        transferredBytes: transferred,
+        currentFileName: progress.fileName ?? batch.currentFileName,
+      );
+    }    state = state.copyWith(
       transfers: updated,
       currentBatchKeys: {...state.currentBatchKeys, key},
+      activeBatch: newBatch ?? state.activeBatch,
     );
   }
 
@@ -698,6 +716,38 @@ class MultiTransferScreenNotifier extends StateNotifier<TransferScreenState> {
       return;
     }
     state = state.copyWith(transfers: updated);
+    _refreshBatchFromItems(updated);
+  }
+
+  /// 从逐文件条目聚合批次任务状态（字节数/完成数/失败数/当前文件）。
+  void _refreshBatchFromItems(Map<String, TransferItemState> transfers,
+      {String? status, String? currentFileName}) {
+    final batch = state.activeBatch;
+    if (batch == null) return;
+    var transferred = 0;
+    var total = 0;
+    var completed = 0;
+    var failed = 0;
+    String? currentFile;
+    for (final key in state.currentBatchKeys) {
+      final item = transfers[key];
+      if (item == null) continue;
+      transferred += item.bytesTransferred;
+      total += item.totalBytes;
+      if (item.status == 'completed') completed++;
+      if (item.status == 'failed') failed++;
+      if (item.status == 'transferring') currentFile ??= item.fileName;
+    }
+    state = state.copyWith(
+      activeBatch: batch.copyWith(
+        transferredBytes: transferred,
+        totalBytes: total,
+        completedFiles: completed,
+        failedFiles: failed,
+        currentFileName: currentFileName ?? currentFile,
+        status: status ?? batch.status,
+      ),
+    );
   }
 
   Future<void> cancelTransfer(String itemKey) async {
