@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:io';
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
@@ -555,7 +556,25 @@ class MultiTransferScreenNotifier extends StateNotifier<TransferScreenState> {
         status: 'preparing',
       ),
     );
+    // 预算批次总大小：卡片从一开始就显示 "已传 / 总量" 而不是 "… / 0"。
+    unawaited(_precomputeBatchTotalBytes(paths));
     _tryStartUpload();
+  }
+
+  /// 统计本批文件总字节（廉价 stat），作为进度分母的初值。
+  Future<void> _precomputeBatchTotalBytes(List<String> paths) async {
+    var total = 0;
+    for (final path in paths) {
+      try {
+        total += await File(path).length();
+      } catch (_) {
+        // 单个文件取不到大小不影响其余文件。
+      }
+    }
+    if (!mounted) return;
+    final batch = state.activeBatch;
+    if (batch == null || total <= batch.totalBytes) return;
+    state = state.copyWith(activeBatch: batch.copyWith(totalBytes: total));
   }
 
   void archiveCurrentToHistory() {
@@ -643,23 +662,13 @@ class MultiTransferScreenNotifier extends StateNotifier<TransferScreenState> {
         speed: progress.speed ?? 0,
         status: progress.status ?? 'transferring',
       );
-    // 批次聚合：字节数/当前文件名实时更新到任务卡片。
-    final batch = state.activeBatch;
-    ActiveUploadBatch? newBatch;
-    if (batch != null) {
-      var transferred = 0;
-      for (final item in updated.values) {
-        transferred += item.bytesTransferred;
-      }
-      newBatch = batch.copyWith(
-        transferredBytes: transferred,
-        currentFileName: progress.fileName ?? batch.currentFileName,
-      );
-    }    state = state.copyWith(
+    state = state.copyWith(
       transfers: updated,
       currentBatchKeys: {...state.currentBatchKeys, key},
-      activeBatch: newBatch ?? state.activeBatch,
     );
+    // 批次聚合走同一处逻辑（字节数/总数/完成数/当前文件/状态），
+    // 避免此处只累加已传字节导致分母恒为 0。
+    _refreshBatchFromItems(updated, currentFileName: progress.fileName);
   }
 
   void _onStateChange(
@@ -716,7 +725,29 @@ class MultiTransferScreenNotifier extends StateNotifier<TransferScreenState> {
       return;
     }
     state = state.copyWith(transfers: updated);
-    _refreshBatchFromItems(updated);
+    _refreshBatchFromItems(updated, status: _batchStatusFor(status));
+  }
+
+  /// 传输状态（§12）→ 批次卡片展示状态。
+  static String _batchStatusFor(String status) {
+    switch (status) {
+      case 'waiting_accept':
+      case 'preparing':
+        return 'preparing';
+      case 'transferring':
+      case 'verifying':
+      case 'retrying':
+        return 'transferring';
+      case 'completed':
+        return 'completed';
+      case 'failed':
+        return 'failed';
+      case 'cancelled':
+      case 'rejected':
+        return 'cancelled';
+      default:
+        return status;
+    }
   }
 
   /// 从逐文件条目聚合批次任务状态（字节数/完成数/失败数/当前文件）。
@@ -724,28 +755,17 @@ class MultiTransferScreenNotifier extends StateNotifier<TransferScreenState> {
       {String? status, String? currentFileName}) {
     final batch = state.activeBatch;
     if (batch == null) return;
-    var transferred = 0;
-    var total = 0;
-    var completed = 0;
-    var failed = 0;
-    String? currentFile;
+    final items = <TransferItemState>[];
     for (final key in state.currentBatchKeys) {
       final item = transfers[key];
-      if (item == null) continue;
-      transferred += item.bytesTransferred;
-      total += item.totalBytes;
-      if (item.status == 'completed') completed++;
-      if (item.status == 'failed') failed++;
-      if (item.status == 'transferring') currentFile ??= item.fileName;
+      if (item != null) items.add(item);
     }
     state = state.copyWith(
-      activeBatch: batch.copyWith(
-        transferredBytes: transferred,
-        totalBytes: total,
-        completedFiles: completed,
-        failedFiles: failed,
-        currentFileName: currentFileName ?? currentFile,
-        status: status ?? batch.status,
+      activeBatch: aggregateBatchFromItems(
+        batch,
+        items,
+        status: status,
+        currentFileName: currentFileName,
       ),
     );
   }
@@ -1012,10 +1032,18 @@ class _TransferScreenState extends ConsumerState<TransferScreen> {
           ),
           const SizedBox(height: 10),
           Text(
-            '${batch.completedFiles}/${batch.totalFiles} 个文件',
+            // 文件数进度：已完成 / 总数（0/69 起步，随完成数增长）。
+            '已完成 ${batch.completedFiles}/${batch.totalFiles} 个文件',
             style: theme.textTheme.titleSmall
                 ?.copyWith(fontWeight: FontWeight.w600),
           ),
+          if (batch.failedFiles > 0) ...[
+            const SizedBox(height: 2),
+            Text(
+              '${batch.failedFiles} 个失败',
+              style: theme.textTheme.bodySmall?.copyWith(color: Colors.red),
+            ),
+          ],
           if (batch.currentFileName != null &&
               batch.status == 'transferring') ...[
             const SizedBox(height: 4),
@@ -1040,7 +1068,10 @@ class _TransferScreenState extends ConsumerState<TransferScreen> {
             mainAxisAlignment: MainAxisAlignment.spaceBetween,
             children: [
               Text(
-                '${_formatBytes(batch.transferredBytes)} / ${_formatBytes(batch.totalBytes)}',
+                // 字节进度：已传 / 总量（总量在选完文件时即已统计）。
+                batch.totalBytes > 0
+                    ? '${_formatBytes(batch.transferredBytes)} / ${_formatBytes(batch.totalBytes)}'
+                    : _formatBytes(batch.transferredBytes),
                 style: theme.textTheme.bodySmall,
               ),
               Text(
@@ -1352,4 +1383,54 @@ class _TransferScreenState extends ConsumerState<TransferScreen> {
     }
     return '${(bytes / (1024 * 1024 * 1024)).toStringAsFixed(1)} GB';
   }
+}
+
+/// 从逐文件条目聚合批次任务卡片状态（纯函数，便于单测）。
+///
+/// 修复过两个真实缺陷，逻辑集中在此处只定义一次：
+///  - **字节分母恒为 0**：此前进度回调只累加已传字节、从不写 totalBytes，
+///    卡片显示 "1.2 GB / 0 B"。这里以「预统计批次总大小」为分母下限，
+///    已开始文件的已知大小更大时以其为准（预统计覆盖未开始的文件）。
+///  - **状态永远停在"准备中"**：此前状态回调未把批次状态透传进来。这里
+///    以传入状态为准，且只要已有文件在传或已有字节，就从 preparing 升级
+///    为 transferring。
+ActiveUploadBatch aggregateBatchFromItems(
+  ActiveUploadBatch batch,
+  Iterable<TransferItemState> items, {
+  String? status,
+  String? currentFileName,
+}) {
+  var transferred = 0;
+  var startedTotal = 0;
+  var completed = 0;
+  var failed = 0;
+  String? currentFile;
+  var anyTransferring = false;
+  for (final item in items) {
+    transferred += item.bytesTransferred;
+    startedTotal += item.totalBytes;
+    if (item.status == 'completed') completed++;
+    if (item.status == 'failed') failed++;
+    if (item.status == 'transferring') {
+      anyTransferring = true;
+      currentFile ??= item.fileName;
+    }
+  }
+
+  var nextStatus = status ?? batch.status;
+  if (nextStatus == 'preparing' && (anyTransferring || transferred > 0)) {
+    nextStatus = 'transferring';
+  }
+
+  final denominator =
+      startedTotal > batch.totalBytes ? startedTotal : batch.totalBytes;
+
+  return batch.copyWith(
+    transferredBytes: transferred,
+    totalBytes: denominator,
+    completedFiles: nextStatus == 'completed' ? batch.totalFiles : completed,
+    failedFiles: failed,
+    currentFileName: currentFileName ?? currentFile,
+    status: nextStatus,
+  );
 }
