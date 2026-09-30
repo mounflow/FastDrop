@@ -22,6 +22,7 @@ class FastDropServer {
     required DeviceInfo localDevice,
     bool requirePairConfirmation = false,
     PairRequestCallback? onPairRequest,
+    PeerAcceptedCallback? onPeerAccepted,
     TransferRequestCallback? onTransferRequest,
     TransferChangedCallback? onTransferChanged,
     PeerConnectedCallback? onPeerConnected,
@@ -34,6 +35,7 @@ class FastDropServer {
       requireConfirmation: requirePairConfirmation,
       onPairRequest: onPairRequest,
     );
+    pairingHandler.onPeerAccepted = onPeerAccepted;
     transferReceiver = TransferReceiver(
       sessionManager: sessionManager,
       onTransferRequest: onTransferRequest,

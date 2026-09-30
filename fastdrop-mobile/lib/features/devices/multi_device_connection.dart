@@ -7,6 +7,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import 'package:fastdrop_mobile/core/errors/app_error.dart';
 import 'package:fastdrop_mobile/core/discovery/device_discovery.dart';
+import 'package:fastdrop_mobile/core/discovery/discovery_providers.dart';
 import 'package:fastdrop_mobile/core/network/http_client.dart';
 import 'package:fastdrop_mobile/core/network/ws_client.dart';
 import 'package:fastdrop_mobile/core/providers.dart';
@@ -332,8 +333,77 @@ class MultiDeviceConnectionNotifier
       String deviceId, DiscoveredDevice discovered) async {
     final peer = state.peer(deviceId);
     if (peer == null) return;
-    final device = peer.device;
+    await _pairAndSave(
+      deviceName: peer.device.name,
+      platform: peer.device.platform,
+      discovered: discovered,
+      select: state.selectedDeviceId == deviceId,
+      removeDeviceId: peer.device.id,
+    );
+  }
 
+  /// 对端主动配对成功后的**反向配对**：会话是"每服务器单向"的——对端
+  /// 连到本机只让对端获得本机会话，本机仍无法向对端发送。这里反向走
+  /// 一次 pair/discover（对端默认免确认）拿到对端会话，并把对端保存为
+  /// 已配对设备——这样无论谁发起连接，双向都能发送文件。
+  Future<void> ensurePairedWithPeer({
+    required String deviceId,
+    required String deviceName,
+    required String platform,
+  }) async {
+    String? staleDeviceId;
+    for (final d in await _ref.read(deviceStoreProvider).loadDevices()) {
+      if (d.id == deviceId || d.name == deviceName) {
+        // 已有记录且会话未临近过期 → 无需反向配对。
+        final expiresAt = d.expiresAt;
+        if (expiresAt == null ||
+            expiresAt.isAfter(
+                DateTime.now().add(const Duration(minutes: 5)))) {
+          return;
+        }
+        staleDeviceId = d.id; // 会话过期 → 重新配对并替换该记录
+        break;
+      }
+    }
+
+    DiscoveredDevice? find() {
+      for (final d in _ref.read(nearbyDevicesProvider)) {
+        if (d.deviceId == deviceId || d.deviceName == deviceName) return d;
+      }
+      return null;
+    }
+
+    var found = find();
+    if (found == null) {
+      // 附近列表由 mDNS 持续更新；触发一次刷新后短暂等待再找。
+      try {
+        await _ref.read(mdnsDiscoveryProvider).refresh();
+      } catch (error) {
+        debugPrint('[MultiDevice] reverse pair refresh failed: $error');
+      }
+      await Future<void>.delayed(const Duration(seconds: 2));
+      found = find();
+    }
+    if (found == null) return;
+
+    await _pairAndSave(
+      deviceName: deviceName,
+      platform: platform,
+      discovered: found,
+      select: false,
+      removeDeviceId: staleDeviceId,
+    );
+  }
+
+  /// pair/discover → 轮询 → 保存设备 → 连接（autoRepairSession 与反向
+  /// 配对共用）。
+  Future<void> _pairAndSave({
+    required String deviceName,
+    required String platform,
+    required DiscoveredDevice discovered,
+    required bool select,
+    required String? removeDeviceId,
+  }) async {
     final myDeviceId = await DeviceIdManager.getDeviceId();
     final myDeviceName = DeviceIdManager.anonymousDeviceName(myDeviceId);
 
@@ -369,20 +439,22 @@ class MultiDeviceConnectionNotifier
       // PC 会话 TTL 为 12 小时（spec §7.1）；对端未回过期时间时按此兜底。
       final updated = Device(
         id: discovered.baseUrl,
-        name: device.name,
+        name: deviceName,
         serverBaseUrl: discovered.baseUrl,
         sessionId: session['sessionId'] as String,
         accessToken: session['accessToken'] as String,
         lastSeen: DateTime.now(),
-        platform: device.platform,
+        platform: platform,
         expiresAt: DateTime.now().add(const Duration(hours: 12)),
       );
       final store = _ref.read(deviceStoreProvider);
-      await store.removeDevice(device.id);
+      if (removeDeviceId != null && removeDeviceId != updated.id) {
+        await store.removeDevice(removeDeviceId);
+      }
       await store.saveDevice(updated);
-      await connectDevice(updated, select: state.selectedDeviceId == deviceId);
+      await connectDevice(updated, select: select);
     } catch (error) {
-      debugPrint('[MultiDevice] auto repair session failed: $error');
+      debugPrint('[MultiDevice] pair and save failed: $error');
     } finally {
       client.dispose();
     }

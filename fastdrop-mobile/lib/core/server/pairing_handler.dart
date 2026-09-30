@@ -54,6 +54,9 @@ class ServerPairRequest {
 /// show a confirmation dialog.
 typedef PairRequestCallback = void Function(ServerPairRequest request);
 
+/// 对端配对被接受时的回调（用于反向配对）。
+typedef PeerAcceptedCallback = void Function(DeviceInfo device);
+
 /// Handles the server side of the pairing handshake.
 ///
 /// Generates QR payloads, validates pair tokens, manages confirm/reject
@@ -107,6 +110,11 @@ class PairingHandler {
 
   /// Callback for when a request is accepted/rejected so WS can notify.
   void Function(String requestId, String status)? onRequestResolved;
+
+  /// 对端配对被接受时回调（带对端设备信息）。用于反向配对：会话是
+  /// "每服务器单向"的，对端连进来只让对端拿到本机会话；本机要能向
+  /// 对端发送，必须另外反向配对一次拿到对端会话。
+  void Function(DeviceInfo device)? onPeerAccepted;
 
   // ---------------------------------------------------------------------------
   // QR payload generation
@@ -246,6 +254,7 @@ class PairingHandler {
     );
 
     onRequestResolved?.call(requestId, 'accepted');
+    onPeerAccepted?.call(request.device);
     _scheduleRequestCleanup(requestId);
   }
 

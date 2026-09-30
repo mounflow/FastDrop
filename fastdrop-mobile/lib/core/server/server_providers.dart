@@ -9,6 +9,7 @@ import 'package:fastdrop_mobile/core/server/fastdrop_server.dart';
 import 'package:fastdrop_mobile/core/server/pairing_providers.dart';
 import 'package:fastdrop_mobile/core/server/transfer_providers.dart';
 import 'package:fastdrop_mobile/core/storage/transfer_history_store.dart';
+import 'package:fastdrop_mobile/features/devices/multi_device_connection.dart';
 import 'package:fastdrop_mobile/shared/models/device_info.dart';
 import 'package:fastdrop_mobile/shared/models/transfer.dart';
 import 'package:flutter/foundation.dart';
@@ -169,6 +170,18 @@ class FastDropServerNotifier extends StateNotifier<ServerState> {
         onPairRequest: (request) {
           debugPrint('[Server] Pair request from ${request.device.deviceName}');
           ref.read(pendingPairRequestsProvider.notifier).addRequest(request);
+        },
+        onPeerAccepted: (device) {
+          // 反向配对：对端连进来只让它拿到本机会话；本机要能向对端发送，
+          // 需另外拿到对端会话并把它保存为已配对设备。
+          debugPrint('[Server] Peer paired: ${device.deviceName} → reverse pair');
+          unawaited(ref
+              .read(multiDeviceConnectionProvider.notifier)
+              .ensurePairedWithPeer(
+                deviceId: device.deviceId,
+                deviceName: device.deviceName,
+                platform: device.platform,
+              ));
         },
         onTransferRequest: (transfer) {
           debugPrint('[Server] Transfer offer: ${transfer.transferId}');
