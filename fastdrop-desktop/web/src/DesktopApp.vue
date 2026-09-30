@@ -150,7 +150,6 @@ const peerPool = usePeerPool({
 const peerViews = peerPool.peers
 const selectedRecipientIds = peerPool.selectedIds
 const connectedPeers = computed(() => peerViews.value.filter((peer) => peer.status === 'connected'))
-const selectedCount = computed(() => selectedRecipientIds.value.length)
 const liveTransfers = computed(() => activeTransfers.value.filter((item) => !isTerminal(item.status)))
 const completedTransfers = computed(() => activeTransfers.value.filter((item) => isTerminal(item.status)))
 const receivedTransfers = computed(() => transfers.value.filter((item) => item.direction === 'client_to_server'))
@@ -291,31 +290,58 @@ function handlePoolProgress(progress: PeerTransferProgress) {
     entry.peerId === progress.peerId
       && entry.transferId === progress.transferId,
   )
+  // 多文件批次：卡片进度必须是**整批**的（逐文件快照求和），否则进度条
+  // 显示的是当前单个文件的进度（用户实测反馈）。
+  const files = progress.files?.map((file) => ({ ...file }))
+  const isBatch = (files?.length ?? 0) > 1
+  const batchTransferred = isBatch
+    ? files!.reduce((sum, file) => sum + (file.transferredBytes || 0), 0)
+    : progress.transferredBytes
+  const batchTotal = isBatch
+    ? files!.reduce((sum, file) => sum + (file.totalBytes || 0), 0)
+    : progress.totalBytes
+  const batchSpeed = sampleOutgoingSpeed(progress.transferId, batchTransferred)
+
   if (!item) {
     item = reactive({
       peerId: progress.peerId,
       peerName: progress.peerName,
       transferId: progress.transferId,
       fileId: progress.fileId,
-      filename: progress.fileName,
-      totalBytes: progress.totalBytes,
-      transferredBytes: progress.transferredBytes,
-      speedBps: 0,
+      filename: isBatch ? `${files!.length} 个文件` : progress.fileName,
+      totalBytes: batchTotal,
+      transferredBytes: batchTransferred,
+      speedBps: batchSpeed,
       status: progress.status,
       error: progress.error,
-      files: progress.files?.map((file) => ({ ...file })),
+      files,
       expanded: false,
     })
     activeTransfers.value.unshift(item)
     return
   }
-  item.transferredBytes = progress.transferredBytes
-  item.totalBytes = progress.totalBytes
+  item.transferredBytes = batchTransferred
+  item.totalBytes = batchTotal
+  item.speedBps = batchSpeed
+  item.filename = isBatch ? `${files!.length} 个文件` : progress.fileName || item.filename
   item.status = progress.status
   item.error = progress.error
-  if (progress.files) {
-    item.files = progress.files.map((file) => ({ ...file }))
+  if (files) {
+    item.files = files
   }
+}
+
+/// 出向批次速率：按整批字节差采样（与手机端一致），比逐文件瞬时速率稳定。
+const outgoingSamples = new Map<string, { bytes: number; at: number }>()
+function sampleOutgoingSpeed(transferId: string, bytes: number): number {
+  const now = Date.now()
+  const previous = outgoingSamples.get(transferId)
+  outgoingSamples.set(transferId, { bytes, at: now })
+  if (!previous) return 0
+  const elapsed = now - previous.at
+  const delta = bytes - previous.bytes
+  if (elapsed < 400 || delta <= 0) return 0
+  return Math.round((delta * 1000) / elapsed)
 }
 
 function handleWSMessage(peerId: string, raw: unknown) {
@@ -706,6 +732,24 @@ const deviceRows = computed<DeviceRow[]>(() => {
   }
   return [...rows.values()]
 })
+
+/// 已选择设备数 = 被选中的**可发送设备行**数量（不是原始 peer id 数量：
+/// 同一台设备可能有两条连接，此前会显示成"2 台设备已选择"）。
+/// 同时过滤掉历史遗留的不可发送 id（local-session）。
+const selectedCount = computed(
+  () =>
+    deviceRows.value.filter(
+      (row) => row.sendPeerId && selectedRecipientIds.value.includes(row.sendPeerId),
+    ).length,
+)
+
+/// 实际会收到文件的 peer id（用于发送前校验/展示），与 sendFiles 的
+/// 目标筛选保持一致：只取 remote-server 且每台设备一条。
+const effectiveRecipientIds = computed(() =>
+  deviceRows.value
+    .map((row) => row.sendPeerId)
+    .filter((id): id is string => Boolean(id) && selectedRecipientIds.value.includes(id!)),
+)
 
 /// 删除一行设备 = 删除该设备的**全部连接**（remote-server 发送通道 +
 /// local-session 接收通道），并调用本机路由真正断开（吊销会话 + 忽略标记）。

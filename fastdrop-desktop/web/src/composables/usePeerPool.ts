@@ -206,7 +206,13 @@ export function usePeerPool(handlers: PeerPoolHandlers = {}): PeerPool {
     removePeer(session.id, false)
     const view = reactive<PeerView>({ ...session, status: 'connecting' })
     peers.value.push(view)
-    if (!selectedIds.value.includes(session.id)) {
+    // 只自动选中能发送的通道（remote-server = 本机作客户端连对方 server）。
+    // local-session 是对方连进本机的通道，只能接收、不能作为发送目标；
+    // 若把它也选中，同一台设备会被算成 2 台（用户实测："2 台设备已选择"）。
+    if (
+      session.role === 'remote-server' &&
+      !selectedIds.value.includes(session.id)
+    ) {
       selectedIds.value.push(session.id)
     }
 
@@ -371,10 +377,21 @@ export function usePeerPool(handlers: PeerPoolHandlers = {}): PeerPool {
       .filter((id) => !onlineIds.has(id))
       .map((id) => peers.value.find((peer) => peer.id === id))
       .filter((peer): peer is PeerView => peer !== undefined)
+    // 发送目标是本机发起的通道（remote-server）——local-session 是对方
+    // 连进来的通道，不能用于本机上传；同时按设备去重，避免同一台设备
+    // 被重复发送（同一设备只会有一条 remote-server 通道，这里再兜一层）。
+    const seenDevices = new Set<string>()
     const targets = peerIds
       .filter((id) => onlineIds.has(id))
       .map((id) => runtimes.get(id))
       .filter((runtime): runtime is Runtime => runtime !== undefined)
+      .filter((runtime) => {
+        if (runtime.session.role !== 'remote-server') return false
+        const key = runtime.session.deviceId || runtime.session.baseUrl
+        if (seenDevices.has(key)) return false
+        seenDevices.add(key)
+        return true
+      })
     if (targets.length === 0) throw new Error('Select at least one connected device')
 
     // 审计高#3：一次选择聚合为**一个批次**（一个 transferId），手机端
