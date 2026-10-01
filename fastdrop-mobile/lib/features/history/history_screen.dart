@@ -8,6 +8,7 @@ import 'package:fastdrop_mobile/core/platform/background_receive_service.dart';
 import 'package:fastdrop_mobile/core/storage/session_store.dart';
 import 'package:fastdrop_mobile/core/storage/transfer_history_store.dart';
 import 'package:fastdrop_mobile/shared/models/transfer.dart';
+import 'package:fastdrop_mobile/shared/widgets/swipe_reveal_row.dart';
 
 /// Displays historical transfers fetched from the backend via
 /// `GET /api/v1/transfers`.
@@ -244,34 +245,10 @@ class _HistoryScreenState extends State<HistoryScreen> {
     final directionLabel = sent ? '发送' : '接收';
     final directionColor = sent ? const Color(0xFF2F6BFF) : const Color(0xFF17864B);
 
-    // 左滑删除单条记录（Dismissible 为 Flutter 内置，无需额外依赖）。
-    return Dismissible(
+    // 左滑露出「删除」按钮，**点按钮才删除**（滑到底直接删容易误删）。
+    return SwipeRevealRow(
       key: ValueKey('history-${transfer.id}'),
-      direction: DismissDirection.endToStart,
-      background: Container(
-        margin: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
-        padding: const EdgeInsets.only(right: 20),
-        alignment: Alignment.centerRight,
-        decoration: BoxDecoration(
-          color: Colors.red.withOpacity(0.9),
-          borderRadius: BorderRadius.circular(12),
-        ),
-        child: const Row(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Icon(Icons.delete_outline, color: Colors.white, size: 20),
-            SizedBox(width: 6),
-            Text(
-              '删除',
-              style: TextStyle(
-                color: Colors.white,
-                fontWeight: FontWeight.w600,
-              ),
-            ),
-          ],
-        ),
-      ),
-      onDismissed: (_) => unawaited(_deleteTransfer(transfer)),
+      onAction: () => unawaited(_deleteTransfer(transfer)),
       child: Card(
         margin: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
         child: ExpansionTile(
