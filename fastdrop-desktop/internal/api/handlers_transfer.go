@@ -262,6 +262,29 @@ func (s *Server) handleClearLocalTransferHistory(w http.ResponseWriter, r *http.
 	})
 }
 
+// handleDeleteLocalTransfer 删除单条传输记录（历史页逐条删除）。
+//
+// 进行中的传输拒绝（409）：其后续状态更新会写到已删除的行上。仅删本机
+// 记录；已接收的文件本身不删除。
+func (s *Server) handleDeleteLocalTransfer(w http.ResponseWriter, r *http.Request) {
+	transferID := r.PathValue("transferId")
+	if transferID == "" {
+		writeError(w, http.StatusBadRequest, "INVALID_REQUEST", "transferId is required", requestID(r))
+		return
+	}
+	deleted, err := s.DB.DeleteTransfer(r.Context(), transferID)
+	if err != nil {
+		writeError(w, http.StatusNotFound, "TRANSFER_NOT_FOUND", err.Error(), requestID(r))
+		return
+	}
+	if !deleted {
+		writeError(w, http.StatusConflict, "INVALID_REQUEST",
+			"transfer is still active and cannot be deleted", requestID(r))
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"transferId": transferID, "deleted": true})
+}
+
 func (s *Server) handleListActiveTransfers(w http.ResponseWriter, r *http.Request) {
 	sessID, _ := r.Context().Value(ctxSessionID).(string)
 	transfers, err := s.DB.ListTransfersForSession(r.Context(), sessID)

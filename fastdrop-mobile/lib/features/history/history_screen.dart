@@ -244,9 +244,37 @@ class _HistoryScreenState extends State<HistoryScreen> {
     final directionLabel = sent ? '发送' : '接收';
     final directionColor = sent ? const Color(0xFF2F6BFF) : const Color(0xFF17864B);
 
-    return Card(
-      margin: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
-      child: ExpansionTile(
+    // 左滑删除单条记录（Dismissible 为 Flutter 内置，无需额外依赖）。
+    return Dismissible(
+      key: ValueKey('history-${transfer.id}'),
+      direction: DismissDirection.endToStart,
+      background: Container(
+        margin: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
+        padding: const EdgeInsets.only(right: 20),
+        alignment: Alignment.centerRight,
+        decoration: BoxDecoration(
+          color: Colors.red.withOpacity(0.9),
+          borderRadius: BorderRadius.circular(12),
+        ),
+        child: const Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(Icons.delete_outline, color: Colors.white, size: 20),
+            SizedBox(width: 6),
+            Text(
+              '删除',
+              style: TextStyle(
+                color: Colors.white,
+                fontWeight: FontWeight.w600,
+              ),
+            ),
+          ],
+        ),
+      ),
+      onDismissed: (_) => unawaited(_deleteTransfer(transfer)),
+      child: Card(
+        margin: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
+        child: ExpansionTile(
         leading: Icon(directionIcon, color: directionColor),
         title: Row(
           children: [
@@ -366,12 +394,33 @@ class _HistoryScreenState extends State<HistoryScreen> {
           ),
         ],
       ),
+      ),
     );
   }
 
   // ---------------------------------------------------------------------------
   // Data loading
   // ---------------------------------------------------------------------------
+
+  /// 左滑删除单条记录。
+  ///
+  /// 写入墓碑（deletedIds）后从本地移除——否则历史页下次合并服务端记录时
+  /// 这条记录会被"复活"。仅影响本机历史；文件本身不删除。
+  Future<void> _deleteTransfer(TransferRow transfer) async {
+    await _historyStore.remove(transfer.id);
+    if (!mounted) return;
+    setState(() {
+      _transfers = _transfers
+          .where((item) => item.id != transfer.id)
+          .toList();
+    });
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text('已删除 1 条记录（文件未删除）'),
+        duration: const Duration(seconds: 2),
+      ),
+    );
+  }
 
   /// 方向说明文案（副标题用；对端名称不在本机记录里，按方向描述即可）。
   static String _formatDirectionPeer(bool sent) =>
@@ -458,6 +507,8 @@ class _HistoryScreenState extends State<HistoryScreen> {
 
       // 用户清空过记录：清空时刻之前的服务端记录不再合并回来。
       final clearedAt = await _historyStore.clearedAt();
+      // 用户逐条删除过的记录：同样不允许被合并回来（墓碑）。
+      final deletedIds = await _historyStore.deletedIds();
       final remoteTransfers = <TransferRow>[];
       for (final response in responses) {
         if (response == null) continue;
@@ -474,16 +525,17 @@ class _HistoryScreenState extends State<HistoryScreen> {
           (item) => TransferRow.fromJson(item as Map<String, dynamic>),
         ));
       }
-      final freshRemote = clearedAt == null
-          ? remoteTransfers
-          : remoteTransfers
-              .where((transfer) => transfer.createdAt > clearedAt)
-              .toList();
+      final freshRemote = remoteTransfers
+          .where((transfer) =>
+              !deletedIds.contains(transfer.id) &&
+              (clearedAt == null || transfer.createdAt > clearedAt))
+          .toList();
       await _historyStore.upsertAll(freshRemote);
 
       final merged = <String, TransferRow>{
         for (final transfer in await _historyStore.load())
-          if (clearedAt == null || transfer.createdAt > clearedAt)
+          if (!deletedIds.contains(transfer.id) &&
+              (clearedAt == null || transfer.createdAt > clearedAt))
             transfer.id: transfer,
         for (final transfer in freshRemote) transfer.id: transfer,
       };

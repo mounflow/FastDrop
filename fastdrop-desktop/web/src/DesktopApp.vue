@@ -13,6 +13,7 @@ import {
   listLocalDevices,
   listLocalTransferHistory,
   clearLocalTransferHistory,
+  deleteLocalTransfer,
   listPairRequests,
   deleteLocalDevice,
   pollPairStatus,
@@ -824,6 +825,17 @@ async function onClearHistory() {
   }
 }
 
+/// 删除单条记录（历史页逐条删除）。进行中的传输会被服务端拒绝并给出提示。
+async function onDeleteHistoryRow(item: { id: string }) {
+  historyActionError.value = ''
+  try {
+    await deleteLocalTransfer(item.id)
+    await loadHistory()
+  } catch (error) {
+    historyActionError.value = `删除失败：${readableError(error)}`
+  }
+}
+
 async function loadHistory() {
   historyLoading.value = true
   try {
@@ -1306,6 +1318,7 @@ onUnmounted(() => {
             <div class="history-size"><strong>{{ formatSize(item.totalBytes) }}</strong><span>{{ formatDate(item.createdAt) }}</span></div>
             <span :class="['status-badge', item.status]">{{ statusLabel(item.status) }}</span>
             <button v-if="canRevealTransfer(item)" class="history-action-button" title="在资源管理器中显示" @click="revealTransfer(item)"><AppIcon name="folder" :size="15" />打开位置</button>
+            <button class="icon-button danger" title="删除这条记录（进行中的传输不可删除）" @click="onDeleteHistoryRow(item)"><AppIcon name="trash" :size="15" /></button>
           </article>
         </div>
         <div v-else class="empty-state page-empty">

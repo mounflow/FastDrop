@@ -93,4 +93,48 @@ void main() {
     expect(rows.where((r) => r.direction == 'client_to_server'), isEmpty);
     expect(rows.where((r) => r.direction == 'server_to_client'), isEmpty);
   });
+
+  group('逐条删除（左滑）', () {
+    test('remove 删除单条并写入墓碑', () async {
+      final store = TransferHistoryStore();
+      await store.upsertAll([row(id: 'a'), row(id: 'b')]);
+
+      await store.remove('a');
+
+      final rows = await store.load();
+      expect(rows.map((r) => r.id), ['b']);
+      expect(await store.deletedIds(), contains('a'));
+    });
+
+    test('被删记录不会被服务端合并"复活"', () async {
+      final store = TransferHistoryStore();
+      await store.upsertAll([row(id: 'a'), row(id: 'b')]);
+      await store.remove('a');
+
+      // 模拟历史页把服务端记录合并回来（含已删的那条）。
+      await store.upsertAll([row(id: 'a'), row(id: 'b'), row(id: 'c')]);
+
+      final ids = (await store.load()).map((r) => r.id).toList();
+      expect(ids, isNot(contains('a')));
+      expect(ids, containsAll(['b', 'c']));
+    });
+
+    test('删除不存在的 id 不报错', () async {
+      final store = TransferHistoryStore();
+      await store.upsertAll([row(id: 'a')]);
+      await store.remove('not-exist');
+      expect((await store.load()).map((r) => r.id), ['a']);
+    });
+
+    test('清空后再删除仍正常（墓碑与清空时间点互不影响）', () async {
+      final store = TransferHistoryStore();
+      await store.clearAll();
+      final clearedAt = (await store.clearedAt())!;
+      await store.upsert(row(id: 'fresh', createdAt: clearedAt + 5));
+      await store.remove('fresh');
+
+      expect(await store.load(), isEmpty);
+      expect(await store.clearedAt(), isNotNull);
+    });
+  });
 }

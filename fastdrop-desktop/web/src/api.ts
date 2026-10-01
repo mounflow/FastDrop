@@ -183,6 +183,15 @@ export async function clearLocalTransferHistory(): Promise<{
   }
 }
 
+/// 删除单条传输记录（历史页逐条删除）。进行中的传输会被服务端拒绝（409）。
+/// 仅删本机记录；已接收的文件本身不删除。
+export async function deleteLocalTransfer(transferId: string): Promise<void> {
+  await fetch(
+    localUrl(`/api/v1/local/transfers/${encodeURIComponent(transferId)}`),
+    { method: 'DELETE' },
+  )
+}
+
 /// 本机已知设备（含最后观测 IP / 是否仍持有有效会话 / 是否被用户删除过）。
 ///
 /// 用途：会话是"每服务器单向"的——手机配对进 PC 只让手机拿到 PC 的会话，

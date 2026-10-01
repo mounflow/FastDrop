@@ -5,6 +5,40 @@ import (
 	"fmt"
 )
 
+// DeleteTransfer 删除**单条已结束**的传输记录（历史页逐条删除）。
+//
+// 进行中的传输拒绝删除（返回 false）：其后续状态更新会写到已删除的行上。
+// 仅删本机记录；已接收的文件本身不删除。
+func (d *DB) DeleteTransfer(ctx context.Context, id string) (bool, error) {
+	const terminal = `('completed','failed','cancelled','rejected')`
+
+	var status string
+	if err := d.QueryRowContext(ctx,
+		`SELECT status FROM transfers WHERE id = ?`, id).Scan(&status); err != nil {
+		return false, err
+	}
+	switch status {
+	case "completed", "failed", "cancelled", "rejected":
+	default:
+		return false, nil // 进行中的传输不允许删除
+	}
+
+	if _, err := d.ExecContext(ctx, `
+DELETE FROM file_chunk_states WHERE file_id IN (
+    SELECT id FROM transfer_files WHERE transfer_id = ?)`, id); err != nil {
+		return false, fmt.Errorf("delete chunk states: %w", err)
+	}
+	if _, err := d.ExecContext(ctx,
+		`DELETE FROM transfer_files WHERE transfer_id = ?`, id); err != nil {
+		return false, fmt.Errorf("delete transfer files: %w", err)
+	}
+	if _, err := d.ExecContext(ctx,
+		`DELETE FROM transfers WHERE id = ?`, id); err != nil {
+		return false, fmt.Errorf("delete transfer: %w", err)
+	}
+	return true, nil
+}
+
 // DeleteTerminalTransfers 清空"已结束"的传输记录（本机历史页的「清空记录」）。
 //
 // 只删终态（completed / failed / cancelled / rejected）——进行中的传输必须

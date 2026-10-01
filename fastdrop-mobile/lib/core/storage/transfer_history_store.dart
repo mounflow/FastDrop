@@ -9,7 +9,9 @@ import 'package:shared_preferences/shared_preferences.dart';
 class TransferHistoryStore {
   static const _key = 'fastdrop.transfer_history.v1';
   static const _clearedAtKey = 'fastdrop.transfer_history.cleared_at.v1';
+  static const _deletedIdsKey = 'fastdrop.transfer_history.deleted_ids.v1';
   static const _maxRows = 500;
+  static const _maxDeletedIds = 500;
   static Future<void> _writeTail = Future<void>.value();
 
   /// 用户上次「清空记录」的时间（秒）。历史页合并服务端记录时会跳过此时刻
@@ -41,16 +43,53 @@ class TransferHistoryStore {
     final raw = prefs.getString(_key);
     if (raw == null || raw.isEmpty) return [];
     try {
+      final deleted = await deletedIds();
       final decoded = jsonDecode(raw);
       if (decoded is! List<dynamic>) return [];
       return decoded
           .whereType<Map<String, dynamic>>()
           .map(TransferRow.fromJson)
+          .where((row) => !deleted.contains(row.id))
           .toList()
         ..sort((a, b) => b.createdAt.compareTo(a.createdAt));
     } catch (_) {
       return [];
     }
+  }
+
+  /// 被用户逐条删除的记录 id（墓碑）。
+  ///
+  /// 历史页会定期把**服务端**的传输记录合并回本地；若不记住"用户删过这条"，
+  /// 删掉的记录下一次刷新就被合并回来了。合并与读取都会跳过这些 id。
+  Future<Set<String>> deletedIds() async {
+    final prefs = await SharedPreferences.getInstance();
+    return (prefs.getStringList(_deletedIdsKey) ?? const <String>[]).toSet();
+  }
+
+  /// 逐条删除（左滑删除单条记录）。仅影响本机历史；文件本身不删除。
+  Future<void> remove(String id) async {
+    if (id.isEmpty) return;
+    _writeTail = _writeTail.then((_) async {
+      final prefs = await SharedPreferences.getInstance();
+      final tombstones = prefs.getStringList(_deletedIdsKey) ?? <String>[];
+      if (!tombstones.contains(id)) {
+        tombstones.add(id);
+        // 上限防止无界增长（按删除顺序保留最近的 N 条）。
+        final trimmed = tombstones.length > _maxDeletedIds
+            ? tombstones.sublist(tombstones.length - _maxDeletedIds)
+            : tombstones;
+        await prefs.setStringList(_deletedIdsKey, trimmed);
+      }
+      final current = await load();
+      final remaining = current.where((row) => row.id != id).toList();
+      await prefs.setString(
+        _key,
+        jsonEncode(remaining.take(_maxRows).map((row) => row.toJson()).toList()),
+      );
+    }).catchError((Object e) {
+      debugPrint('[TransferHistory] remove failed: $e');
+    });
+    return _writeTail;
   }
 
   Future<void> upsert(TransferRow row) => upsertAll([row]);
@@ -61,10 +100,14 @@ class TransferHistoryStore {
     // 写链每步都要继续（M16）：单次写失败只记录日志，不中断后续写入，
     // 否则一次失败会让 _writeTail 永久带着错误、拖垮之后所有落盘。
     _writeTail = _writeTail.then((_) async {
+      // 用户删过的记录不允许被服务端合并"复活"。
+      final deleted = await deletedIds();
       final current = await load();
       final merged = <String, TransferRow>{
-        for (final row in current) row.id: row,
-        for (final row in incoming) row.id: row,
+        for (final row in current)
+          if (!deleted.contains(row.id)) row.id: row,
+        for (final row in incoming)
+          if (!deleted.contains(row.id)) row.id: row,
       };
       final ordered = merged.values.toList()
         ..sort((a, b) => b.createdAt.compareTo(a.createdAt));
