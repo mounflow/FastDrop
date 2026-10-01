@@ -85,6 +85,8 @@ func New(s *Server) http.Handler {
 	mux.HandleFunc("GET /api/v1/settings", withLocalDesktop(s.handleGetSettings))
 	mux.HandleFunc("PUT /api/v1/settings", withLocalDesktop(s.withSizeLimit(64*1024, s.handleUpdateSettings)))
 	mux.HandleFunc("GET /api/v1/local/transfers", withLocalDesktop(s.handleListLocalTransferHistory))
+	// 清空本机传输记录（仅已结束的：进行中的必须保留）。
+	mux.HandleFunc("DELETE /api/v1/local/transfers", withLocalDesktop(s.handleClearLocalTransferHistory))
 
 	// --- devices (local PC only)：供内嵌 UI 建立双向通道与"删除设备=真正断开" ---
 	// 会话是每服务器单向的：手机配对进 PC 后 PC 仍缺对方会话，需要 lastIp 反向

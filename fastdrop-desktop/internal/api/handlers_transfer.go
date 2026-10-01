@@ -244,6 +244,24 @@ func (s *Server) handleListLocalTransferHistory(w http.ResponseWriter, r *http.R
 	writeJSON(w, http.StatusOK, map[string]any{"transfers": transfers})
 }
 
+// handleClearLocalTransferHistory 清空本机传输记录（本机 UI 的「清空记录」）。
+//
+// 只删**已结束**的传输（completed/failed/cancelled/rejected）：进行中的传输
+// 必须保留，否则其后续状态更新会写到已删除的行上。对端设备的记录不受影响
+// （每台设备各自管理自己的历史）。
+func (s *Server) handleClearLocalTransferHistory(w http.ResponseWriter, r *http.Request) {
+	transfers, files, err := s.DB.DeleteTerminalTransfers(r.Context())
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL_ERROR", err.Error(), requestID(r))
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"deletedTransfers": transfers,
+		"deletedFiles":     files,
+		"note":             "only finished transfers were removed; active ones are kept",
+	})
+}
+
 func (s *Server) handleListActiveTransfers(w http.ResponseWriter, r *http.Request) {
 	sessID, _ := r.Context().Value(ctxSessionID).(string)
 	transfers, err := s.DB.ListTransfersForSession(r.Context(), sessID)

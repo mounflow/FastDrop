@@ -75,6 +75,13 @@ class _HistoryScreenState extends State<HistoryScreen> {
     return Scaffold(
       appBar: AppBar(
         title: const Text('传输记录'),
+        actions: [
+          IconButton(
+            tooltip: '清空记录',
+            icon: const Icon(Icons.delete_sweep_outlined),
+            onPressed: _transfers.isEmpty ? null : _onClearHistory,
+          ),
+        ],
         bottom: PreferredSize(
           preferredSize: const Size.fromHeight(96),
           child: Column(
@@ -394,6 +401,46 @@ class _HistoryScreenState extends State<HistoryScreen> {
     }
   }
 
+  /// 清空本机传输记录（用户主动操作）。
+  ///
+  /// 只清本机历史：记录清空时间点，之后合并服务端记录时跳过该时刻之前的
+  /// 数据（否则刷新一次旧记录又被合并回来）。对端设备上的记录不受影响，
+  /// 已接收/已发送的文件本身也不会被删除。
+  Future<void> _onClearHistory() async {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('清空传输记录？'),
+        content: Text(
+          '将删除本机 ${_transfers.length} 条传输记录。\n\n'
+          '· 只清本机显示的历史，不影响电脑端的记录\n'
+          '· 已接收/已发送的文件本身不会被删除',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(false),
+            child: const Text('取消'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(true),
+            style: TextButton.styleFrom(foregroundColor: Colors.red),
+            child: const Text('清空'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true) return;
+
+    await _historyStore.clearAll();
+    if (!mounted) return;
+    setState(() {
+      _transfers = [];
+    });
+    ScaffoldMessenger.of(context).showSnackBar(
+      const SnackBar(content: Text('传输记录已清空')),
+    );
+  }
+
   Future<void> _loadTransfers() async {
     setState(() {
       _loading = true;
@@ -409,6 +456,8 @@ class _HistoryScreenState extends State<HistoryScreen> {
         }
       }));
 
+      // 用户清空过记录：清空时刻之前的服务端记录不再合并回来。
+      final clearedAt = await _historyStore.clearedAt();
       final remoteTransfers = <TransferRow>[];
       for (final response in responses) {
         if (response == null) continue;
@@ -425,12 +474,18 @@ class _HistoryScreenState extends State<HistoryScreen> {
           (item) => TransferRow.fromJson(item as Map<String, dynamic>),
         ));
       }
-      await _historyStore.upsertAll(remoteTransfers);
+      final freshRemote = clearedAt == null
+          ? remoteTransfers
+          : remoteTransfers
+              .where((transfer) => transfer.createdAt > clearedAt)
+              .toList();
+      await _historyStore.upsertAll(freshRemote);
 
       final merged = <String, TransferRow>{
         for (final transfer in await _historyStore.load())
-          transfer.id: transfer,
-        for (final transfer in remoteTransfers) transfer.id: transfer,
+          if (clearedAt == null || transfer.createdAt > clearedAt)
+            transfer.id: transfer,
+        for (final transfer in freshRemote) transfer.id: transfer,
       };
       final transfers = merged.values
           .where((transfer) =>

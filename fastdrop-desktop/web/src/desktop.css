@@ -269,8 +269,12 @@ button:focus-visible, input:focus-visible, select:focus-visible { outline: 3px s
 .history-direction { display: grid; place-items: center; width: 42px; height: 42px; border-radius: 12px; }
 .history-direction.received { background: #edf9f3; color: #176f4a; }
 .history-direction.sent { background: #eef1ff; color: #334bc8; }
-/* 方向徽标：与手机端一致，列表里一眼看出是发送还是接收 */
-.direction-badge { display: inline-block; margin-right: 6px; padding: 1px 6px; border-radius: 5px; font-size: 10px; font-weight: 700; vertical-align: middle; }
+/* 方向徽标：与手机端一致，列表里一眼看出是发送还是接收。
+   注意必须用 `.history-main .direction-badge`（两级类）——下面那条
+   `.history-main strong, .history-main span { display: block }` 的元素选择器
+   优先级更高，否则徽标会被拉成整行宽的长色块。 */
+.direction-badge { display: inline-block; margin-right: 6px; padding: 1px 7px; border-radius: 5px; font-size: 10px; font-weight: 700; line-height: 1.6; vertical-align: middle; }
+.history-main .direction-badge { display: inline-block; width: auto; margin: 0 6px 0 0; font-size: 10px; }
 .direction-badge.received { background: #edf9f3; color: #176f4a; }
 .direction-badge.sent { background: #eef1ff; color: #334bc8; }
 .history-main strong, .history-main span, .history-size strong, .history-size span { display: block; }

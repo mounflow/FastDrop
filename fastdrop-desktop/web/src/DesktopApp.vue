@@ -12,6 +12,7 @@ import {
   getSettings,
   listLocalDevices,
   listLocalTransferHistory,
+  clearLocalTransferHistory,
   listPairRequests,
   deleteLocalDevice,
   pollPairStatus,
@@ -90,6 +91,7 @@ const transfers = ref<PeerHistoryRow[]>([])
 const historyLoading = ref(false)
 const historyFilter = ref('all')
 const historySearch = ref('')
+const historyClearing = ref(false)
 const historyActionError = ref('')
 
 const pendingRequests = ref<PendingPairRequest[]>([])
@@ -796,6 +798,32 @@ async function onRemoveRow(row: DeviceRow) {
   }
 }
 
+/// 清空传输记录（用户主动操作）：只清**已结束**的传输，进行中的保留。
+async function onClearHistory() {
+  const finished = transfers.value.filter((item) => isTerminal(item.status)).length
+  if (finished === 0) {
+    historyActionError.value = '没有可清空的记录（进行中的传输不会被清除）'
+    return
+  }
+  const confirmed = window.confirm(
+    `清空传输记录？\n\n将删除本机 ${finished} 条已结束的记录。\n` +
+      '进行中的传输不会被清除；对端设备上的记录不受影响。\n' +
+      '（已接收的文件本身不会被删除。）',
+  )
+  if (!confirmed) return
+  historyClearing.value = true
+  historyActionError.value = ''
+  try {
+    const result = await clearLocalTransferHistory()
+    await loadHistory()
+    uploadStatus.value = `已清空 ${result.deletedTransfers} 条传输记录`
+  } catch (error) {
+    historyActionError.value = `清空失败：${readableError(error)}`
+  } finally {
+    historyClearing.value = false
+  }
+}
+
 async function loadHistory() {
   historyLoading.value = true
   try {
@@ -1261,6 +1289,7 @@ onUnmounted(() => {
             <button v-for="filter in [['all','全部状态'],['completed','已完成'],['failed','失败'],['cancelled','已取消']]" :key="filter[0]" :class="{ active: historyFilter === filter[0] }" @click="historyFilter = filter[0]">{{ filter[1] }}</button>
           </div>
           <input v-model="historySearch" class="search-input" placeholder="搜索设备或任务编号" />
+          <button class="secondary-button" :disabled="historyClearing || !displayedHistory.length" @click="onClearHistory"><AppIcon name="trash" :size="16" />清空记录</button>
         </div>
         <p v-if="historyActionError" class="history-action-error">{{ historyActionError }}</p>
         <div v-if="historyLoading" class="loading-state">正在加载传输记录…</div>

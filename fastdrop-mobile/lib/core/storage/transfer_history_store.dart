@@ -8,8 +8,33 @@ import 'package:shared_preferences/shared_preferences.dart';
 /// their in-memory embedded server has restarted.
 class TransferHistoryStore {
   static const _key = 'fastdrop.transfer_history.v1';
+  static const _clearedAtKey = 'fastdrop.transfer_history.cleared_at.v1';
   static const _maxRows = 500;
   static Future<void> _writeTail = Future<void>.value();
+
+  /// 用户上次「清空记录」的时间（秒）。历史页合并服务端记录时会跳过此时刻
+  /// 之前的数据——否则清空后一刷新，服务端旧记录又被合并回来。
+  Future<int?> clearedAt() async {
+    final prefs = await SharedPreferences.getInstance();
+    return prefs.getInt(_clearedAtKey);
+  }
+
+  /// 清空本机历史：删除全部本地行并记录清空时间点。
+  ///
+  /// 只影响**本机**历史；对端设备上的记录不受影响（各自管理）。
+  Future<void> clearAll() async {
+    _writeTail = _writeTail.then((_) async {
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.remove(_key);
+      await prefs.setInt(
+        _clearedAtKey,
+        DateTime.now().millisecondsSinceEpoch ~/ 1000,
+      );
+    }).catchError((Object e) {
+      debugPrint('[TransferHistory] clear failed: $e');
+    });
+    return _writeTail;
+  }
 
   Future<List<TransferRow>> load() async {
     final prefs = await SharedPreferences.getInstance();

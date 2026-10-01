@@ -167,6 +167,22 @@ export async function listLocalTransferHistory(): Promise<LocalTransferRow[]> {
   return data.transfers || []
 }
 
+/// 清空本机传输记录（本机专用）。只删除**已结束**的传输——进行中的传输
+/// 必须保留，否则其后续状态更新会写到已删除的行上。
+/// 对端设备的记录不受影响（每台设备各自管理自己的历史）。
+export async function clearLocalTransferHistory(): Promise<{
+  deletedTransfers: number
+  deletedFiles: number
+}> {
+  const data = await asJson<{ deletedTransfers: number; deletedFiles: number }>(
+    await fetch(localUrl('/api/v1/local/transfers'), { method: 'DELETE' }),
+  )
+  return {
+    deletedTransfers: data.deletedTransfers ?? 0,
+    deletedFiles: data.deletedFiles ?? 0,
+  }
+}
+
 /// 本机已知设备（含最后观测 IP / 是否仍持有有效会话 / 是否被用户删除过）。
 ///
 /// 用途：会话是"每服务器单向"的——手机配对进 PC 只让手机拿到 PC 的会话，
