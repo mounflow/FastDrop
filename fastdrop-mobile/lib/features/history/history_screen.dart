@@ -24,6 +24,9 @@ class HistoryScreen extends StatefulWidget {
 class _HistoryScreenState extends State<HistoryScreen> {
   List<TransferRow> _transfers = [];
   String _statusFilter = 'all';
+
+  /// 方向筛选：all / sent（发送，手机→电脑）/ received（接收，电脑→手机）。
+  String _directionFilter = 'all';
   bool _loading = true;
   String? _error;
 
@@ -71,22 +74,55 @@ class _HistoryScreenState extends State<HistoryScreen> {
 
     return Scaffold(
       appBar: AppBar(
-        title: const Text('History'),
+        title: const Text('传输记录'),
         bottom: PreferredSize(
-          preferredSize: const Size.fromHeight(48),
-          child: _buildFilterBar(theme),
+          preferredSize: const Size.fromHeight(96),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              _buildDirectionBar(theme),
+              _buildFilterBar(theme),
+            ],
+          ),
         ),
       ),
       body: _buildBody(theme),
     );
   }
 
+  /// 方向筛选：全部 / 发送 / 接收（历史必须能一眼区分方向）。
+  Widget _buildDirectionBar(ThemeData theme) {
+    const options = [
+      ('all', '全部', Icons.list_alt_rounded),
+      ('sent', '发送', Icons.upload_rounded),
+      ('received', '接收', Icons.download_rounded),
+    ];
+
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(12, 8, 12, 0),
+      child: SegmentedButton<String>(
+        segments: options
+            .map((o) => ButtonSegment<String>(
+                  value: o.$1,
+                  label: Text(o.$2),
+                  icon: Icon(o.$3, size: 16),
+                ))
+            .toList(),
+        selected: {_directionFilter},
+        showSelectedIcon: false,
+        onSelectionChanged: (selection) {
+          setState(() => _directionFilter = selection.first);
+        },
+      ),
+    );
+  }
+
   Widget _buildFilterBar(ThemeData theme) {
     const filters = [
-      ('all', 'All'),
-      ('completed', 'Completed'),
-      ('failed', 'Failed'),
-      ('cancelled', 'Cancelled'),
+      ('all', '全部状态'),
+      ('completed', '已完成'),
+      ('failed', '失败'),
+      ('cancelled', '已取消'),
     ];
 
     return Padding(
@@ -154,7 +190,7 @@ class _HistoryScreenState extends State<HistoryScreen> {
             ),
             const SizedBox(height: 16),
             Text(
-              'No transfer history yet.',
+              '暂无传输记录',
               style: TextStyle(
                 color: theme.colorScheme.onSurface.withOpacity(0.6),
               ),
@@ -164,13 +200,31 @@ class _HistoryScreenState extends State<HistoryScreen> {
       );
     }
 
+    // 方向筛选（发送/接收）在本地完成：两个方向的数据同源，无需重新拉取。
+    final visible = _transfers.where((t) {
+      if (_directionFilter == 'all') return true;
+      final sent = t.direction == 'client_to_server';
+      return _directionFilter == 'sent' ? sent : !sent;
+    }).toList();
+
+    if (visible.isEmpty) {
+      return Center(
+        child: Text(
+          _directionFilter == 'sent' ? '没有发送记录' : '没有接收记录',
+          style: TextStyle(
+            color: theme.colorScheme.onSurface.withOpacity(0.6),
+          ),
+        ),
+      );
+    }
+
     return RefreshIndicator(
       onRefresh: _loadTransfers,
       child: ListView.builder(
         padding: const EdgeInsets.symmetric(vertical: 8),
-        itemCount: _transfers.length,
+        itemCount: visible.length,
         itemBuilder: (context, index) {
-          return _buildTransferTile(theme, _transfers[index]);
+          return _buildTransferTile(theme, visible[index]);
         },
       ),
     );
@@ -178,20 +232,46 @@ class _HistoryScreenState extends State<HistoryScreen> {
 
   Widget _buildTransferTile(ThemeData theme, TransferRow transfer) {
     final statusColor = _statusColor(transfer.status);
-    final directionIcon = transfer.direction == 'client_to_server'
-        ? Icons.upload
-        : Icons.download;
+    final sent = transfer.direction == 'client_to_server';
+    final directionIcon = sent ? Icons.upload_rounded : Icons.download_rounded;
+    final directionLabel = sent ? '发送' : '接收';
+    final directionColor = sent ? const Color(0xFF2F6BFF) : const Color(0xFF17864B);
 
     return Card(
       margin: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
       child: ExpansionTile(
-        leading: Icon(directionIcon, color: theme.colorScheme.primary),
-        title: Text(
-          '${transfer.totalFiles} file${transfer.totalFiles == 1 ? '' : 's'}',
-          style: theme.textTheme.titleSmall,
+        leading: Icon(directionIcon, color: directionColor),
+        title: Row(
+          children: [
+            // 方向徽标：历史列表必须一眼看出是发送还是接收。
+            Container(
+              padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 1),
+              decoration: BoxDecoration(
+                color: directionColor.withOpacity(0.12),
+                borderRadius: BorderRadius.circular(5),
+              ),
+              child: Text(
+                directionLabel,
+                style: TextStyle(
+                  fontSize: 10,
+                  fontWeight: FontWeight.w700,
+                  color: directionColor,
+                ),
+              ),
+            ),
+            const SizedBox(width: 6),
+            Expanded(
+              child: Text(
+                '${transfer.totalFiles} 个文件',
+                style: theme.textTheme.titleSmall,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+              ),
+            ),
+          ],
         ),
         subtitle: Text(
-          _formatDate(transfer.createdAt),
+          '${_formatDirectionPeer(sent)} · ${_formatDate(transfer.createdAt)}',
           style: theme.textTheme.bodySmall,
         ),
         trailing: Row(
@@ -209,7 +289,7 @@ class _HistoryScreenState extends State<HistoryScreen> {
                 borderRadius: BorderRadius.circular(6),
               ),
               child: Text(
-                transfer.status,
+                _statusLabel(transfer.status),
                 style: TextStyle(
                   fontSize: 10,
                   fontWeight: FontWeight.w600,
@@ -227,24 +307,28 @@ class _HistoryScreenState extends State<HistoryScreen> {
               children: [
                 const Divider(),
                 const SizedBox(height: 8),
-                _detailRow('Transfer ID', transfer.id),
+                _detailRow('方向', sent ? '发送（本机 → 对方）' : '接收（对方 → 本机）'),
+                _detailRow('状态', _statusLabel(transfer.status)),
+                _detailRow('文件数', '${transfer.totalFiles}'),
+                _detailRow('大小', _formatBytes(transfer.totalBytes)),
                 _detailRow(
-                    'Direction',
-                    transfer.direction == 'client_to_server'
-                        ? 'Sent'
-                        : 'Received'),
-                _detailRow('Status', transfer.status),
-                _detailRow('Files', '${transfer.totalFiles}'),
-                _detailRow('Size', _formatBytes(transfer.totalBytes)),
-                _detailRow(
-                  'Progress',
+                  '进度',
                   '${_formatBytes(transfer.transferredBytes)} / ${_formatBytes(transfer.totalBytes)}',
                 ),
-                _detailRow('Created', _formatDate(transfer.createdAt)),
+                _detailRow('创建时间', _formatDate(transfer.createdAt)),
                 if (transfer.completedAt != null)
-                  _detailRow('Completed', _formatDate(transfer.completedAt!)),
+                  _detailRow('完成时间', _formatDate(transfer.completedAt!)),
                 if (transfer.errorCode != null)
-                  _detailRow('Error', transfer.errorCode!),
+                  _detailRow('错误码', transfer.errorCode!),
+                Padding(
+                  padding: const EdgeInsets.only(top: 6),
+                  child: Text(
+                    '任务 ID：${transfer.id}',
+                    style: theme.textTheme.bodySmall?.copyWith(
+                      color: theme.colorScheme.onSurface.withOpacity(0.5),
+                    ),
+                  ),
+                ),
                 if (transfer.errorMessage != null)
                   Padding(
                     padding: const EdgeInsets.only(top: 4),
@@ -281,6 +365,34 @@ class _HistoryScreenState extends State<HistoryScreen> {
   // ---------------------------------------------------------------------------
   // Data loading
   // ---------------------------------------------------------------------------
+
+  /// 方向说明文案（副标题用；对端名称不在本机记录里，按方向描述即可）。
+  static String _formatDirectionPeer(bool sent) =>
+      sent ? '发送到电脑' : '来自电脑';
+
+  /// 状态中文标签（列表与详情共用）。
+  static String _statusLabel(String status) {
+    switch (status) {
+      case 'completed':
+        return '已完成';
+      case 'failed':
+        return '失败';
+      case 'cancelled':
+        return '已取消';
+      case 'rejected':
+        return '已拒绝';
+      case 'paused':
+        return '已暂停';
+      case 'transferring':
+        return '传输中';
+      case 'preparing':
+        return '准备中';
+      case 'verifying':
+        return '校验中';
+      default:
+        return status;
+    }
+  }
 
   Future<void> _loadTransfers() async {
     setState(() {
