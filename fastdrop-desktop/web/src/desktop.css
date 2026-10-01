@@ -269,6 +269,10 @@ button:focus-visible, input:focus-visible, select:focus-visible { outline: 3px s
 .history-direction { display: grid; place-items: center; width: 42px; height: 42px; border-radius: 12px; }
 .history-direction.received { background: #edf9f3; color: #176f4a; }
 .history-direction.sent { background: #eef1ff; color: #334bc8; }
+/* 方向徽标：与手机端一致，列表里一眼看出是发送还是接收 */
+.direction-badge { display: inline-block; margin-right: 6px; padding: 1px 6px; border-radius: 5px; font-size: 10px; font-weight: 700; vertical-align: middle; }
+.direction-badge.received { background: #edf9f3; color: #176f4a; }
+.direction-badge.sent { background: #eef1ff; color: #334bc8; }
 .history-main strong, .history-main span, .history-size strong, .history-size span { display: block; }
 .history-main strong, .history-size strong { font-size: 13px; font-weight: 600; }
 .history-main span, .history-size span { margin-top: 4px; color: #747e91; font-size: 11px; }
@@ -358,7 +362,7 @@ button:focus-visible, input:focus-visible, select:focus-visible { outline: 3px s
   *, *::before, *::after { scroll-behavior: auto !important; transition-duration: 0.01ms !important; animation-duration: 0.01ms !important; }
 }
 
-/* ���� 10: nearby device discovery in the connect modal */
+/* 问题 10: nearby device discovery in the connect modal */
 .nearby-panel {
   margin-top: 14px;
   padding-top: 14px;
@@ -401,7 +405,7 @@ button:focus-visible, input:focus-visible, select:focus-visible { outline: 3px s
 .nearby-device strong { font-size: 14px; color: #23272e; }
 .nearby-device small { color: #8a8f98; margin-left: auto; }
 
-/* ���ο�Ƭչ�������ļ���ϸ */
+/* 批次卡片展开：逐文件明细 */
 .transfer-row.expandable { cursor: pointer; }
 .transfer-files {
   margin-top: 8px;

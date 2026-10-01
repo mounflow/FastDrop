@@ -153,11 +153,21 @@ const connectedPeers = computed(() => peerViews.value.filter((peer) => peer.stat
 const liveTransfers = computed(() => activeTransfers.value.filter((item) => !isTerminal(item.status)))
 const completedTransfers = computed(() => activeTransfers.value.filter((item) => isTerminal(item.status)))
 const receivedTransfers = computed(() => transfers.value.filter((item) => item.direction === 'client_to_server'))
+/// 方向筛选（与手机端一致）：全部 / 发送（本机→对方）/ 接收（对方→本机）。
+/// 记录里 client_to_server 表示对端传给本机（本机视角=接收）。
+const historyDirection = ref<'all' | 'sent' | 'received'>('all')
+function isReceived(item: { direction: string }): boolean {
+  return item.direction === 'client_to_server'
+}
 const displayedHistory = computed(() => transfers.value.filter((item) => {
   const statusMatch = historyFilter.value === 'all' || item.status === historyFilter.value
+  const directionMatch =
+    historyDirection.value === 'all' ||
+    (historyDirection.value === 'received' ? isReceived(item) : !isReceived(item))
+  if (!statusMatch || !directionMatch) return false
   const term = historySearch.value.trim().toLocaleLowerCase()
-  if (!term) return statusMatch
-  return statusMatch && `${item.peerName || ''} ${item.id} ${item.status}`.toLocaleLowerCase().includes(term)
+  if (!term) return true
+  return `${item.peerName || ''} ${item.id} ${item.status}`.toLocaleLowerCase().includes(term)
 }))
 const serviceAddress = computed(() => {
   if (qrPayload.value) return `${qrPayload.value.host}:${qrPayload.value.port}`
@@ -1245,7 +1255,10 @@ onUnmounted(() => {
       <section v-else-if="activePage === 'history'" class="page">
         <div class="toolbar">
           <div class="segmented-control">
-            <button v-for="filter in [['all','全部'],['completed','已完成'],['failed','失败'],['cancelled','已取消']]" :key="filter[0]" :class="{ active: historyFilter === filter[0] }" @click="historyFilter = filter[0]">{{ filter[1] }}</button>
+            <button v-for="filter in [['all','全部',''],['sent','发送','upload'],['received','接收','inbox']]" :key="filter[0]" :class="{ active: historyDirection === filter[0] }" @click="historyDirection = filter[0] as 'all' | 'sent' | 'received'">{{ filter[1] }}</button>
+          </div>
+          <div class="segmented-control">
+            <button v-for="filter in [['all','全部状态'],['completed','已完成'],['failed','失败'],['cancelled','已取消']]" :key="filter[0]" :class="{ active: historyFilter === filter[0] }" @click="historyFilter = filter[0]">{{ filter[1] }}</button>
           </div>
           <input v-model="historySearch" class="search-input" placeholder="搜索设备或任务编号" />
         </div>
@@ -1253,8 +1266,14 @@ onUnmounted(() => {
         <div v-if="historyLoading" class="loading-state">正在加载传输记录…</div>
         <div v-else-if="displayedHistory.length" class="history-list">
           <article v-for="item in displayedHistory" :key="`${item.peerId}:${item.id}`" class="history-row">
-            <div :class="['history-direction', item.direction === 'client_to_server' ? 'received' : 'sent']"><AppIcon :name="item.direction === 'client_to_server' ? 'inbox' : 'upload'" :size="20" /></div>
-            <div class="history-main"><strong>{{ item.totalFiles }} 个文件</strong><span>{{ item.direction === 'client_to_server' ? `来自 ${item.peerName || '设备'}` : `发送到 ${item.peerName || '设备'}` }}</span></div>
+            <div :class="['history-direction', isReceived(item) ? 'received' : 'sent']"><AppIcon :name="isReceived(item) ? 'inbox' : 'upload'" :size="20" /></div>
+            <div class="history-main">
+              <strong>
+                <span :class="['direction-badge', isReceived(item) ? 'received' : 'sent']">{{ isReceived(item) ? '接收' : '发送' }}</span>
+                {{ item.totalFiles }} 个文件
+              </strong>
+              <span>{{ isReceived(item) ? `来自 ${item.peerName || '设备'}` : `发送到 ${item.peerName || '设备'}` }}</span>
+            </div>
             <div class="history-size"><strong>{{ formatSize(item.totalBytes) }}</strong><span>{{ formatDate(item.createdAt) }}</span></div>
             <span :class="['status-badge', item.status]">{{ statusLabel(item.status) }}</span>
             <button v-if="canRevealTransfer(item)" class="history-action-button" title="在资源管理器中显示" @click="revealTransfer(item)"><AppIcon name="folder" :size="15" />打开位置</button>
@@ -1262,7 +1281,9 @@ onUnmounted(() => {
         </div>
         <div v-else class="empty-state page-empty">
           <div class="empty-icon"><AppIcon name="history" :size="30" /></div>
-          <div><h3>还没有传输记录</h3><p>发送或接收文件后，任务状态和时间会显示在这里。</p></div>
+          <div v-if="historyDirection === 'all'"><h3>还没有传输记录</h3><p>发送或接收文件后，任务状态和时间会显示在这里。</p></div>
+          <div v-else-if="historyDirection === 'sent'"><h3>没有发送记录</h3><p>切换到「全部」或「接收」查看其它方向的记录。</p></div>
+          <div v-else><h3>没有接收记录</h3><p>切换到「全部」或「发送」查看其它方向的记录。</p></div>
           <button class="primary-button" @click="selectPage('home')">开始发送</button>
         </div>
       </section>
