@@ -688,7 +688,10 @@ class MultiDeviceConnectionNotifier
             'cancelled',
             'rejected',
           }.contains(status);
-          if (isTerminal) {
+          // "未开始就失败"（设备未连接等，transferId 为常量 'not-started'）
+          // 没有真正发生传输，不写历史——否则所有此类失败会挤在同一行上。
+          final started = transferId != 'not-started';
+          if (isTerminal && started) {
             unawaited(_historyStore.upsert(TransferRow(
               id: transferId,
               sessionId: runtime.device.sessionId,

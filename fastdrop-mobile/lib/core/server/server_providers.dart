@@ -258,6 +258,12 @@ class FastDropServerNotifier extends StateNotifier<ServerState> {
       await server.start();
       _server = server;
 
+      // 常驻保活：接收服务一启动就进前台服务（含唤醒锁 + WifiLock），
+      // 而不是等"切后台那一刻"才起——否则熄屏瞬间存在窗口期，CPU 先休眠
+      // 导致入站连接无人处理（实测过：熄屏后端口不可达）。
+      // 关闭"允许接收文件"会停掉服务端，同时释放保活，不额外耗电。
+      unawaited(BackgroundReceiveService.start());
+
       // Start mDNS broadcast so other devices can discover us.
       try {
         final discovery = ref.read(mdnsDiscoveryProvider);

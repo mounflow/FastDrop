@@ -56,12 +56,14 @@ class TransferHistoryStore {
 
   /// A process restart interrupts every non-terminal local operation. Marking
   /// it failed avoids showing a permanently "transferring" stale record.
+  ///
+  /// 同时清理旧版本遗留的"同一批次两行"（见 [_pruneInterruptedDuplicates]）。
   Future<void> markInterruptedTransfersFailed() {
     _writeTail = _writeTail.then((_) async {
       final rows = await load();
       final now = DateTime.now().millisecondsSinceEpoch ~/ 1000;
       var changed = false;
-      final updated = rows.map((row) {
+      final marked = rows.map((row) {
         if (_terminalStatuses.contains(row.status)) return row;
         changed = true;
         return row.copyWith(
@@ -71,16 +73,56 @@ class TransferHistoryStore {
           errorMessage: 'Transfer interrupted when the app stopped.',
         );
       }).toList();
+
+      final pruned = _pruneInterruptedDuplicates(marked);
+      if (pruned.length != marked.length) changed = true;
       if (!changed) return;
+
       final prefs = await SharedPreferences.getInstance();
       await prefs.setString(
         _key,
-        jsonEncode(updated.map((row) => row.toJson()).toList()),
+        jsonEncode(pruned.map((row) => row.toJson()).toList()),
       );
     }).catchError((Object e) {
       debugPrint('[TransferHistory] write failed: $e');
     });
     return _writeTail;
+  }
+
+  /// 删除旧版本遗留的重复批次行。
+  ///
+  /// 历史成因：早期实现在 preparing/transferring 阶段就用**本地 offerId**
+  /// 建行（修复后改为只在终态写服务端 transferId），残留行在下次启动时被
+  /// 标记为"interrupted when the app stopped"，于是同一批次出现两行：
+  /// completed（服务端 UUID）+ failed（本地 offerId）。用户看到的是
+  /// "历史里同一批文件出现两条"。
+  ///
+  /// 判定条件严格到不会误伤正常记录：仅当该行是"中断失败"、id 不是服务端
+  /// UUID（不含 `-`），且存在同方向/同文件数/同大小/创建时间相差 ≤120 秒的
+  /// completed 或 cancelled 行时才丢弃。
+  ///
+  /// 注意**不比较 peerDeviceId**：本地行写的是设备基址（`http://<ip>:9527`），
+  /// 而服务端合并回来的是对端 deviceId，两者本就不同（实测数据如此）。
+  static List<TransferRow> _pruneInterruptedDuplicates(List<TransferRow> rows) {
+    bool interruptedFailure(TransferRow row) =>
+        row.status == 'failed' &&
+        (row.errorMessage ?? '').contains('interrupted when the app stopped');
+
+    final result = <TransferRow>[];
+    for (final row in rows) {
+      if (interruptedFailure(row) && !row.id.contains('-')) {
+        final duplicatedBy = rows.any((other) =>
+            other.id != row.id &&
+            other.direction == row.direction &&
+            other.totalFiles == row.totalFiles &&
+            other.totalBytes == row.totalBytes &&
+            (other.createdAt - row.createdAt).abs() <= 120 &&
+            (other.status == 'completed' || other.status == 'cancelled'));
+        if (duplicatedBy) continue;
+      }
+      result.add(row);
+    }
+    return result;
   }
 
   static const _terminalStatuses = {

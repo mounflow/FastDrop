@@ -11,6 +11,9 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <!-- 常驻接收：熄屏后仍需 CPU 与 Wi-Fi 可用，否则入站连接无人处理
+         （实测：无唤醒锁时熄屏即不可达）。 -->
+    <uses-permission android:name="android.permission.WAKE_LOCK" />
 
     <application
         android:label="FastDrop"
@@ -37,6 +40,7 @@
         <service
             android:name=".FastDropKeepAliveService"
             android:exported="false"
+            android:stopWithTask="false"
             android:foregroundServiceType="dataSync" />
         <!-- L15: 通过系统查看器打开已接收文件时，用 FileProvider 授予临时读权限 -->
         <provider
