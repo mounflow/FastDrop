@@ -20,6 +20,7 @@ class SwipeRevealRow extends StatefulWidget {
     this.actionLabel = '删除',
     this.actionIcon = Icons.delete_outline,
     this.actionColor = const Color(0xFFE5484D),
+    this.contentInset = 16,
   });
 
   final Widget child;
@@ -28,6 +29,10 @@ class SwipeRevealRow extends StatefulWidget {
   final String actionLabel;
   final IconData actionIcon;
   final Color actionColor;
+
+  /// 行内容两侧的水平外边距（Card 的 margin）。操作按钮必须使用**相同**的
+  /// 右边距，否则闭合时右侧会露出一条红色（用户实测到的显示问题）。
+  final double contentInset;
 
   @override
   State<SwipeRevealRow> createState() => _SwipeRevealRowState();
@@ -76,24 +81,25 @@ class _SwipeRevealRowState extends State<SwipeRevealRow>
         return Stack(
           children: [
             // 底层：操作按钮（行左移后露出来）。
+            // 内缩量必须让按钮的**圆角**落在卡片的直边区域内：卡片四角是
+            // 12 半径的圆角，若按钮贴到卡片边缘，闭合时圆角弧线会露出一条
+            // 红色细线（用户实测："没左滑也能看到部分红色"）。
             Positioned.fill(
               child: Align(
                 alignment: Alignment.centerRight,
-                child: SizedBox(
-                  width: widget.actionWidth,
-                  child: Padding(
-                    padding: const EdgeInsets.symmetric(vertical: 4),
+                child: Padding(
+                  padding: EdgeInsets.only(
+                    right: widget.contentInset + 6,
+                    top: 10,
+                    bottom: 10,
+                  ),
+                  child: SizedBox(
+                    width: widget.actionWidth,
                     child: Material(
                       color: widget.actionColor,
-                      borderRadius: const BorderRadius.horizontal(
-                        right: Radius.circular(12),
-                        left: Radius.circular(12),
-                      ),
+                      borderRadius: BorderRadius.circular(10),
                       child: InkWell(
-                        borderRadius: const BorderRadius.horizontal(
-                          right: Radius.circular(12),
-                          left: Radius.circular(12),
-                        ),
+                        borderRadius: BorderRadius.circular(10),
                         onTap: () {
                           _controller.reverse();
                           widget.onAction();

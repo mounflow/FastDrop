@@ -84,4 +84,19 @@ void main() {
     final sw = tester.widget<SwipeRevealRow>(find.byType(SwipeRevealRow));
     expect(sw.actionWidth, 96);
   });
+
+  testWidgets('闭合时删除按钮完全被行内容遮住（不露红边）', (tester) async {
+    await pumpRow(tester, onDelete: () {});
+
+    // 行内容视觉区域（Card 有 16px 水平外边距）。
+    final contentRect = tester.getRect(find.byKey(const ValueKey('row-content')));
+    // 删除按钮的可见区域。
+    final actionRect = tester.getRect(find.text('删除'));
+
+    // 按钮必须在行内容覆盖范围之内：右侧不超出卡片右边、左侧不超出卡片左边。
+    // 早期实现按钮贴到 Stack 最右（无右边距），闭合时右侧会露出一条红色，
+    // 这正是用户实测到的显示问题。
+    expect(actionRect.right, lessThanOrEqualTo(contentRect.right - 16));
+    expect(actionRect.left, greaterThanOrEqualTo(contentRect.left + 16));
+  });
 }

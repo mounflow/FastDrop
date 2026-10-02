@@ -8,6 +8,18 @@ This repo is in the **design phase**. The only artifact is `FastDrop_局域网�
 
 FastDrop is a **LAN-only** file transfer app (Android ↔ Windows). No cloud, no accounts, no login. Phone scans a QR code to pair with the PC over the local network.
 
+## Session Bootstrap
+
+Project context lives in a hindsight mental model (`fastdrop-project-state`). At the start of each session, pull the snapshot before relying on memory:
+
+```
+get_mental_model("fastdrop-project-state", detail="content")
+```
+
+That returns ≈1.9K tokens covering phase status, code dirs, build commands, protocol constants, security boundaries, product decisions, and known env traps. The model auto-refreshes after memory consolidation (delta mode, 300s throttle); staleness is reported via `is_stale`. Avoid `detail="full"` at session start — it dumps all source-fact traces (~15–20K tokens) and is only justified when debugging a specific memory.
+
+For ad-hoc recall use `recall(...)`; for new context use `retain(...)` or `sync_retain(...)`.
+
 ## Platform & Shell
 
 Runs on **Windows**. Use Windows PowerShell / CMD-compatible syntax for any system commands — do not use Linux/Bash-only constructs.
