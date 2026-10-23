@@ -437,3 +437,117 @@ button:focus-visible, input:focus-visible, select:focus-visible { outline: 3px s
 .tf-status { font-size: 11px; color: #8a8f98; flex: 0 0 auto; }
 .tf-status.completed { color: #16a34a; }
 .tf-status.failed { color: #dc2626; }
+
+/* 文本快传（text.send / text.received）
+   卡片规格与 .drop-panel / .settings-card 对齐：白底 + --shadow-card、
+   24px 内边距、16px 圆角；标题层级沿用 16px/600 + 12px 说明。 */
+.text-send-card {
+  margin-top: 16px;
+  padding: 24px;
+  background: var(--gray-0);
+  border: 1px solid var(--gray-200);
+  border-radius: 16px;
+  box-shadow: var(--shadow-card);
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+.text-send-heading h3 {
+  margin: 0;
+  font-size: 16px;
+  line-height: 1.3;
+  font-weight: 600;
+  color: var(--gray-900);
+}
+.text-send-heading p {
+  margin: 6px 0 0;
+  color: var(--gray-500);
+  font-size: 12px;
+  line-height: 1.5;
+}
+.text-send-input {
+  width: 100%;
+  resize: vertical;
+  min-height: 56px;
+  padding: 10px 12px;
+  border: 1px solid var(--gray-300);
+  border-radius: 10px;
+  font: inherit;
+  font-size: 13px;
+  line-height: 1.55;
+  color: var(--gray-900);
+  background: var(--gray-50);
+  box-sizing: border-box;
+}
+.text-send-input:focus {
+  outline: none;
+  border-color: var(--primary-400);
+  background: var(--gray-0);
+}
+/* 逐设备投递标记：发送中（主色）/ 已送达（成功）/ 未确认（危险）。 */
+.text-send-targets { display: flex; flex-wrap: wrap; gap: 8px; }
+.text-target-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 100%;
+  padding: 3px 9px;
+  border-radius: 999px;
+  background: var(--gray-100);
+  color: var(--gray-600);
+  font-size: 11px;
+  line-height: 1.6;
+}
+.text-target-chip strong {
+  overflow: hidden;
+  max-width: 160px;
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.text-target-chip.pending { background: var(--primary-50); color: var(--primary-700); }
+.text-target-chip.delivered { background: var(--success-50); color: var(--success-700); }
+.text-target-chip.unconfirmed { background: var(--danger-50); color: var(--danger-700); }
+.text-send-actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+/* 状态行紧贴输入框与"发送文本"按钮，颜色即分态（点色跟随 currentColor）。 */
+.text-send-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--gray-500);
+}
+.text-send-status::before {
+  content: '';
+  width: 7px;
+  height: 7px;
+  flex: 0 0 auto;
+  border-radius: 50%;
+  background: currentColor;
+  opacity: 0.55;
+}
+.text-send-status.neutral { color: var(--gray-500); }
+.text-send-status.primary { color: var(--primary-600); }
+.text-send-status.success { color: var(--success-600); }
+.text-send-status.danger { color: var(--danger-600); }
+.received-text-body {
+  margin: 0;
+  padding: 14px;
+  max-height: 320px;
+  overflow: auto;
+  background: var(--gray-50);
+  border: 1px solid var(--gray-200);
+  border-radius: 12px;
+  font-family: Consolas, "Cascadia Mono", monospace;
+  font-size: 13px;
+  line-height: 1.6;
+  white-space: pre-wrap;
+  word-break: break-all;
+  color: var(--gray-800);
+}

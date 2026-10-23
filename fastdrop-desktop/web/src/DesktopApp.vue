@@ -290,11 +290,146 @@ async function sendFiles(files: File[]) {
   }
 }
 
+// ---------------------------------------------------------------------------
+// 文本快传（spec §8.2 text.send / text.ack / text.received）
+// ---------------------------------------------------------------------------
+
+const TEXT_MAX_BYTES = 64 * 1024
+
+interface ReceivedText {
+  textId: string
+  text: string
+  deviceName: string
+  receivedAt: number
+}
+
+/// 文本回执等待窗口：只决定 UI 何时把未回执的设备标为"未确认"，
+/// 不涉及协议超时，也不触发重发。
+const TEXT_ACK_TIMEOUT_MS = 8000
+
+/// 本批文本的逐设备投递状态。text.ack 只带 textId、不带设备标识，
+/// 因此每台目标设备各用一个 textId，回执才能归属到具体设备。
+interface TextTarget {
+  peerId: string
+  name: string
+  textId: string
+  delivered: boolean
+}
+
+const textDraft = ref('')
+const textTargets = ref<TextTarget[]>([])
+const textPhase = ref<'idle' | 'sending' | 'settled'>('idle')
+const textNotice = ref('')
+const receivedTexts = ref<ReceivedText[]>([])
+const activeReceivedText = ref<ReceivedText | null>(null)
+const textCopied = ref(false)
+let textAckTimer: ReturnType<typeof setTimeout> | null = null
+
+const textDeliveredCount = computed(
+  () => textTargets.value.filter((target) => target.delivered).length,
+)
+
+/// 文本区分态：未选设备 → 可发送 → 发送中 → 全部送达 → 部分/全部未确认。
+/// 状态行与输入框、按钮同处一张卡片，无需滚动即可看到。
+const textState = computed<{ tone: string; text: string }>(() => {
+  if (textNotice.value) return { tone: 'danger', text: textNotice.value }
+  if (selectedCount.value === 0) return { tone: 'neutral', text: '请先选择接收设备' }
+  const total = textTargets.value.length
+  if (textPhase.value === 'sending') {
+    return {
+      tone: 'primary',
+      text: `正在发送文本…（${textDeliveredCount.value}/${total} 台已送达）`,
+    }
+  }
+  // 已结算的批次只作为结果展示，用户重新输入文本即视为开始下一批。
+  if (textPhase.value === 'settled') {
+    if (textDeliveredCount.value === total) {
+      return { tone: 'success', text: `文本已送达（${total} 台）` }
+    }
+    return {
+      tone: 'danger',
+      text: `${textDeliveredCount.value}/${total} 台已送达，${total - textDeliveredCount.value} 台未确认`,
+    }
+  }
+  return { tone: 'neutral', text: `已选 ${selectedCount.value} 台设备，可发送文本` }
+})
+
+/// 逐设备投递标记（发送中 / 已送达 / 未确认）。
+function textTargetState(target: TextTarget): { state: string; label: string } {
+  if (target.delivered) return { state: 'delivered', label: '已送达' }
+  if (textPhase.value === 'settled') return { state: 'unconfirmed', label: '未确认' }
+  return { state: 'pending', label: '发送中' }
+}
+
+/// 输入变化：清掉校验提示；上一批已结算则一并清掉逐设备标记，
+/// 否则旧结果会与新文本并排显示（发送中的批次保留）。
+function onTextDraftInput() {
+  textNotice.value = ''
+  if (textPhase.value === 'settled') {
+    textTargets.value = []
+    textPhase.value = 'idle'
+  }
+}
+
+function sendText() {
+  const text = textDraft.value
+  textNotice.value = ''
+  if (!text.trim()) {
+    textNotice.value = '请输入要发送的文本。'
+    return
+  }
+  if (new TextEncoder().encode(text).length > TEXT_MAX_BYTES) {
+    textNotice.value = '文本过长（上限 64 KB）。'
+    return
+  }
+  if (!effectiveRecipientIds.value.length) {
+    // 未选设备时状态行本身就是中性的"请先选择接收设备"（回车键也会走到
+    // 这里），不再叠加一条红色报错。
+    return
+  }
+  const targets: TextTarget[] = effectiveRecipientIds.value.map((peerId) => ({
+    peerId,
+    name: peerNameFor(peerId),
+    textId: crypto.randomUUID(),
+    delivered: false,
+  }))
+  for (const target of targets) {
+    peerPool.send(target.peerId, {
+      version: 1,
+      type: 'text.send',
+      timestamp: Date.now(),
+      payload: { textId: target.textId, text },
+    })
+  }
+  textTargets.value = targets
+  textPhase.value = 'sending'
+  if (textAckTimer) clearTimeout(textAckTimer)
+  // 超时只把未回执的设备标成"未确认"（不重发、不改协议）。
+  textAckTimer = setTimeout(() => {
+    textAckTimer = null
+    if (textPhase.value === 'sending') textPhase.value = 'settled'
+  }, TEXT_ACK_TIMEOUT_MS)
+  textDraft.value = ''
+}
+
+function copyText(text: string) {
+  void navigator.clipboard.writeText(text).then(() => {
+    textCopied.value = true
+    setTimeout(() => (textCopied.value = false), 1500)
+  })
+}
+
 function toggleRecipient(peerId: string) {
   const selected = selectedRecipientIds.value
   selectedRecipientIds.value = selected.includes(peerId)
     ? selected.filter((id) => id !== peerId)
     : [...selected, peerId]
+  // 选择变化后上一批的投递结果不再是当前语境，退回"可发送"提示
+  // （发送中的批次保留，否则进度标记会被清空）。
+  if (textPhase.value === 'settled') {
+    textTargets.value = []
+    textPhase.value = 'idle'
+  }
 }
 
 function handlePoolProgress(progress: PeerTransferProgress) {
@@ -424,6 +559,30 @@ function handleWSMessage(peerId: string, raw: unknown) {
       updateTransferStatus(peerId, transferId, 'cancelled')
       void loadHistory()
       break
+    case 'text.ack': {
+      // 逐设备回执：ack 只带 textId，用本批 textId → 目标设备的映射归属。
+      const ackedId = String(payload.textId || '')
+      const target = textTargets.value.find((entry) => entry.textId === ackedId)
+      if (!target || target.delivered) break
+      target.delivered = true
+      if (textDeliveredCount.value >= textTargets.value.length) {
+        if (textAckTimer) clearTimeout(textAckTimer)
+        textAckTimer = null
+        textPhase.value = 'settled'
+      }
+      break
+    }
+    case 'text.received': {
+      const item: ReceivedText = {
+        textId: String(payload.textId || crypto.randomUUID()),
+        text: String(payload.text ?? ''),
+        deviceName: String(payload.deviceName || peerNameFor(peerId)),
+        receivedAt: Number(payload.receivedAt || Date.now()),
+      }
+      receivedTexts.value.unshift(item)
+      activeReceivedText.value = item
+      break
+    }
     case 'session.revoked':
       peerPool.removePeer(peerId)
       break
@@ -1159,6 +1318,7 @@ onUnmounted(() => {
   if (healthTimer) clearInterval(healthTimer)
   if (incomingPollTimer) clearInterval(incomingPollTimer)
   if (devicePollTimer) clearInterval(devicePollTimer)
+  if (textAckTimer) clearTimeout(textAckTimer)
   peerPool.close()
 })
 </script>
@@ -1230,6 +1390,7 @@ onUnmounted(() => {
           <input ref="fileInput" type="file" multiple hidden @change="handleFilePickerChange" />
           <input ref="folderInput" type="file" multiple webkitdirectory hidden @change="handleFilePickerChange" />
         </div>
+
         <p v-if="uploadStatus" class="inline-notice">{{ uploadStatus }}</p>
 
         <div class="section-heading">
@@ -1262,6 +1423,42 @@ onUnmounted(() => {
           <span><strong>{{ selectedCount }}</strong> 台设备已选择</span>
           <span v-if="selectedCount === 0">发送前请选择接收设备</span>
           <span v-else>选择文件后将同时发送</span>
+        </div>
+
+        <div class="text-send-card">
+          <div class="text-send-heading">
+            <h3>发送文本</h3>
+            <p>网址、验证码、API key 等短内容，选中设备后随发随达</p>
+          </div>
+          <textarea
+            v-model="textDraft"
+            class="text-send-input"
+            rows="2"
+            placeholder="发送文本：网址、API key、验证码…（≤ 64 KB）"
+            @input="onTextDraftInput"
+            @keydown.enter.exact.prevent="sendText"
+          ></textarea>
+          <div v-if="textTargets.length" class="text-send-targets">
+            <span
+              v-for="target in textTargets"
+              :key="target.textId"
+              class="text-target-chip"
+              :class="textTargetState(target).state"
+            >
+              <strong>{{ target.name }}</strong>{{ textTargetState(target).label }}
+            </span>
+          </div>
+          <div class="text-send-actions">
+            <span class="text-send-status" :class="textState.tone">{{ textState.text }}</span>
+            <button
+              class="primary-button"
+              :disabled="!textDraft.trim() || selectedCount === 0"
+              :title="selectedCount === 0 ? '请先在上方选择接收设备' : ''"
+              @click="sendText"
+            >
+              <AppIcon name="upload" :size="16" />发送文本
+            </button>
+          </div>
         </div>
 
         <section v-if="liveTransfers.length || completedTransfers.length" class="transfer-drawer">
@@ -1438,6 +1635,17 @@ onUnmounted(() => {
           <div class="modal-heading"><div><span class="eyebrow">收到文件请求</span><h2>{{ incomingOffers[0].deviceName }} 想发送文件</h2></div></div>
           <ul class="offer-list"><li v-for="file in incomingOffers[0].files" :key="file.fileId"><AppIcon name="file" :size="18" /><span>{{ file.name }}</span><small>{{ formatSize(file.size) }}</small></li></ul>
           <div class="modal-actions"><button class="secondary-button" @click="rejectOffer(incomingOffers[0])">拒绝</button><button class="primary-button" @click="acceptOffer(incomingOffers[0])">接收文件</button></div>
+        </section>
+      </div>
+
+      <div v-if="activeReceivedText" class="modal-overlay" @click.self="activeReceivedText = null">
+        <section class="modal-card" role="dialog" aria-modal="true" aria-label="收到文本">
+          <div class="modal-heading"><div><span class="eyebrow">收到文本</span><h2>{{ activeReceivedText.deviceName }} 发来一段文本</h2></div></div>
+          <pre class="received-text-body">{{ activeReceivedText.text }}</pre>
+          <div class="modal-actions">
+            <button class="secondary-button" @click="activeReceivedText = null">关闭</button>
+            <button class="primary-button" @click="copyText(activeReceivedText.text)">{{ textCopied ? '已复制 ✓' : '复制文本' }}</button>
+          </div>
         </section>
       </div>
     </Teleport>
