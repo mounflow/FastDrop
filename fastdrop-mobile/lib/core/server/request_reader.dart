@@ -10,7 +10,7 @@ class RequestBodyTooLargeException implements Exception {
   final int maxBytes;
 
   @override
-  String toString() => 'Request body exceeds $maxBytes bytes';
+  String toString() => '请求体超过 $maxBytes 字节';
 }
 
 /// Reads at most [maxBytes] from [request].
@@ -46,7 +46,7 @@ Future<Map<String, dynamic>> readJsonObjectLimited(
   final bytes = await readBodyLimited(request, maxBytes: maxBytes);
   final decoded = jsonDecode(utf8.decode(bytes));
   if (decoded is! Map<String, dynamic>) {
-    throw const FormatException('JSON body must be an object');
+    throw const FormatException('JSON 请求体必须是对象');
   }
   return decoded;
 }

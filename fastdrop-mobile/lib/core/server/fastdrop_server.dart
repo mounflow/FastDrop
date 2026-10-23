@@ -28,6 +28,7 @@ class FastDropServer {
     TransferChangedCallback? onTransferChanged,
     PeerConnectedCallback? onPeerConnected,
     PeerDisconnectedCallback? onPeerDisconnected,
+    TextReceivedCallback? onTextReceived,
   }) : _localDevice = localDevice {
     sessionManager = SessionManager();
     pairingHandler = PairingHandler(
@@ -48,6 +49,7 @@ class FastDropServer {
       transferReceiver: transferReceiver,
       onPeerConnected: onPeerConnected,
       onPeerDisconnected: onPeerDisconnected,
+      onTextReceived: onTextReceived,
     );
   }
 
@@ -163,7 +165,7 @@ class FastDropServer {
         jsonEncode({
           'error': {
             'code': 'NOT_FOUND',
-            'message': 'Endpoint not found: /${request.url.path}',
+            'message': '接口不存在：/${request.url.path}',
           },
         }),
         headers: {'content-type': 'application/json'},

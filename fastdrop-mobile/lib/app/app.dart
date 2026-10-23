@@ -9,6 +9,7 @@ import 'package:fastdrop_mobile/core/platform/background_receive_service.dart';
 import 'package:fastdrop_mobile/core/server/server_providers.dart';
 import 'package:fastdrop_mobile/features/pairing/pair_confirm_dialog.dart';
 import 'package:fastdrop_mobile/features/transfer/receive_confirm_dialog.dart';
+import 'package:fastdrop_mobile/features/transfer/text_receive_dialog.dart';
 import 'package:fastdrop_mobile/features/transfer/transfer_service.dart';
 
 /// Root widget of the FastDrop mobile app.
@@ -85,7 +86,10 @@ class _FastDropAppState extends ConsumerState<FastDropApp>
           navigatorKey: _navigatorKey,
           child: ReceiveConfirmDialogWatcher(
             navigatorKey: _navigatorKey,
-            child: child!,
+            child: TextReceiveDialogWatcher(
+              navigatorKey: _navigatorKey,
+              child: child!,
+            ),
           ),
         );
       },

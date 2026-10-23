@@ -12,6 +12,7 @@ import 'package:fastdrop_mobile/core/storage/session_store.dart';
 import 'package:fastdrop_mobile/features/devices/multi_device_connection.dart';
 import 'package:fastdrop_mobile/features/transfer/transfer_service.dart';
 import 'package:fastdrop_mobile/shared/models/transfer.dart';
+import 'package:fastdrop_mobile/shared/utils/relative_time.dart';
 import 'package:fastdrop_mobile/shared/widgets/app_navigation_bar.dart';
 
 // ---------------------------------------------------------------------------
@@ -350,7 +351,7 @@ class TransferScreenNotifier extends StateNotifier<TransferScreenState> {
         deviceId: '',
         transferId: key,
         peerName: state.currentPeerName ?? 'PC',
-        fileName: names.length == 1 ? names.first : '${names.length} files',
+        fileName: names.length == 1 ? names.first : '${names.length} 个文件',
         bytesTransferred: 0,
         totalBytes: 0,
         speed: 0,
@@ -643,7 +644,7 @@ class MultiTransferScreenNotifier extends StateNotifier<TransferScreenState> {
           peerName: state.currentPeerName ?? '多个设备',
           fileName: paths.length == 1
               ? paths.first.split('/').last.split('\\').last
-              : '${paths.length} files',
+              : '${paths.length} 个文件',
           bytesTransferred: 0,
           totalBytes: 0,
           speed: 0,
@@ -791,7 +792,8 @@ class MultiTransferScreenNotifier extends StateNotifier<TransferScreenState> {
         totalBytes: 0,
         speed: 0,
         status: 'failed',
-        errorMessage: errorMessage ?? errorCode,
+        errorMessage:
+            errorMessage ?? (errorCode == null ? null : humanizeErrorCode(errorCode)),
         errorCode: errorCode,
       );
       state = state.copyWith(
@@ -1013,7 +1015,7 @@ class _TransferScreenState extends ConsumerState<TransferScreen> {
           if (currentEntries.any((e) => e.value.status == 'transferring'))
             IconButton(
               icon: const Icon(Icons.cancel_outlined),
-              tooltip: 'Cancel all',
+              tooltip: '全部取消',
               onPressed: notifier.cancelAllActive,
             ),
         ],
@@ -1427,7 +1429,7 @@ class _TransferScreenState extends ConsumerState<TransferScreen> {
                           ScaffoldMessenger.of(context).showSnackBar(
                             const SnackBar(
                               content: Text(
-                                  'Transfer cancelled. Reselect files to retry.'),
+                                  '已从列表移除该失败记录，请返回重新选择文件后发送。'),
                             ),
                           );
                         },
@@ -1471,11 +1473,8 @@ class _TransferScreenState extends ConsumerState<TransferScreen> {
   }
 
   String _formatArchiveTime(DateTime t) {
-    final now = DateTime.now();
-    final diff = now.difference(t);
-    if (diff.inMinutes < 1) return '刚刚';
-    if (diff.inMinutes < 60) return '${diff.inMinutes} 分钟前';
-    if (diff.inHours < 24) return '${diff.inHours} 小时前';
+    final relative = formatRelativeTime(t);
+    if (relative != null) return relative;
     return '${t.month}/${t.day} '
         '${t.hour.toString().padLeft(2, '0')}:'
         '${t.minute.toString().padLeft(2, '0')}';

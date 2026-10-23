@@ -146,7 +146,7 @@ class TransferService {
         if (cancelToken.isCancelled) return;
       }
       if (fileInfos.isEmpty) {
-        throw FileSystemException('No selectable files remain', filePaths.first);
+        throw FileSystemException('没有可发送的文件', filePaths.first);
       }
 
       // 2. Create the transfer batch on the server.
@@ -357,8 +357,8 @@ class TransferService {
           final bodyBytes = response.bodyBytes;
           if (bodyBytes.length != end - start + 1) {
             throw Exception(
-              'Range response truncated for $fileName: '
-              'expected ${end - start + 1} bytes, got ${bodyBytes.length}',
+              '$fileName 的分段响应被截断：'
+              '期望 ${end - start + 1} 字节，实际 ${bodyBytes.length} 字节',
             );
           }
           // append 模式写入总落在文件末尾，顺序写入即块序。
@@ -387,7 +387,7 @@ class TransferService {
           // 整个文件内容已损坏，续传无从谈起：删除 .part 让下次全新下载。
           await File(partPath).delete();
           throw Exception(
-            'SHA-256 mismatch for $fileName: expected $expectedSha256, got $actualSha256',
+            '$fileName 的 SHA-256 校验失败：期望 $expectedSha256，实际 $actualSha256',
           );
         }
       }
@@ -705,8 +705,8 @@ class TransferService {
 
       if (completeResult.sha256.toLowerCase() != fi.sha256.toLowerCase()) {
         throw Exception(
-          'Server SHA-256 mismatch for ${fi.name}: '
-          'expected ${fi.sha256}, got ${completeResult.sha256}',
+          '服务端返回的 ${fi.name} SHA-256 校验失败：'
+          '期望 ${fi.sha256}，实际 ${completeResult.sha256}',
         );
       }
 

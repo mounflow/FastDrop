@@ -1,3 +1,4 @@
+import 'dart:convert';
 import 'dart:io';
 
 import 'package:file_picker/file_picker.dart';
@@ -6,17 +7,19 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter/services.dart';
 import 'package:path_provider/path_provider.dart';
 
+import 'package:fastdrop_mobile/app/theme.dart';
 import 'package:fastdrop_mobile/core/providers.dart';
 import 'package:fastdrop_mobile/core/server/pairing_providers.dart';
+import 'package:fastdrop_mobile/core/server/ws_server.dart';
 import 'package:fastdrop_mobile/core/storage/session_store.dart';
 import 'package:fastdrop_mobile/features/devices/multi_device_connection.dart';
 import 'package:fastdrop_mobile/shared/widgets/file_icon.dart';
 
-/// A file browser with three category tabs (Images, Videos, All Files)
+/// A file browser with three category tabs (图片 / 视频 / 所有文件)
 /// that uses the system file picker for selection.
 ///
 /// Selected files are shown in a list with thumbnails, sizes, and the
-/// ability to remove individual items before sending. A "Send" FAB
+/// ability to remove individual items before sending. A "发送" FAB
 /// navigates to the transfer screen with the final selection.
 class FilePickerScreen extends ConsumerStatefulWidget {
   const FilePickerScreen({super.key});
@@ -32,6 +35,11 @@ class _FilePickerScreenState extends ConsumerState<FilePickerScreen>
   final Set<String> _selectedDeviceIds = {};
   List<Device> _devices = const [];
   bool _routeArgsLoaded = false;
+  final TextEditingController _textController = TextEditingController();
+
+  /// 文本快传的 UI 本地状态：本轮已投出、尚在等待 `text.ack` 的设备数。
+  /// 只用于"发送中"反馈，不参与协议（WS 消息类型/字段均未改动）。
+  int _textPendingAcks = 0;
 
   @override
   void initState() {
@@ -56,6 +64,7 @@ class _FilePickerScreenState extends ConsumerState<FilePickerScreen>
   @override
   void dispose() {
     _tabController.dispose();
+    _textController.dispose();
     super.dispose();
   }
 
@@ -68,28 +77,43 @@ class _FilePickerScreenState extends ConsumerState<FilePickerScreen>
     final theme = Theme.of(context);
     final connections = ref.watch(multiDeviceConnectionProvider);
 
+    // 文本送达确认（text.ack）→ SnackBar。
+    ref.listen(textDeliveryStatusProvider, (previous, next) {
+      if (next.startsWith('delivered:')) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('文本已送达')),
+        );
+        // 全部确认返回后结束「发送中」态。
+        if (mounted && _textPendingAcks > 0) {
+          setState(() => _textPendingAcks -= 1);
+        }
+      }
+    });
+
     return Scaffold(
       appBar: AppBar(
-        title: const Text('Send Files'),
+        title: const Text('发送文件'),
         bottom: TabBar(
           controller: _tabController,
           tabs: const [
-            Tab(icon: Icon(Icons.image), text: 'Images'),
-            Tab(icon: Icon(Icons.movie), text: 'Videos'),
-            Tab(icon: Icon(Icons.folder), text: 'All Files'),
+            Tab(icon: Icon(Icons.image), text: '图片'),
+            Tab(icon: Icon(Icons.movie), text: '视频'),
+            Tab(icon: Icon(Icons.folder), text: '所有文件'),
           ],
         ),
       ),
       body: Column(
         children: [
           _buildRecipientSelector(theme, connections),
+          // 操作流：选设备 → 文本快传 → 已选文件 → 文件选择。
+          _buildTextSendCard(theme),
           if (_selected.isNotEmpty)
             Container(
               width: double.infinity,
               color: theme.colorScheme.primaryContainer.withOpacity(0.3),
               padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
               child: Text(
-                '${_selected.length} file${_selected.length == 1 ? '' : 's'} selected  '
+                '已选 ${_selected.length} 个文件  '
                 '(${_formatBytes(_selected.fold<int>(0, (sum, f) => sum + f.size))})',
                 style: theme.textTheme.bodyMedium?.copyWith(
                   fontWeight: FontWeight.w600,
@@ -102,23 +126,23 @@ class _FilePickerScreenState extends ConsumerState<FilePickerScreen>
               children: [
                 _buildCategoryTab(
                   theme,
-                  'images',
+                  '图片',
                   Icons.image_outlined,
-                  'Tap to browse images',
+                  '点击浏览图片',
                   FileType.image,
                 ),
                 _buildCategoryTab(
                   theme,
-                  'videos',
+                  '视频',
                   Icons.movie_outlined,
-                  'Tap to browse videos',
+                  '点击浏览视频',
                   FileType.video,
                 ),
                 _buildCategoryTab(
                   theme,
-                  'all files',
+                  '所有文件',
                   Icons.folder_outlined,
-                  'Tap to browse files',
+                  '点击浏览文件',
                   FileType.any,
                 ),
               ],
@@ -131,7 +155,7 @@ class _FilePickerScreenState extends ConsumerState<FilePickerScreen>
           ? FloatingActionButton.extended(
               onPressed: _onSend,
               icon: const Icon(Icons.send),
-              label: Text('Send (${_selected.length})'),
+              label: Text('发送 (${_selected.length})'),
             )
           : null,
     );
@@ -192,7 +216,162 @@ class _FilePickerScreenState extends ConsumerState<FilePickerScreen>
                 );
               }).toList(),
             ),
+          const SizedBox(height: 10),
         ],
+      ),
+    );
+  }
+
+  /// 文本快传卡片（text.send）：网址 / 验证码 / API key 等短文本，走已认证
+  /// WS 控制通道直传，发送目标复用上方选中的设备。
+  ///
+  /// 语义上"发文本"不属于"选择收件人"，因此从 [_buildRecipientSelector]
+  /// 中独立出来，插在设备选择之后、已选文件之前。
+  Widget _buildTextSendCard(ThemeData theme) {
+    final bytes = utf8.encode(_textController.text).length;
+    final overLimit = bytes > WsServer.textMaxBytes;
+    final hasTargets = _selectedDeviceIds.isNotEmpty;
+
+    // 未选设备 / 超限时不能只靠置灰，必须用可见文字说明原因。
+    final String? blockedReason = !hasTargets
+        ? '请先选择接收设备'
+        : overLimit
+            ? '文本超出 64 KB 上限，请缩短后发送'
+            : null;
+    final blockedIsError = overLimit;
+
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(16, 12, 16, 0),
+      child: Card(
+        child: Padding(
+          padding: const EdgeInsets.all(14),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text('文本快传', style: theme.textTheme.titleSmall),
+              const SizedBox(height: 4),
+              Text(
+                '直接发送网址、验证码、API key 等短文本',
+                style: theme.textTheme.bodySmall
+                    ?.copyWith(color: AppTheme.textSecondary),
+              ),
+              const SizedBox(height: 10),
+              TextField(
+                controller: _textController,
+                minLines: 2,
+                maxLines: 4,
+                style: theme.textTheme.bodyMedium,
+                onChanged: (_) => setState(() {}),
+                decoration: InputDecoration(
+                  isDense: true,
+                  hintText: '输入要发送的文本…',
+                  suffixIcon: IconButton(
+                    tooltip: '粘贴',
+                    icon: const Icon(Icons.content_paste, size: 20),
+                    onPressed: _pasteText,
+                  ),
+                ),
+              ),
+              const SizedBox(height: 8),
+              Row(
+                children: [
+                  // 字数提示：UTF-8 字节数 / 上限，超限变红。
+                  Text(
+                    '$bytes / ${WsServer.textMaxBytes} 字节',
+                    style: theme.textTheme.bodySmall?.copyWith(
+                      color: overLimit
+                          ? AppTheme.danger
+                          : AppTheme.textSecondary,
+                    ),
+                  ),
+                  if (_textPendingAcks > 0) ...[
+                    const SizedBox(width: 10),
+                    const SizedBox(
+                      width: 12,
+                      height: 12,
+                      child: CircularProgressIndicator(strokeWidth: 2),
+                    ),
+                    const SizedBox(width: 6),
+                    Text('发送中…', style: theme.textTheme.bodySmall),
+                  ],
+                  const Spacer(),
+                  FilledButton.icon(
+                    onPressed: blockedReason == null ? _sendText : null,
+                    icon: const Icon(Icons.send, size: 18),
+                    label: const Text('发送'),
+                  ),
+                ],
+              ),
+              if (blockedReason != null) ...[
+                const SizedBox(height: 6),
+                Text(
+                  blockedReason,
+                  style: theme.textTheme.bodySmall?.copyWith(
+                    color: blockedIsError
+                        ? AppTheme.danger
+                        : AppTheme.textSecondary,
+                  ),
+                ),
+              ],
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  Future<void> _pasteText() async {
+    final data = await Clipboard.getData('text/plain');
+    final text = data?.text;
+    if (text != null && text.isNotEmpty) {
+      _textController.text = text;
+      setState(() {});
+    }
+  }
+
+  Future<void> _sendText() async {
+    final text = _textController.text.trim();
+    if (text.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('请输入要发送的文本')),
+      );
+      return;
+    }
+    if (_selectedDeviceIds.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('请先选择接收设备')),
+      );
+      return;
+    }
+    if (utf8.encode(text).length > WsServer.textMaxBytes) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('文本超出 64 KB 上限，请缩短后发送')),
+      );
+      return;
+    }
+    final notifier = ref.read(multiDeviceConnectionProvider.notifier);
+    var queued = 0;
+    for (final deviceId in _selectedDeviceIds) {
+      if (notifier.sendText(deviceId, text)) queued++;
+    }
+    final failed = _selectedDeviceIds.length - queued;
+    if (!mounted) return;
+    if (queued == 0) {
+      // 全部失败：所选设备都没有可用的发送连接。
+      setState(() => _textPendingAcks = 0);
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('发送失败：所选设备暂无可用发送连接')),
+      );
+      return;
+    }
+    _textController.clear();
+    // 已投出 queued 条，等待 queued 个 text.ack；期间状态行显示「发送中…」。
+    setState(() => _textPendingAcks = queued);
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(failed == 0
+            ? '已向 $queued 台设备发送文本'
+            : '已向 $queued 台设备发送文本，$failed 台发送失败（连接不可用）'),
       ),
     );
   }
@@ -216,7 +395,7 @@ class _FilePickerScreenState extends ConsumerState<FilePickerScreen>
           ElevatedButton.icon(
             onPressed: () => _pickFiles(fileType),
             icon: const Icon(Icons.add),
-            label: Text('Select $label'),
+            label: Text('选择$label'),
           ),
         ],
       ),
@@ -314,7 +493,7 @@ class _FilePickerScreenState extends ConsumerState<FilePickerScreen>
     } on PlatformException catch (e) {
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Could not open file picker: ${e.message}')),
+        SnackBar(content: Text('无法打开文件选择器：${e.message}')),
       );
     }
   }

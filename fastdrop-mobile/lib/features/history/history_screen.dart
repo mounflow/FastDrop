@@ -3,11 +3,13 @@ import 'dart:convert';
 
 import 'package:flutter/material.dart';
 
+import 'package:fastdrop_mobile/core/errors/app_error.dart';
 import 'package:fastdrop_mobile/core/network/http_client.dart';
 import 'package:fastdrop_mobile/core/platform/background_receive_service.dart';
 import 'package:fastdrop_mobile/core/storage/session_store.dart';
 import 'package:fastdrop_mobile/core/storage/transfer_history_store.dart';
 import 'package:fastdrop_mobile/shared/models/transfer.dart';
+import 'package:fastdrop_mobile/shared/utils/relative_time.dart';
 import 'package:fastdrop_mobile/shared/widgets/swipe_reveal_row.dart';
 
 /// Displays historical transfers fetched from the backend via
@@ -179,7 +181,7 @@ class _HistoryScreenState extends State<HistoryScreen> {
             const SizedBox(height: 16),
             ElevatedButton(
               onPressed: _loadTransfers,
-              child: const Text('Retry'),
+              child: const Text('重试'),
             ),
           ],
         ),
@@ -331,7 +333,7 @@ class _HistoryScreenState extends State<HistoryScreen> {
                 if (transfer.completedAt != null)
                   _detailRow('完成时间', _formatDate(transfer.completedAt!)),
                 if (transfer.errorCode != null)
-                  _detailRow('错误码', transfer.errorCode!),
+                  _detailRow('错误码', _formatErrorCode(transfer.errorCode!)),
                 Padding(
                   padding: const EdgeInsets.only(top: 6),
                   child: Text(
@@ -341,11 +343,15 @@ class _HistoryScreenState extends State<HistoryScreen> {
                     ),
                   ),
                 ),
-                if (transfer.errorMessage != null)
+                // 服务端没带 message 时此前什么都不显示；现在回落到错误码的
+                // 中文说明（映射不到则原样显示错误码，不丢排查线索）。
+                if (transfer.errorMessage != null ||
+                    transfer.errorCode != null)
                   Padding(
                     padding: const EdgeInsets.only(top: 4),
                     child: Text(
-                      transfer.errorMessage!,
+                      transfer.errorMessage ??
+                          humanizeErrorCode(transfer.errorCode!),
                       style: theme.textTheme.bodySmall?.copyWith(
                         color: Colors.red,
                       ),
@@ -530,7 +536,7 @@ class _HistoryScreenState extends State<HistoryScreen> {
     } catch (e) {
       setState(() {
         _loading = false;
-        _error = 'Failed to load history: $e';
+        _error = '加载传输记录失败：$e';
       });
     }
   }
@@ -603,16 +609,18 @@ class _HistoryScreenState extends State<HistoryScreen> {
     return '${(bytes / (1024 * 1024 * 1024)).toStringAsFixed(1)} GB';
   }
 
+  /// 错误码行：能映射出中文含义时同时给出原始码（原始码对排查有用，
+  /// 不丢信息）。
+  static String _formatErrorCode(String code) {
+    final humanized = humanizeErrorCode(code);
+    return humanized == code ? code : '$humanized（$code）';
+  }
+
   static String _formatDate(int unixSeconds) {
     // Go backend stores timestamps as Unix seconds (not milliseconds).
     final dt = DateTime.fromMillisecondsSinceEpoch(unixSeconds * 1000);
-    final now = DateTime.now();
-    final diff = now.difference(dt);
-
-    if (diff.inMinutes < 1) return 'Just now';
-    if (diff.inMinutes < 60) return '${diff.inMinutes}m ago';
-    if (diff.inHours < 24) return '${diff.inHours}h ago';
-    if (diff.inDays < 7) return '${diff.inDays}d ago';
+    final relative = formatRelativeTime(dt);
+    if (relative != null) return relative;
 
     return '${dt.year}-${dt.month.toString().padLeft(2, '0')}-${dt.day.toString().padLeft(2, '0')}';
   }

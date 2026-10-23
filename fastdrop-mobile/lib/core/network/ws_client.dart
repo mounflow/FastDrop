@@ -75,10 +75,10 @@ class FastDropWsClient {
 
   Future<void> connect() async {
     if (baseUrl == null) {
-      throw StateError('baseUrl must be set before connecting');
+      throw StateError('连接前必须先设置 baseUrl');
     }
     if (_sessionId == null || _accessToken == null) {
-      throw StateError('Session credentials must be set before connecting');
+      throw StateError('连接前必须先设置会话凭据');
     }
 
     _shouldReconnect = true;

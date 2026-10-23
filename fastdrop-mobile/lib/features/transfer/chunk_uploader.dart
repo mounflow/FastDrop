@@ -128,7 +128,7 @@ class ChunkUploadException implements Exception {
 
   @override
   String toString() {
-    return 'ChunkUploadException: failed to upload chunk $chunkIndex '
-        'for file $fileId (transfer $transferId) after $attempts attempts';
+    return 'ChunkUploadException: 分块 $chunkIndex 上传失败'
+        '（文件 $fileId，传输 $transferId），已尝试 $attempts 次';
   }
 }

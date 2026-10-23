@@ -141,6 +141,6 @@ void main() {
     await store.markInterruptedTransfersFailed();
     final rows = await store.load();
     expect(rows.single.status, 'failed');
-    expect(rows.single.errorMessage, contains('interrupted'));
+    expect(rows.single.errorMessage, contains('中断'));
   });
 }

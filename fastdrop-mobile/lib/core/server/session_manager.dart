@@ -143,12 +143,12 @@ class SessionManager {
         final sessionId = request.headers['x-session-id'] ?? '';
 
         if (!authHeader.startsWith('Bearer ') || sessionId.isEmpty) {
-          return _unauthorized('Missing Authorization or X-Session-Id header');
+          return _unauthorized('缺少 Authorization 或 X-Session-Id 请求头');
         }
 
         final token = authHeader.substring(7);
         if (!validate(sessionId, token)) {
-          return _unauthorized('Invalid or expired session');
+          return _unauthorized('会话无效或已过期');
         }
 
         // Stash the session id for downstream handlers.

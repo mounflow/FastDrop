@@ -216,7 +216,7 @@ class DeviceConnectionNotifier extends StateNotifier<DeviceConnectionState> {
     } catch (e) {
       state = state.copyWith(
         connectionStatus: ConnectionStatus.error,
-        errorMessage: 'Failed to connect: $e',
+        errorMessage: '连接失败：$e',
       );
     }
   }
@@ -509,7 +509,7 @@ class DeviceConnectionNotifier extends StateNotifier<DeviceConnectionState> {
 
   void _handleTransferFailed(Map<String, dynamic> payload) {
     final transferId = payload['transferId'] as String? ?? '';
-    final error = payload['error']?.toString() ?? 'Transfer failed';
+    final error = payload['error']?.toString() ?? '传输失败';
     final downloads = state.activeDownloads.map((d) {
       if (d.transferId == transferId) {
         d.status = 'failed';
@@ -1587,7 +1587,7 @@ class _DevicesScreenState extends ConsumerState<DevicesScreen>
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        Text('Incoming Files', style: theme.textTheme.titleSmall),
+        Text('接收文件', style: theme.textTheme.titleSmall),
         const SizedBox(height: 8),
         ...state.incomingOffers.map((offer) => Card(
               child: Padding(
@@ -1599,13 +1599,13 @@ class _DevicesScreenState extends ConsumerState<DevicesScreen>
                       mainAxisAlignment: MainAxisAlignment.spaceBetween,
                       children: [
                         Text(
-                          'From: ${offer.deviceName}',
+                          '来自：${offer.deviceName}',
                           style: theme.textTheme.bodyMedium?.copyWith(
                             fontWeight: FontWeight.w600,
                           ),
                         ),
                         Text(
-                          '${offer.files.length} file(s)',
+                          '${offer.files.length} 个文件',
                           style: theme.textTheme.bodySmall?.copyWith(
                             color: Colors.grey,
                           ),
@@ -1626,13 +1626,13 @@ class _DevicesScreenState extends ConsumerState<DevicesScreen>
                       children: [
                         TextButton(
                           onPressed: () => notifier.rejectOffer(offer),
-                          child: const Text('Reject',
+                          child: const Text('拒绝',
                               style: TextStyle(color: Colors.red)),
                         ),
                         const SizedBox(width: 8),
                         ElevatedButton(
                           onPressed: () => notifier.acceptOffer(offer),
-                          child: const Text('Accept'),
+                          child: const Text('接收'),
                         ),
                       ],
                     ),
@@ -1658,11 +1658,11 @@ class _DevicesScreenState extends ConsumerState<DevicesScreen>
         Row(
           mainAxisAlignment: MainAxisAlignment.spaceBetween,
           children: [
-            Text('Downloads', style: theme.textTheme.titleSmall),
+            Text('正在接收', style: theme.textTheme.titleSmall),
             if (hasFinished)
               TextButton(
                 onPressed: notifier.clearFinishedDownloads,
-                child: const Text('Clear finished'),
+                child: const Text('清除已完成'),
               ),
           ],
         ),
@@ -1732,7 +1732,7 @@ class _DevicesScreenState extends ConsumerState<DevicesScreen>
                               onPressed: () => notifier.cancelDownload(
                                   d.deviceId, d.transferId),
                               icon: const Icon(Icons.cancel, size: 16),
-                              label: const Text('Cancel'),
+                              label: const Text('取消'),
                               style: TextButton.styleFrom(
                                   foregroundColor: Colors.red),
                             ),
@@ -1753,11 +1753,11 @@ class _DevicesScreenState extends ConsumerState<DevicesScreen>
     switch (d.status) {
       case 'completed':
         color = Colors.green;
-        label = 'Done';
+        label = '已完成';
         break;
       case 'failed':
         color = Colors.red;
-        label = 'Failed';
+        label = '失败';
         break;
       default:
         color = Colors.blue;

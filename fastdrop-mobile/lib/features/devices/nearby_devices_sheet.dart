@@ -211,7 +211,7 @@ class _NearbyDeviceTile extends ConsumerWidget {
         ),
       ),
       subtitle: Text(
-        '$displayUrl · protocol v${device.protocolVersion}',
+        '$displayUrl · 协议 v${device.protocolVersion}',
         style: theme.textTheme.bodySmall?.copyWith(color: Colors.grey),
       ),
       trailing: Chip(

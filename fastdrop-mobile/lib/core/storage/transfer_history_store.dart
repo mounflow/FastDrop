@@ -138,7 +138,7 @@ class TransferHistoryStore {
           status: 'failed',
           completedAt: now,
           errorCode: 'INTERNAL_ERROR',
-          errorMessage: 'Transfer interrupted when the app stopped.',
+          errorMessage: _interruptedMessage,
         );
       }).toList();
 
@@ -172,9 +172,13 @@ class TransferHistoryStore {
   /// 注意**不比较 peerDeviceId**：本地行写的是设备基址（`http://<ip>:9527`），
   /// 而服务端合并回来的是对端 deviceId，两者本就不同（实测数据如此）。
   static List<TransferRow> _pruneInterruptedDuplicates(List<TransferRow> rows) {
-    bool interruptedFailure(TransferRow row) =>
-        row.status == 'failed' &&
-        (row.errorMessage ?? '').contains('interrupted when the app stopped');
+    bool interruptedFailure(TransferRow row) {
+      if (row.status != 'failed') return false;
+      final message = row.errorMessage ?? '';
+      // 同时匹配旧版本写入的英文文案：升级后历史里的遗留行仍需去重。
+      return message.contains(_interruptedMessage) ||
+          message.contains('interrupted when the app stopped');
+    }
 
     final result = <TransferRow>[];
     for (final row in rows) {
@@ -199,4 +203,8 @@ class TransferHistoryStore {
     'cancelled',
     'rejected',
   };
+
+  /// 启动自愈写入的中断失败文案。写入与去重必须用同一个常量：只改一处会让
+  /// 同一批次出现"completed + failed"两行重复记录。
+  static const _interruptedMessage = '应用关闭时传输被中断';
 }

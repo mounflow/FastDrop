@@ -201,7 +201,7 @@ class _PeerRuntime {
     uploadServices.clear();
     for (final completer in readiness.values) {
       if (!completer.isCompleted) {
-        completer.completeError(StateError('Peer disconnected'));
+        completer.completeError(StateError('对方已断开连接'));
       }
     }
     readiness.clear();
@@ -332,6 +332,28 @@ class MultiDeviceConnectionNotifier
     if (device == null) return;
     disconnectDevice(id!);
     await connectDevice(device, select: state.selectedDeviceId == id);
+  }
+
+  /// 发送文本（text.send，spec §8.2）到指定设备的**发送方向连接**
+  /// （本机作为客户端持有的 ws 会话）。
+  ///
+  /// 返回 false 表示连接不可用或文本非法（空 / 超过 64 KB UTF-8）。
+  /// 送达确认通过 WS `text.ack` 异步返回（_onWsMessage）。
+  bool sendText(String deviceId, String text) {
+    final ws = _runtimes[deviceId]?.wsClient;
+    if (ws == null || !ws.isConnected) return false;
+    if (text.isEmpty || utf8.encode(text).length > 64 * 1024) return false;
+    ws.send({
+      'version': 1,
+      'type': 'text.send',
+      'timestamp': DateTime.now().millisecondsSinceEpoch,
+      'payload': {
+        'textId':
+            'txt-${DateTime.now().microsecondsSinceEpoch}-${deviceId.hashCode.abs()}',
+        'text': text,
+      },
+    });
+    return true;
   }
 
   /// 会话失效后的自动重配对（信任设备）：mDNS 重新发现该设备时，走
@@ -926,7 +948,7 @@ class MultiDeviceConnectionNotifier
 
   Future<void> _waitForTransferReady(String deviceId, String transferId) async {
     final runtime = _runtimes[deviceId];
-    if (runtime == null) throw StateError('Peer disconnected');
+    if (runtime == null) throw StateError('对方已断开连接');
     final resolved = runtime.resolvedReadiness.remove(transferId);
     if (resolved != null) {
       if (resolved) return;
@@ -970,7 +992,13 @@ class MultiDeviceConnectionNotifier
       case 'transfer.cancelled':
         _removeDownloads(deviceId, payload['transferId'] as String? ?? '');
         break;
+      case 'text.ack':
+        // 送达确认：写状态供发送 UI 展示（不存内容）。
+        _ref.read(textDeliveryStatusProvider.notifier).state =
+            'delivered:${payload['textId'] ?? ''}';
+        break;
       case 'session.revoked':
+
         _setPeerFields(
           deviceId,
           status: MultiConnectionStatus.error,
@@ -1218,3 +1246,7 @@ final multiDeviceConnectionProvider = StateNotifierProvider<
     MultiDeviceConnectionNotifier, MultiDeviceConnectionState>((ref) {
   return MultiDeviceConnectionNotifier(ref);
 });
+
+/// 已发送文本的送达状态：收到 `text.ack` 时更新为
+/// `delivered:<textId>`（供发送 UI 展示"已送达"，不存文本内容）。
+final textDeliveryStatusProvider = StateProvider<String>((ref) => '');

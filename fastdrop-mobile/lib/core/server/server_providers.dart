@@ -8,6 +8,7 @@ import 'package:fastdrop_mobile/core/platform/background_receive_service.dart';
 import 'package:fastdrop_mobile/core/server/fastdrop_server.dart';
 import 'package:fastdrop_mobile/core/server/pairing_providers.dart';
 import 'package:fastdrop_mobile/core/server/transfer_providers.dart';
+import 'package:fastdrop_mobile/core/server/ws_server.dart';
 import 'package:fastdrop_mobile/core/storage/transfer_history_store.dart';
 import 'package:fastdrop_mobile/core/storage/ignored_device_providers.dart';
 import 'package:fastdrop_mobile/features/devices/multi_device_connection.dart';
@@ -253,6 +254,10 @@ class FastDropServerNotifier extends StateNotifier<ServerState> {
               .read(incomingPeerConnectionsProvider.notifier)
               .disconnected(sessionId);
         },
+        onTextReceived: (message) {
+          debugPrint('[Server] Text received: ${message.text.length} bytes');
+          ref.read(receivedTextsProvider.notifier).add(message);
+        },
       );
 
       await server.start();
@@ -403,4 +408,23 @@ class FastDropServerNotifier extends StateNotifier<ServerState> {
 final fastdropServerProvider =
     StateNotifierProvider<FastDropServerNotifier, ServerState>(
   (ref) => FastDropServerNotifier(ref),
+);
+
+/// 收到的文本消息（text.send）。对话框 watcher 监听它弹出展示框；
+/// 用户关闭/复制后由 watcher 调用 [ReceivedTextsNotifier.remove] 清除。
+class ReceivedTextsNotifier extends StateNotifier<List<ServerTextMessage>> {
+  ReceivedTextsNotifier() : super(const []);
+
+  void add(ServerTextMessage message) {
+    state = [...state, message];
+  }
+
+  void remove(String textId) {
+    state = state.where((m) => m.textId != textId).toList();
+  }
+}
+
+final receivedTextsProvider =
+    StateNotifierProvider<ReceivedTextsNotifier, List<ServerTextMessage>>(
+  (ref) => ReceivedTextsNotifier(),
 );

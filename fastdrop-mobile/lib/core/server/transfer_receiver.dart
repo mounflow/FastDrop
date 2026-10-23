@@ -279,15 +279,15 @@ class TransferReceiver {
   /// POST /api/v1/transfers — receive a transfer offer.
   Future<Response> handleCreateTransfer(Request request) async {
     final sessionId = request.context['fastdrop.sessionId'] as String?;
-    if (sessionId == null) return _error(401, 'UNAUTHORIZED', 'No session');
+    if (sessionId == null) return _error(401, 'UNAUTHORIZED', '会话不存在');
 
     final Map<String, dynamic> body;
     try {
       body = await readJsonObjectLimited(request, maxBytes: _maxJsonBytes);
     } on RequestBodyTooLargeException {
-      return _error(413, 'INVALID_REQUEST', 'JSON body is too large');
+      return _error(413, 'INVALID_REQUEST', 'JSON 请求体过大');
     } catch (_) {
-      return _error(400, 'INVALID_REQUEST', 'Invalid JSON');
+      return _error(400, 'INVALID_REQUEST', 'JSON 请求体无效');
     }
 
     final requestedDirection = body['direction'];
@@ -297,7 +297,7 @@ class TransferReceiver {
         : 'client_to_server';
     final rawFiles = body['files'];
     if (rawFiles is! List<dynamic> || rawFiles.isEmpty) {
-      return _error(400, 'INVALID_REQUEST', 'No files in offer');
+      return _error(400, 'INVALID_REQUEST', 'offer 中没有文件');
     }
     final filesJson = rawFiles;
 
@@ -307,7 +307,7 @@ class TransferReceiver {
 
     for (final fj in filesJson) {
       if (fj is! Map<String, dynamic>) {
-        return _error(400, 'INVALID_REQUEST', 'Invalid file entry');
+        return _error(400, 'INVALID_REQUEST', '文件条目无效');
       }
       final fm = fj;
       final rawSize = fm['size'];
@@ -315,7 +315,7 @@ class TransferReceiver {
         return _error(
           400,
           'INVALID_REQUEST',
-          'File size must be a non-negative integer',
+          '文件大小必须是非负整数',
         );
       }
       final size = rawSize;
@@ -385,33 +385,33 @@ class TransferReceiver {
   ) async {
     final transfer = _transfers[transferId];
     if (transfer == null) {
-      return _error(404, 'FILE_NOT_FOUND', 'Transfer not found');
+      return _error(404, 'FILE_NOT_FOUND', '传输任务不存在');
     }
     if (!_isOwnedByRequest(request, transfer)) {
       return _error(
-          403, 'SESSION_INVALID', 'Transfer belongs to another session');
+          403, 'SESSION_INVALID', '该传输任务属于其他会话');
     }
     // 仅拒绝终态传输（H8）：同批某个文件在校验中（文件级 verifying）时
     // 批次保持 transferring，其他文件的分块写入不受阻塞。
     if (_terminalStatuses.contains(transfer.status)) {
       return _error(
-          409, 'INVALID_REQUEST', 'Transfer is already ${transfer.status}');
+          409, 'INVALID_REQUEST', '传输任务已结束（${transfer.status}），无法继续操作');
     }
 
     final file = transfer.files.where((f) => f.fileId == fileId).firstOrNull;
     if (file == null) {
-      return _error(404, 'FILE_NOT_FOUND', 'File not found in transfer');
+      return _error(404, 'FILE_NOT_FOUND', '传输任务中不存在该文件');
     }
     // acceptTransfer 之前 .part 尚未创建，无法落盘，明确拒绝而非 500。
     if (file.partPath == null) {
-      return _error(409, 'INVALID_REQUEST', 'Transfer is not accepted yet');
+      return _error(409, 'INVALID_REQUEST', '传输尚未被接收');
     }
 
     final chunkIndex = int.tryParse(chunkIndexStr);
     if (chunkIndex == null ||
         chunkIndex < 0 ||
         chunkIndex >= file.totalChunks) {
-      return _error(400, 'INVALID_REQUEST', 'Invalid chunk index');
+      return _error(400, 'INVALID_REQUEST', '分块序号无效');
     }
 
     // Read the chunk body.
@@ -422,20 +422,20 @@ class TransferReceiver {
         maxBytes: FileUtils.chunkSize + _chunkBodySlack,
       );
     } on RequestBodyTooLargeException {
-      return _error(413, 'INVALID_REQUEST', 'Chunk body is too large');
+      return _error(413, 'INVALID_REQUEST', '分块请求体过大');
     } catch (e) {
       debugPrint('[Transfer] Failed to read chunk body: $e');
-      return _error(400, 'INVALID_REQUEST', 'Failed to read chunk body: $e');
+      return _error(400, 'INVALID_REQUEST', '读取分块请求体失败：$e');
     }
     if (bytes.isEmpty) {
-      return _error(400, 'INVALID_REQUEST', 'Empty chunk body');
+      return _error(400, 'INVALID_REQUEST', '分块请求体为空');
     }
     // Reserve one of the two distinct-file slots before the first await.
     // Multiple chunks of the same file share that slot; they must not each be
     // counted as a separate active file.
     if (!_fileInFlight.containsKey(fileId) &&
         _fileInFlight.length >= _maxActiveFiles) {
-      return _error(429, 'INVALID_REQUEST', 'Too many concurrent files');
+      return _error(429, 'INVALID_REQUEST', '并发文件数过多');
     }
     _fileInFlight[fileId] = (_fileInFlight[fileId] ?? 0) + 1;
 
@@ -468,7 +468,7 @@ class TransferReceiver {
     } catch (e, s) {
       debugPrint('[Transfer] Chunk $chunkIndex write failed: $e');
       debugPrint('[Transfer] Stack: $s');
-      return _error(500, 'INTERNAL_ERROR', 'Chunk write failed: $e');
+      return _error(500, 'INTERNAL_ERROR', '分块写入失败：$e');
     } finally {
       fileSem.release();
       _globalSem.release();
@@ -493,29 +493,29 @@ class TransferReceiver {
   ) async {
     final transfer = _transfers[transferId];
     if (transfer == null) {
-      return _error(404, 'FILE_NOT_FOUND', 'Transfer not found');
+      return _error(404, 'FILE_NOT_FOUND', '传输任务不存在');
     }
     if (!_isOwnedByRequest(request, transfer)) {
       return _error(
-          403, 'SESSION_INVALID', 'Transfer belongs to another session');
+          403, 'SESSION_INVALID', '该传输任务属于其他会话');
     }
     if (transfer.status == 'paused') {
-      return _error(409, 'INVALID_REQUEST', 'Transfer is paused');
+      return _error(409, 'INVALID_REQUEST', '传输已暂停');
     }
     if (_terminalStatuses.contains(transfer.status)) {
       return _error(
-          409, 'INVALID_REQUEST', 'Transfer is already ${transfer.status}');
+          409, 'INVALID_REQUEST', '传输任务已结束（${transfer.status}），无法继续操作');
     }
 
     final file = transfer.files.where((f) => f.fileId == fileId).firstOrNull;
     if (file == null) {
-      return _error(404, 'FILE_NOT_FOUND', 'File not found');
+      return _error(404, 'FILE_NOT_FOUND', '文件不存在');
     }
 
     // Verify all chunks received.
     if (file.receivedChunks.length < file.totalChunks) {
       return _error(400, 'INVALID_REQUEST',
-          'Missing chunks: ${file.receivedChunks.length}/${file.totalChunks}');
+          '分块缺失：${file.receivedChunks.length}/${file.totalChunks}');
     }
 
     // verifying 只作用于单个文件任务（H8）；批次状态保持 transferring，
@@ -534,7 +534,7 @@ class TransferReceiver {
         _notifyChanged(transfer);
         _scheduleRetentionCleanupIfSettled(transfer);
         return _error(400, 'FILE_HASH_MISMATCH',
-            'SHA-256 mismatch: expected ${file.sha256}, got $actualSha');
+            'SHA-256 校验失败：期望 ${file.sha256}，实际 $actualSha');
       }
 
       // Atomic rename to downloads dir.
@@ -580,7 +580,7 @@ class TransferReceiver {
       file.status = 'failed';
       _notifyChanged(transfer);
       _scheduleRetentionCleanupIfSettled(transfer);
-      return _error(500, 'INTERNAL_ERROR', 'File completion failed: $e');
+      return _error(500, 'INTERNAL_ERROR', '文件完成失败：$e');
     }
   }
 
@@ -592,29 +592,29 @@ class TransferReceiver {
   ) async {
     final transfer = _transfers[transferId];
     if (transfer == null) {
-      return _error(404, 'FILE_NOT_FOUND', 'Transfer not found');
+      return _error(404, 'FILE_NOT_FOUND', '传输任务不存在');
     }
     if (!_isOwnedByRequest(request, transfer)) {
       return _error(
-          403, 'SESSION_INVALID', 'Transfer belongs to another session');
+          403, 'SESSION_INVALID', '该传输任务属于其他会话');
     }
 
     // 终态传输不再提供下载（M15）：对端在取消/失败后不应继续拉取数据。
     if (transfer.status == 'cancelled') {
-      return _error(410, 'TRANSFER_CANCELLED', 'Transfer has been cancelled');
+      return _error(410, 'TRANSFER_CANCELLED', '传输已取消');
     }
     if (transfer.status == 'failed') {
-      return _error(409, 'INVALID_REQUEST', 'Transfer has failed');
+      return _error(409, 'INVALID_REQUEST', '传输已失败');
     }
 
     final file = transfer.files.where((f) => f.fileId == fileId).firstOrNull;
     if (file == null || file.finalPath == null) {
-      return _error(404, 'FILE_NOT_FOUND', 'File not available for download');
+      return _error(404, 'FILE_NOT_FOUND', '该文件不可下载');
     }
 
     final localFile = File(file.finalPath!);
     if (!localFile.existsSync()) {
-      return _error(404, 'FILE_NOT_FOUND', 'File not found on disk');
+      return _error(404, 'FILE_NOT_FOUND', '磁盘上不存在该文件');
     }
 
     final fileSize = await localFile.length();

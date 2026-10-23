@@ -101,12 +101,12 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
                 subtitle: Text(_activeDevice!.serverBaseUrl),
                 trailing: _activeDevice!.isExpired
                     ? const Chip(
-                        label: Text('Expired', style: TextStyle(fontSize: 11)),
+                        label: Text('已过期', style: TextStyle(fontSize: 11)),
                         backgroundColor: Colors.red,
                         labelStyle: TextStyle(color: Colors.white),
                       )
                     : const Chip(
-                        label: Text('Active', style: TextStyle(fontSize: 11)),
+                        label: Text('有效', style: TextStyle(fontSize: 11)),
                         backgroundColor: Colors.green,
                         labelStyle: TextStyle(color: Colors.white),
                       ),
@@ -136,12 +136,12 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
           ],
 
           // -- Download Directory ------------------------------------------------
-          const _SectionHeader(title: 'Download Directory'),
+          const _SectionHeader(title: '下载目录'),
           ListTile(
             leading: const Icon(Icons.folder_open),
-            title: const Text('Save location'),
+            title: const Text('保存位置'),
             subtitle: Text(
-              _customDownloadDir ?? 'Default (app documents)',
+              _customDownloadDir ?? '默认（应用文档目录）',
               style: const TextStyle(fontSize: 13, fontFamily: 'monospace'),
             ),
             trailing: const Icon(Icons.chevron_right),
@@ -150,8 +150,8 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
           const Padding(
             padding: EdgeInsets.symmetric(horizontal: 16, vertical: 4),
             child: Text(
-              'Files received from the PC are saved here. '
-              'Leave empty to use the default location.',
+              '从 PC 端接收的文件会保存到这里。'
+              '留空使用默认位置。',
               style: TextStyle(color: Colors.grey, fontSize: 12),
             ),
           ),
@@ -296,7 +296,7 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
                 IconButton(
                   onPressed: _onManualConnect,
                   icon: const Icon(Icons.arrow_forward),
-                  tooltip: 'Connect',
+                  tooltip: '连接',
                 ),
               ],
             ),
@@ -338,20 +338,20 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
           const Divider(),
 
           // -- About -----------------------------------------------------------
-          const _SectionHeader(title: 'About'),
+          const _SectionHeader(title: '关于'),
           const ListTile(
             leading: Icon(Icons.info_outline),
             title: Text('FastDrop'),
-            subtitle: Text('LAN file transfer, no cloud, no accounts.'),
+            subtitle: Text('局域网文件传输，无需登录，不上云'),
           ),
           ListTile(
             leading: const Icon(Icons.tag),
-            title: const Text('Version'),
+            title: const Text('版本'),
             subtitle: const Text(fastDropAppVersion),
           ),
           ListTile(
             leading: const Icon(Icons.description_outlined),
-            title: const Text('License'),
+            title: const Text('开源协议'),
             subtitle: const Text('MIT'),
           ),
         ],
@@ -411,12 +411,12 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
     final result = await showDialog<String>(
       context: context,
       builder: (ctx) => AlertDialog(
-        title: const Text('Download Directory'),
+        title: const Text('下载目录'),
         content: TextField(
           controller: controller,
           decoration: const InputDecoration(
-            hintText: 'Leave empty for default',
-            labelText: 'Path',
+            hintText: '留空使用默认',
+            labelText: '路径',
             border: OutlineInputBorder(),
             isDense: true,
           ),
@@ -424,11 +424,11 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
         actions: [
           TextButton(
             onPressed: () => Navigator.of(ctx).pop(null),
-            child: const Text('Cancel'),
+            child: const Text('取消'),
           ),
           TextButton(
             onPressed: () => Navigator.of(ctx).pop(controller.text.trim()),
-            child: const Text('Save'),
+            child: const Text('保存'),
           ),
         ],
       ),
@@ -448,7 +448,7 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
       } catch (e) {
         if (mounted) {
           ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(content: Text('Cannot create directory: $e')),
+            SnackBar(content: Text('无法创建目录：$e')),
           );
         }
         return;
@@ -461,8 +461,8 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
           content: Text(result.isEmpty
-              ? 'Using default download directory'
-              : 'Download directory: $result'),
+              ? '已使用默认下载目录'
+              : '下载目录：$result'),
         ),
       );
     }

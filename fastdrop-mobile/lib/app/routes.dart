@@ -120,9 +120,9 @@ class _NotFoundScreen extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      appBar: AppBar(title: const Text('Not Found')),
+      appBar: AppBar(title: const Text('页面不存在')),
       body: const Center(
-        child: Text('Route not found.'),
+        child: Text('找不到该页面。'),
       ),
     );
   }

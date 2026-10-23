@@ -75,8 +75,7 @@ class PairingNotifier extends StateNotifier<PairingState> {
     if (payload == null) {
       state = PairingState(
         phase: PairingPhase.error,
-        errorMessage:
-            'Invalid QR code. Make sure you are scanning a FastDrop QR code from your PC.',
+        errorMessage: '二维码无效。请确认扫描的是电脑端 FastDrop 显示的二维码。',
       );
       return;
     }
@@ -85,8 +84,7 @@ class PairingNotifier extends StateNotifier<PairingState> {
     if (payload.protocol != 'fastdrop') {
       state = PairingState(
         phase: PairingPhase.error,
-        errorMessage:
-            'Not a FastDrop QR code. Detected protocol: "${payload.protocol}".',
+        errorMessage: '这不是 FastDrop 的二维码。识别到的协议："${payload.protocol}"。',
       );
       return;
     }
@@ -95,7 +93,7 @@ class PairingNotifier extends StateNotifier<PairingState> {
     if (payload.isExpired) {
       state = PairingState(
         phase: PairingPhase.error,
-        errorMessage: 'QR code has expired. Generate a new one on your PC.',
+        errorMessage: '二维码已过期，请在电脑端重新生成。',
       );
       return;
     }
@@ -134,9 +132,9 @@ class PairingNotifier extends StateNotifier<PairingState> {
     if (workingBaseUrl == null) {
       state = PairingState(
         phase: PairingPhase.error,
-        errorMessage: 'Could not reach the PC at any candidate address. '
-            'Tried: ${candidates.join(", ")}. '
-            'Last error: $lastError',
+        errorMessage: '无法连接电脑端的任何候选地址。'
+            '已尝试：${candidates.join(", ")}。'
+            '最后错误：$lastError',
       );
       return;
     }
@@ -182,7 +180,7 @@ class PairingNotifier extends StateNotifier<PairingState> {
     } catch (e) {
       state = PairingState(
         phase: PairingPhase.error,
-        errorMessage: 'Failed to submit pair request: $e',
+        errorMessage: '提交配对请求失败：$e',
       );
     }
   }
@@ -202,8 +200,7 @@ class PairingNotifier extends StateNotifier<PairingState> {
       _stopPolling();
       state = PairingState(
         phase: PairingPhase.error,
-        errorMessage:
-            'Pairing timed out. Please try scanning the QR code again.',
+        errorMessage: '配对超时，请重新扫描二维码。',
       );
       return;
     }
@@ -256,14 +253,13 @@ class PairingNotifier extends StateNotifier<PairingState> {
         _stopPolling();
         state = PairingState(
           phase: PairingPhase.error,
-          errorMessage: 'Pairing was rejected on the PC.',
+          errorMessage: '配对请求已被电脑端拒绝。',
         );
       } else if (pollResponse.isExpired) {
         _stopPolling();
         state = PairingState(
           phase: PairingPhase.error,
-          errorMessage:
-              'Pair request expired. Generate a new QR code on your PC and try again.',
+          errorMessage: '配对请求已过期，请在电脑端重新生成二维码后再试。',
         );
       } else {
         // Still waiting — update attempt count.
@@ -278,7 +274,7 @@ class PairingNotifier extends StateNotifier<PairingState> {
       _stopPolling();
       state = PairingState(
         phase: PairingPhase.error,
-        errorMessage: 'Failed to check pairing status: $e',
+        errorMessage: '查询配对状态失败：$e',
       );
     }
   }
@@ -310,8 +306,8 @@ class PairingNotifier extends StateNotifier<PairingState> {
     } catch (e) {
       state = PairingState(
         phase: PairingPhase.error,
-        errorMessage: 'Could not reach PC at $ip:$port. '
-            'Make sure FastDrop is running on your PC. Error: $e',
+        errorMessage: '无法连接到 $ip:$port。'
+            '确保 PC 端 FastDrop 正在运行。\n$e',
       );
     }
   }
@@ -428,7 +424,7 @@ class _PairingScreenState extends ConsumerState<PairingScreen> {
 
     return Scaffold(
       appBar: AppBar(
-        title: const Text('Pair with PC'),
+        title: const Text('与电脑配对'),
       ),
       body: _buildBody(context, ref, state),
     );
@@ -480,7 +476,7 @@ class _PairingScreenState extends ConsumerState<PairingScreen> {
                       size: 48, color: Colors.white),
                   const SizedBox(height: 12),
                   const Text(
-                    'Point your camera at the QR code\non your PC screen',
+                    '将摄像头对准电脑屏幕上的二维码',
                     textAlign: TextAlign.center,
                     style: TextStyle(color: Colors.white, fontSize: 16),
                   ),
@@ -488,7 +484,7 @@ class _PairingScreenState extends ConsumerState<PairingScreen> {
                   OutlinedButton.icon(
                     onPressed: () => _showManualIpDialog(context, notifier),
                     icon: const Icon(Icons.keyboard, size: 18),
-                    label: const Text('Enter IP manually'),
+                    label: const Text('手动输入 IP'),
                     style: OutlinedButton.styleFrom(
                       foregroundColor: Colors.white,
                       side: const BorderSide(color: Colors.white54),
@@ -510,14 +506,14 @@ class _PairingScreenState extends ConsumerState<PairingScreen> {
     showDialog(
       context: context,
       builder: (dialogContext) => AlertDialog(
-        title: const Text('Connect via IP'),
+        title: const Text('通过 IP 连接'),
         content: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
             TextField(
               controller: ipController,
               decoration: const InputDecoration(
-                labelText: 'PC IP address',
+                labelText: 'PC 的 IP 地址',
                 hintText: '192.168.1.100',
               ),
               keyboardType: TextInputType.number,
@@ -526,7 +522,7 @@ class _PairingScreenState extends ConsumerState<PairingScreen> {
             TextField(
               controller: portController,
               decoration: const InputDecoration(
-                labelText: 'Port',
+                labelText: '端口',
                 hintText: '9527',
               ),
               keyboardType: TextInputType.number,
@@ -536,7 +532,7 @@ class _PairingScreenState extends ConsumerState<PairingScreen> {
         actions: [
           TextButton(
             onPressed: () => Navigator.pop(dialogContext),
-            child: const Text('Cancel'),
+            child: const Text('取消'),
           ),
           ElevatedButton(
             onPressed: () {
@@ -547,7 +543,7 @@ class _PairingScreenState extends ConsumerState<PairingScreen> {
                 notifier.connectManualIp(ip, port.isNotEmpty ? port : '9527');
               }
             },
-            child: const Text('Connect'),
+            child: const Text('连接'),
           ),
         ],
       ),
@@ -566,19 +562,19 @@ class _PairingScreenState extends ConsumerState<PairingScreen> {
           mainAxisSize: MainAxisSize.min,
           children: [
             Text(
-              'Connecting to $serverName',
+              '正在连接 $serverName',
               style: Theme.of(context).textTheme.titleLarge,
             ),
             const SizedBox(height: 16),
             const Text(
-              'Waiting for confirmation on your PC...',
+              '等待电脑端确认…',
               style: TextStyle(color: Colors.grey),
             ),
             const SizedBox(height: 32),
             const CircularProgressIndicator(),
             const SizedBox(height: 24),
             Text(
-              'Attempt ${state.pollAttempt}',
+              '第 ${state.pollAttempt} 次尝试',
               style: const TextStyle(color: Colors.grey, fontSize: 12),
             ),
           ],
@@ -612,12 +608,12 @@ class _PairingScreenState extends ConsumerState<PairingScreen> {
             const Icon(Icons.check_circle, size: 64, color: Colors.green),
             const SizedBox(height: 16),
             Text(
-              'Paired with $serverName',
+              '已与 $serverName 配对',
               style: Theme.of(context).textTheme.titleLarge,
             ),
             const SizedBox(height: 8),
             const Text(
-              'Opening device screen...',
+              '正在打开设备页面…',
               style: TextStyle(color: Colors.grey),
             ),
           ],
@@ -641,13 +637,13 @@ class _PairingScreenState extends ConsumerState<PairingScreen> {
             const Icon(Icons.error_outline, size: 64, color: Colors.red),
             const SizedBox(height: 16),
             Text(
-              'Pairing Failed',
+              '配对失败',
               style: Theme.of(context).textTheme.titleLarge,
               textAlign: TextAlign.center,
             ),
             const SizedBox(height: 8),
             Text(
-              state.errorMessage ?? 'An unknown error occurred.',
+              state.errorMessage ?? '发生未知错误。',
               textAlign: TextAlign.center,
               style: const TextStyle(color: Colors.grey),
             ),
@@ -655,7 +651,7 @@ class _PairingScreenState extends ConsumerState<PairingScreen> {
             ElevatedButton.icon(
               onPressed: notifier.resetToScanning,
               icon: const Icon(Icons.qr_code_scanner),
-              label: const Text('Scan Again'),
+              label: const Text('重新扫描'),
             ),
           ],
         ),

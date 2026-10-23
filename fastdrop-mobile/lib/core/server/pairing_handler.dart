@@ -329,9 +329,9 @@ class PairingHandler {
         maxBytes: _maxPairRequestBytes,
       );
     } on RequestBodyTooLargeException {
-      return _error(413, 'INVALID_REQUEST', 'Pair request body is too large');
+      return _error(413, 'INVALID_REQUEST', '配对请求体过大');
     } catch (_) {
-      return _error(400, 'INVALID_REQUEST', 'Invalid JSON body');
+      return _error(400, 'INVALID_REQUEST', 'JSON 请求体无效');
     }
 
     final pairId = body['pairId'] as String?;
@@ -339,13 +339,13 @@ class PairingHandler {
     final deviceJson = body['device'] as Map<String, dynamic>?;
 
     if (pairId == null || token == null || deviceJson == null) {
-      return _error(400, 'INVALID_REQUEST', 'Missing pairId, token, or device');
+      return _error(400, 'INVALID_REQUEST', '缺少 pairId、token 或 device');
     }
 
     // Validate pair token.
     final tokenError = _validatePairToken(pairId, token);
     if (tokenError != null) {
-      return _error(403, tokenError, 'Pair token validation failed');
+      return _error(403, tokenError, '配对令牌校验失败');
     }
 
     final device = DeviceInfo.fromJson(deviceJson);
@@ -372,14 +372,14 @@ class PairingHandler {
         maxBytes: _maxPairRequestBytes,
       );
     } on RequestBodyTooLargeException {
-      return _error(413, 'INVALID_REQUEST', 'Pair request body is too large');
+      return _error(413, 'INVALID_REQUEST', '配对请求体过大');
     } catch (_) {
-      return _error(400, 'INVALID_REQUEST', 'Invalid JSON body');
+      return _error(400, 'INVALID_REQUEST', 'JSON 请求体无效');
     }
 
     final deviceJson = body['device'] as Map<String, dynamic>?;
     if (deviceJson == null) {
-      return _error(400, 'INVALID_REQUEST', 'Missing device');
+      return _error(400, 'INVALID_REQUEST', '缺少 device');
     }
 
     final device = DeviceInfo.fromJson(deviceJson);
@@ -402,7 +402,7 @@ class PairingHandler {
   Response handlePollRequest(Request request, String requestId) {
     final pairRequest = _requests[requestId];
     if (pairRequest == null) {
-      return _error(404, 'PAIR_TOKEN_INVALID', 'Pair request not found');
+      return _error(404, 'PAIR_TOKEN_INVALID', '配对请求不存在');
     }
 
     // Check for auto-expiry.
@@ -431,9 +431,9 @@ class PairingHandler {
     return _json(200, {
       'status': pairRequest.status,
       if (pairRequest.status == 'rejected')
-        'reason': 'User rejected the pairing request',
+        'reason': '用户在电脑端拒绝了配对请求',
       if (pairRequest.status == 'expired')
-        'reason': 'Pairing request timed out',
+        'reason': '配对请求已超时',
     });
   }
 

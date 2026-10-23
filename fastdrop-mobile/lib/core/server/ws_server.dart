@@ -68,6 +68,25 @@ class AuthenticatedPeer {
 typedef PeerConnectedCallback = void Function(AuthenticatedPeer peer);
 typedef PeerDisconnectedCallback = void Function(String sessionId);
 
+/// 一条收到的文本消息（text.send，spec §8.2）。
+class ServerTextMessage {
+  const ServerTextMessage({
+    required this.sessionId,
+    required this.deviceId,
+    required this.deviceName,
+    required this.textId,
+    required this.text,
+  });
+
+  final String sessionId;
+  final String deviceId;
+  final String deviceName;
+  final String textId;
+  final String text;
+}
+
+typedef TextReceivedCallback = void Function(ServerTextMessage message);
+
 /// WebSocket hub for the embedded FastDrop server.
 ///
 /// Implements the auth-first-message protocol, heartbeat (15s ping,
@@ -79,6 +98,7 @@ class WsServer {
     TransferReceiver? transferReceiver,
     this.onPeerConnected,
     this.onPeerDisconnected,
+    this.onTextReceived,
   })  : _sessionManager = sessionManager,
         _transferReceiver = transferReceiver;
 
@@ -86,6 +106,12 @@ class WsServer {
   final TransferReceiver? _transferReceiver;
   final PeerConnectedCallback? onPeerConnected;
   final PeerDisconnectedCallback? onPeerDisconnected;
+
+  /// 收到 text.send 时的回调（UI 层弹出文本对话框）。
+  final TextReceivedCallback? onTextReceived;
+
+  /// text.send 文本上限（UTF-8 字节数，与 Go 端 TextMaxBytes 一致）。
+  static const textMaxBytes = 64 * 1024;
 
   final HashMap<String, _WsConnection> _connections = HashMap();
 
@@ -271,6 +297,34 @@ class WsServer {
           {'transferId': transferId},
         );
         break;
+
+      case 'text.send': {
+        // 文本快传：已认证会话内直传短文本（不落盘）。只记长度，不记内容。
+        final payload = msg['payload'] as Map<String, dynamic>?;
+        final textId = payload?['textId'] as String? ?? '';
+        final text = payload?['text'] as String? ?? '';
+        final byteLen = utf8.encode(text).length;
+        if (textId.isEmpty || text.isEmpty || byteLen > textMaxBytes) {
+          _send(conn, {
+            'type': 'error',
+            'payload': {
+              'code': 'INVALID_REQUEST',
+              'message': 'Invalid text.send payload',
+            },
+          });
+          break;
+        }
+        _send(conn, {'type': 'text.ack', 'payload': {'textId': textId}});
+        final session = _sessionManager.get(conn.sessionId);
+        onTextReceived?.call(ServerTextMessage(
+          sessionId: conn.sessionId,
+          deviceId: session?.deviceId ?? conn.deviceId,
+          deviceName: session?.deviceName ?? '',
+          textId: textId,
+          text: text,
+        ));
+        break;
+      }
 
       default:
         debugPrint('[WsServer] Unknown message type: $type');
