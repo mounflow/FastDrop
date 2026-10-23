@@ -28,8 +28,9 @@
   --danger: #d23b42;    --danger-soft: #fff0f1;
   --warning: #b86d00;   --warning-soft: #fff7e8;
   /* 圆角（只允许这三档 + 50%） */
-  --radius-card: 12px;
-  --radius-control: 10px;
+  --radius-card: 10px;
+  --radius-control: 6px;
+  --radius-dialog: 14px;
   --radius-pill: 999px;
   /* 间距节奏 */
   --space-1: 4px; --space-2: 8px; --space-3: 12px; --space-4: 16px; --space-5: 24px;
@@ -378,7 +379,7 @@ button:focus-visible, input:focus-visible, select:focus-visible { outline: 3px s
 .success-text { color: var(--success); font-size: 12px; font-weight: 600; }
 
 .modal-overlay { position: fixed; inset: 0; z-index: 100; display: grid; place-items: center; padding: 32px; background: rgba(23, 26, 35, 0.48); backdrop-filter: blur(3px); }
-.modal-card { width: min(100%, 520px); max-height: min(720px, calc(100vh - 64px)); overflow: auto; padding: 20px; border: 1px solid var(--border); border-radius: var(--radius-card); background: var(--surface); box-shadow: var(--shadow-modal); }
+.modal-card { width: min(100%, 520px); max-height: min(720px, calc(100vh - 64px)); overflow: auto; padding: 20px; border: 1px solid var(--border); border-radius: var(--radius-dialog); background: var(--surface); box-shadow: var(--shadow-modal); }
 .connect-modal { width: min(100%, 760px); }
 .modal-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; margin-bottom: 16px; }
 .modal-heading h2 { margin: 0; font-size: 20px; line-height: 1.3; font-weight: 600; }

@@ -205,10 +205,9 @@ const desktopNetworkTitle = computed(() => {
 })
 
 const navItems: Array<{ id: DesktopPage; label: string; icon: string }> = [
-  { id: 'home', label: '首页', icon: 'home' },
+  { id: 'home', label: '发送', icon: 'home' },
+  { id: 'history', label: '传输', icon: 'history' },
   { id: 'devices', label: '设备', icon: 'phone' },
-  { id: 'history', label: '传输记录', icon: 'history' },
-  { id: 'received', label: '接收文件', icon: 'inbox' },
   { id: 'settings', label: '设置', icon: 'settings' },
 ]
 
@@ -1515,7 +1514,7 @@ onUnmounted(() => {
             </span>
           </div>
           <div class="text-send-actions">
-            <span class="text-send-status" :class="textState.tone">{{ textState.text }}</span>
+            <span v-if="textState.text" class="text-send-status" :class="textState.tone">{{ textState.text }}</span>
             <button
               class="primary-button"
               :disabled="!textDraft.trim() || selectedCount === 0"
