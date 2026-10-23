@@ -87,7 +87,7 @@ class _ReceiveConfirmDialogWatcherState
                 child: Text(
                   displayNames,
                   style: TextStyle(
-                    color: Colors.grey[600],
+                    color: Theme.of(ctx).colorScheme.onSurfaceVariant,
                     fontSize: 13,
                     fontFamily: 'monospace',
                   ),
@@ -97,7 +97,10 @@ class _ReceiveConfirmDialogWatcherState
             const SizedBox(height: 8),
             Text(
               '总大小: ${_formatBytes(transfer.totalBytes)}',
-              style: TextStyle(color: Colors.grey[500], fontSize: 12),
+              style: TextStyle(
+                color: Theme.of(ctx).colorScheme.onSurfaceVariant,
+                fontSize: 12,
+              ),
             ),
           ],
         ),

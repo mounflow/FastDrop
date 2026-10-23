@@ -3,6 +3,7 @@ import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import 'package:fastdrop_mobile/app/theme.dart';
 import 'package:fastdrop_mobile/core/discovery/device_discovery.dart';
 import 'package:fastdrop_mobile/core/discovery/discovery_providers.dart';
 import 'package:fastdrop_mobile/core/app_info.dart';
@@ -84,6 +85,8 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
 
   @override
   Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    final tokens = Theme.of(context).extension<FastDropTokens>()!;
     return Scaffold(
       appBar: AppBar(
         title: const Text('设置'),
@@ -100,15 +103,21 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
                 title: Text(_activeDevice!.name),
                 subtitle: Text(_activeDevice!.serverBaseUrl),
                 trailing: _activeDevice!.isExpired
-                    ? const Chip(
-                        label: Text('已过期', style: TextStyle(fontSize: 11)),
-                        backgroundColor: Colors.red,
-                        labelStyle: TextStyle(color: Colors.white),
+                    ? Chip(
+                        label: const Text(
+                          '已过期',
+                          style: TextStyle(fontSize: 11),
+                        ),
+                        backgroundColor: tokens.danger,
+                        labelStyle: TextStyle(color: scheme.onPrimary),
                       )
-                    : const Chip(
-                        label: Text('有效', style: TextStyle(fontSize: 11)),
-                        backgroundColor: Colors.green,
-                        labelStyle: TextStyle(color: Colors.white),
+                    : Chip(
+                        label: const Text(
+                          '有效',
+                          style: TextStyle(fontSize: 11),
+                        ),
+                        backgroundColor: tokens.success,
+                        labelStyle: TextStyle(color: scheme.onPrimary),
                       ),
               ),
             ),
@@ -122,13 +131,13 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
               padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
               child: OutlinedButton.icon(
                 onPressed: _confirmUnpair,
-                icon: const Icon(Icons.link_off, color: Colors.red),
-                label: const Text(
+                icon: Icon(Icons.link_off, color: tokens.danger),
+                label: Text(
                   '删除此设备',
-                  style: TextStyle(color: Colors.red),
+                  style: TextStyle(color: tokens.danger),
                 ),
                 style: OutlinedButton.styleFrom(
-                  side: const BorderSide(color: Colors.red),
+                  side: BorderSide(color: tokens.danger),
                 ),
               ),
             ),
@@ -147,12 +156,15 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
             trailing: const Icon(Icons.chevron_right),
             onTap: _changeDownloadDir,
           ),
-          const Padding(
-            padding: EdgeInsets.symmetric(horizontal: 16, vertical: 4),
+          Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
             child: Text(
               '从 PC 端接收的文件会保存到这里。'
               '留空使用默认位置。',
-              style: TextStyle(color: Colors.grey, fontSize: 12),
+              style: TextStyle(
+                color: scheme.onSurfaceVariant,
+                fontSize: 12,
+              ),
             ),
           ),
           const Divider(),
@@ -182,12 +194,15 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
               );
             },
           ),
-          const Padding(
-            padding: EdgeInsets.symmetric(horizontal: 16, vertical: 4),
+          Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
             child: Text(
               '开启后，本机将作为 FastDrop 服务器运行，'
               '其他设备（PC/手机）可以发现并向本机发送文件。',
-              style: TextStyle(color: Colors.grey, fontSize: 12),
+              style: TextStyle(
+                color: scheme.onSurfaceVariant,
+                fontSize: 12,
+              ),
             ),
           ),
           Consumer(
@@ -211,18 +226,19 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
             Padding(
               padding: const EdgeInsets.fromLTRB(16, 8, 16, 4),
               child: Material(
-                color: const Color(0xFFFFF7E6),
+                color: tokens.warningSoft,
                 borderRadius: BorderRadius.circular(10),
                 child: Padding(
                   padding: const EdgeInsets.all(12),
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
-                      const Row(
+                      Row(
                         children: [
-                          Icon(Icons.battery_saver, size: 18, color: Color(0xFFB45309)),
-                          SizedBox(width: 8),
-                          Expanded(
+                          Icon(Icons.battery_saver,
+                              size: 18, color: tokens.warning),
+                          const SizedBox(width: 8),
+                          const Expanded(
                             child: Text(
                               '为了保证后台接收稳定，建议将 FastDrop 加入电池优化白名单',
                               style: TextStyle(fontSize: 13),
@@ -265,11 +281,14 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
               );
             },
           ),
-          const Padding(
-            padding: EdgeInsets.symmetric(horizontal: 16, vertical: 4),
+          Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
             child: Text(
               '需要 PC 端也开启 mDNS 广播（PC 网页版 Settings → 局域网设备发现）。',
-              style: TextStyle(color: Colors.grey, fontSize: 12),
+              style: TextStyle(
+                color: scheme.onSurfaceVariant,
+                fontSize: 12,
+              ),
             ),
           ),
 
@@ -301,11 +320,14 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
               ],
             ),
           ),
-          const Padding(
-            padding: EdgeInsets.symmetric(horizontal: 16, vertical: 4),
+          Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
             child: Text(
               '输入 PC 的 IP 地址和端口直接连接，无需扫码或 mDNS。',
-              style: TextStyle(color: Colors.grey, fontSize: 12),
+              style: TextStyle(
+                color: scheme.onSurfaceVariant,
+                fontSize: 12,
+              ),
             ),
           ),
 
@@ -327,11 +349,14 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
               );
             },
           ),
-          const Padding(
-            padding: EdgeInsets.symmetric(horizontal: 16, vertical: 4),
+          Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
             child: Text(
               '关闭确认更方便，但同一局域网内的其他 FastDrop 设备也能发起配对。文件接收确认不受此开关影响。',
-              style: TextStyle(color: Colors.grey, fontSize: 12),
+              style: TextStyle(
+                color: scheme.onSurfaceVariant,
+                fontSize: 12,
+              ),
             ),
           ),
 
@@ -381,7 +406,9 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
           ),
           TextButton(
             onPressed: () => Navigator.of(ctx).pop(true),
-            style: TextButton.styleFrom(foregroundColor: Colors.red),
+            style: TextButton.styleFrom(
+              foregroundColor: Theme.of(context).colorScheme.error,
+            ),
             child: const Text('删除'),
           ),
         ],

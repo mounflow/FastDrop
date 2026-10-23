@@ -6,6 +6,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import 'package:fastdrop_mobile/app/routes.dart';
+import 'package:fastdrop_mobile/app/theme.dart';
 import 'package:fastdrop_mobile/core/errors/app_error.dart';
 import 'package:fastdrop_mobile/core/providers.dart';
 import 'package:fastdrop_mobile/core/storage/session_store.dart';
@@ -1064,9 +1065,9 @@ class _TransferScreenState extends ConsumerState<TransferScreen> {
     };
     final statusLabel = statusLabels[batch.status] ?? batch.status;
     final statusColor = switch (batch.status) {
-      'completed' => Colors.green,
-      'failed' => Colors.red,
-      'cancelled' => Colors.grey,
+      'completed' => theme.extension<FastDropTokens>()!.success,
+      'failed' => theme.colorScheme.error,
+      'cancelled' => theme.colorScheme.onSurfaceVariant,
       _ => theme.colorScheme.primary,
     };
     final progress = batch.totalBytes > 0
@@ -1120,7 +1121,8 @@ class _TransferScreenState extends ConsumerState<TransferScreen> {
             const SizedBox(height: 2),
             Text(
               '${batch.failedFiles} 个失败',
-              style: theme.textTheme.bodySmall?.copyWith(color: Colors.red),
+              style: theme.textTheme.bodySmall
+                  ?.copyWith(color: theme.colorScheme.error),
             ),
           ],
           if (batch.currentFileName != null &&
@@ -1194,7 +1196,8 @@ class _TransferScreenState extends ConsumerState<TransferScreen> {
             const SizedBox(height: 8),
             Text(
               batch.errorMessage!,
-              style: theme.textTheme.bodySmall?.copyWith(color: Colors.red),
+              style: theme.textTheme.bodySmall
+                  ?.copyWith(color: theme.colorScheme.error),
             ),
           ],
         ],
@@ -1296,8 +1299,8 @@ class _TransferScreenState extends ConsumerState<TransferScreen> {
                       ),
                       Text(
                         '发送到 ${item.peerName}',
-                        style: theme.textTheme.bodySmall
-                            ?.copyWith(color: Colors.grey),
+                        style: theme.textTheme.bodySmall?.copyWith(
+                            color: theme.colorScheme.onSurfaceVariant),
                       ),
                     ],
                   ),
@@ -1379,7 +1382,9 @@ class _TransferScreenState extends ConsumerState<TransferScreen> {
                       onPressed: () => notifier.cancelTransfer(key),
                       icon: const Icon(Icons.cancel, size: 18),
                       label: const Text('取消'),
-                      style: TextButton.styleFrom(foregroundColor: Colors.red),
+                      style: TextButton.styleFrom(
+                        foregroundColor: theme.colorScheme.error,
+                      ),
                     ),
                   ],
                 ),
@@ -1396,7 +1401,7 @@ class _TransferScreenState extends ConsumerState<TransferScreen> {
                         child: Text(
                           '会话已失效，请重新配对',
                           style: theme.textTheme.bodySmall?.copyWith(
-                            color: Colors.red,
+                            color: theme.colorScheme.error,
                           ),
                           maxLines: 2,
                           overflow: TextOverflow.ellipsis,
@@ -1407,7 +1412,7 @@ class _TransferScreenState extends ConsumerState<TransferScreen> {
                         child: Text(
                           item.errorMessage!,
                           style: theme.textTheme.bodySmall?.copyWith(
-                            color: Colors.red,
+                            color: theme.colorScheme.error,
                           ),
                           maxLines: 2,
                           overflow: TextOverflow.ellipsis,
@@ -1450,25 +1455,27 @@ class _TransferScreenState extends ConsumerState<TransferScreen> {
   // ---------------------------------------------------------------------------
 
   Color _statusColor(String status) {
+    final scheme = Theme.of(context).colorScheme;
+    final tokens = Theme.of(context).extension<FastDropTokens>()!;
     switch (status) {
       case 'transferring':
-        return Colors.blue;
+        return scheme.primary;
       case 'paused':
         return Colors.orange;
       case 'verifying':
         return Colors.purple;
       case 'completed':
-        return Colors.green;
+        return tokens.success;
       case 'cancelled':
-        return Colors.grey;
+        return scheme.onSurfaceVariant;
       case 'failed':
-        return Colors.red;
+        return scheme.error;
       case 'waiting_accept':
         return Colors.amber;
       case 'preparing':
         return Colors.teal;
       default:
-        return Colors.grey;
+        return scheme.onSurfaceVariant;
     }
   }
 

@@ -79,14 +79,17 @@ class _PairConfirmDialogWatcherState
                 '平台: ${request.device.platform}\n'
                 '${request.viaDiscover ? '来源: mDNS 自动发现' : '来源: 扫码配对'}',
                 style: TextStyle(
-                  color: Colors.grey[600],
+                  color: Theme.of(ctx).colorScheme.onSurfaceVariant,
                   fontSize: 13,
                 ),
               ),
               const SizedBox(height: 8),
               Text(
                 '接受后，该设备可以向本机发送文件。',
-                style: TextStyle(color: Colors.grey[500], fontSize: 12),
+                style: TextStyle(
+                  color: Theme.of(ctx).colorScheme.onSurfaceVariant,
+                  fontSize: 12,
+                ),
               ),
             ],
           ),

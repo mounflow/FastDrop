@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import 'package:fastdrop_mobile/app/theme.dart';
 import 'package:fastdrop_mobile/core/discovery/device_discovery.dart';
 import 'package:fastdrop_mobile/core/discovery/discovery_providers.dart';
 import 'package:fastdrop_mobile/core/storage/session_store.dart';
@@ -51,7 +52,7 @@ class NearbyDevicesSheet extends ConsumerWidget {
                 width: 40,
                 height: 4,
                 decoration: BoxDecoration(
-                  color: Colors.grey.shade300,
+                  color: theme.colorScheme.outline,
                   borderRadius: BorderRadius.circular(2),
                 ),
               ),
@@ -126,16 +127,20 @@ class NearbyDevicesSheet extends ConsumerWidget {
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
-            Icon(Icons.search_off, size: 48, color: Colors.grey.shade400),
+            Icon(Icons.search_off,
+                size: 48, color: theme.colorScheme.outline),
             const SizedBox(height: 12),
             Text(
               '正在搜索附近的 FastDrop PC…',
-              style: TextStyle(color: Colors.grey.shade600),
+              style: TextStyle(color: theme.colorScheme.onSurfaceVariant),
             ),
             const SizedBox(height: 4),
             Text(
               '确保 PC 端已开启 mDNS 广播',
-              style: TextStyle(color: Colors.grey.shade400, fontSize: 12),
+              style: TextStyle(
+                color: theme.colorScheme.onSurfaceVariant,
+                fontSize: 12,
+              ),
             ),
           ],
         ),
@@ -174,6 +179,8 @@ class _NearbyDeviceTile extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final theme = Theme.of(context);
+    final scheme = theme.colorScheme;
+    final tokens = theme.extension<FastDropTokens>()!;
 
     // 查 DeviceStore 判断是否已配对（阶段 4：真正查存储）
     final pairedAsync = ref.watch(pairedDevicesProvider);
@@ -198,10 +205,11 @@ class _NearbyDeviceTile extends ConsumerWidget {
 
     return ListTile(
       leading: CircleAvatar(
-        backgroundColor: isPaired ? Colors.green.shade50 : Colors.grey.shade100,
+        backgroundColor:
+            isPaired ? tokens.successSoft : scheme.surfaceContainerHighest,
         child: Icon(
           _iconForPlatform(device.platform),
-          color: isPaired ? Colors.green : Colors.grey,
+          color: isPaired ? tokens.success : scheme.onSurfaceVariant,
         ),
       ),
       title: Text(
@@ -212,7 +220,8 @@ class _NearbyDeviceTile extends ConsumerWidget {
       ),
       subtitle: Text(
         '$displayUrl · 协议 v${device.protocolVersion}',
-        style: theme.textTheme.bodySmall?.copyWith(color: Colors.grey),
+        style: theme.textTheme.bodySmall
+            ?.copyWith(color: scheme.onSurfaceVariant),
       ),
       trailing: Chip(
         label: Text(
@@ -226,13 +235,13 @@ class _NearbyDeviceTile extends ConsumerWidget {
           style: const TextStyle(fontSize: 11),
         ),
         backgroundColor: isConnected
-            ? Colors.green
+            ? tokens.success
             : isConnecting
-                ? Colors.blue
+                ? scheme.primary
                 : isPaired
                     ? Colors.teal
                     : Colors.orange,
-        labelStyle: const TextStyle(color: Colors.white),
+        labelStyle: TextStyle(color: scheme.onPrimary),
         padding: EdgeInsets.zero,
         materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
         visualDensity: VisualDensity.compact,

@@ -3,6 +3,7 @@ import 'dart:convert';
 
 import 'package:flutter/material.dart';
 
+import 'package:fastdrop_mobile/app/theme.dart';
 import 'package:fastdrop_mobile/core/errors/app_error.dart';
 import 'package:fastdrop_mobile/core/network/http_client.dart';
 import 'package:fastdrop_mobile/core/platform/background_receive_service.dart';
@@ -241,11 +242,13 @@ class _HistoryScreenState extends State<HistoryScreen> {
   }
 
   Widget _buildTransferTile(ThemeData theme, TransferRow transfer) {
+    final tokens = theme.extension<FastDropTokens>()!;
     final statusColor = _statusColor(transfer.status);
     final sent = transfer.direction == 'client_to_server';
     final directionIcon = sent ? Icons.upload_rounded : Icons.download_rounded;
     final directionLabel = sent ? '发送' : '接收';
-    final directionColor = sent ? const Color(0xFF2F6BFF) : const Color(0xFF17864B);
+    final directionColor =
+        sent ? theme.colorScheme.primary : tokens.success;
 
     // 左滑露出「删除」按钮，**点按钮才删除**（滑到底直接删容易误删）。
     return SwipeRevealRow(
@@ -353,7 +356,7 @@ class _HistoryScreenState extends State<HistoryScreen> {
                       transfer.errorMessage ??
                           humanizeErrorCode(transfer.errorCode!),
                       style: theme.textTheme.bodySmall?.copyWith(
-                        color: Colors.red,
+                        color: theme.colorScheme.error,
                       ),
                     ),
                   ),
@@ -455,7 +458,9 @@ class _HistoryScreenState extends State<HistoryScreen> {
           ),
           TextButton(
             onPressed: () => Navigator.of(ctx).pop(true),
-            style: TextButton.styleFrom(foregroundColor: Colors.red),
+            style: TextButton.styleFrom(
+              foregroundColor: Theme.of(context).colorScheme.error,
+            ),
             child: const Text('清空'),
           ),
         ],
@@ -568,9 +573,9 @@ class _HistoryScreenState extends State<HistoryScreen> {
             width: 80,
             child: Text(
               label,
-              style: const TextStyle(
+              style: TextStyle(
                 fontSize: 12,
-                color: Colors.grey,
+                color: Theme.of(context).colorScheme.onSurfaceVariant,
               ),
             ),
           ),
@@ -586,15 +591,17 @@ class _HistoryScreenState extends State<HistoryScreen> {
   }
 
   Color _statusColor(String status) {
+    final scheme = Theme.of(context).colorScheme;
+    final tokens = Theme.of(context).extension<FastDropTokens>()!;
     switch (status) {
       case 'completed':
-        return Colors.green;
+        return tokens.success;
       case 'failed':
-        return Colors.red;
+        return scheme.error;
       case 'cancelled':
-        return Colors.grey;
+        return scheme.onSurfaceVariant;
       case 'transferring':
-        return Colors.blue;
+        return scheme.primary;
       default:
         return Colors.orange;
     }

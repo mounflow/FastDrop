@@ -170,6 +170,7 @@ class _FilePickerScreenState extends ConsumerState<FilePickerScreen>
 
   Widget _buildRecipientSelector(
       ThemeData theme, MultiDeviceConnectionState connections) {
+    final tokens = theme.extension<FastDropTokens>()!;
     return Container(
       width: double.infinity,
       padding: const EdgeInsets.fromLTRB(16, 12, 16, 10),
@@ -217,7 +218,9 @@ class _FilePickerScreenState extends ConsumerState<FilePickerScreen>
                   avatar: Icon(
                     connected ? Icons.circle : Icons.circle_outlined,
                     size: 10,
-                    color: connected ? Colors.green : Colors.grey,
+                    color: connected
+                        ? tokens.success
+                        : theme.colorScheme.onSurfaceVariant,
                   ),
                   label: Text(connected ? device.name : '${device.name}（离线）'),
                 );
@@ -260,7 +263,7 @@ class _FilePickerScreenState extends ConsumerState<FilePickerScreen>
               Text(
                 '直接发送网址、验证码、API key 等短文本',
                 style: theme.textTheme.bodySmall
-                    ?.copyWith(color: AppTheme.textSecondary),
+                    ?.copyWith(color: theme.colorScheme.onSurfaceVariant),
               ),
               const SizedBox(height: 10),
               TextField(
@@ -287,8 +290,8 @@ class _FilePickerScreenState extends ConsumerState<FilePickerScreen>
                     '$bytes / ${WsServer.textMaxBytes} 字节',
                     style: theme.textTheme.bodySmall?.copyWith(
                       color: overLimit
-                          ? AppTheme.danger
-                          : AppTheme.textSecondary,
+                          ? theme.extension<FastDropTokens>()!.danger
+                          : theme.colorScheme.onSurfaceVariant,
                     ),
                   ),
                   if (_textPendingAcks > 0) ...[
@@ -315,8 +318,8 @@ class _FilePickerScreenState extends ConsumerState<FilePickerScreen>
                   blockedReason,
                   style: theme.textTheme.bodySmall?.copyWith(
                     color: blockedIsError
-                        ? AppTheme.danger
-                        : AppTheme.textSecondary,
+                        ? theme.extension<FastDropTokens>()!.danger
+                        : theme.colorScheme.onSurfaceVariant,
                   ),
                 ),
               ],
@@ -463,7 +466,8 @@ class _FilePickerScreenState extends ConsumerState<FilePickerScreen>
             ),
             subtitle: Text(_formatBytes(file.size)),
             trailing: IconButton(
-              icon: const Icon(Icons.remove_circle_outline, color: Colors.red),
+              icon: Icon(Icons.remove_circle_outline,
+                  color: theme.colorScheme.error),
               onPressed: () => setState(() => _selected.removeAt(index)),
             ),
           );

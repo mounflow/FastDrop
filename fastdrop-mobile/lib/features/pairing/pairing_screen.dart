@@ -5,6 +5,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:mobile_scanner/mobile_scanner.dart';
 
+import 'package:fastdrop_mobile/app/theme.dart';
 import 'package:fastdrop_mobile/core/discovery/device_discovery.dart';
 import 'package:fastdrop_mobile/core/discovery/discovery_providers.dart';
 import 'package:fastdrop_mobile/core/app_info.dart';
@@ -554,6 +555,7 @@ class _PairingScreenState extends ConsumerState<PairingScreen> {
 
   Widget _buildPollingView(BuildContext context, PairingState state) {
     final serverName = state.qrPayload?.serverName ?? 'PC';
+    final scheme = Theme.of(context).colorScheme;
 
     return Center(
       child: Padding(
@@ -566,16 +568,19 @@ class _PairingScreenState extends ConsumerState<PairingScreen> {
               style: Theme.of(context).textTheme.titleLarge,
             ),
             const SizedBox(height: 16),
-            const Text(
+            Text(
               '等待电脑端确认…',
-              style: TextStyle(color: Colors.grey),
+              style: TextStyle(color: scheme.onSurfaceVariant),
             ),
             const SizedBox(height: 32),
             const CircularProgressIndicator(),
             const SizedBox(height: 24),
             Text(
               '第 ${state.pollAttempt} 次尝试',
-              style: const TextStyle(color: Colors.grey, fontSize: 12),
+              style: TextStyle(
+                color: scheme.onSurfaceVariant,
+                fontSize: 12,
+              ),
             ),
           ],
         ),
@@ -587,6 +592,8 @@ class _PairingScreenState extends ConsumerState<PairingScreen> {
 
   Widget _buildPairedView(BuildContext context, PairingState state) {
     final serverName = state.qrPayload?.serverName ?? 'PC';
+    final scheme = Theme.of(context).colorScheme;
+    final tokens = Theme.of(context).extension<FastDropTokens>()!;
 
     // Fire navigation exactly once after the frame is rendered.
     if (!_pairedNavigated) {
@@ -605,16 +612,16 @@ class _PairingScreenState extends ConsumerState<PairingScreen> {
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
-            const Icon(Icons.check_circle, size: 64, color: Colors.green),
+            Icon(Icons.check_circle, size: 64, color: tokens.success),
             const SizedBox(height: 16),
             Text(
               '已与 $serverName 配对',
               style: Theme.of(context).textTheme.titleLarge,
             ),
             const SizedBox(height: 8),
-            const Text(
+            Text(
               '正在打开设备页面…',
-              style: TextStyle(color: Colors.grey),
+              style: TextStyle(color: scheme.onSurfaceVariant),
             ),
           ],
         ),
@@ -627,6 +634,7 @@ class _PairingScreenState extends ConsumerState<PairingScreen> {
   Widget _buildErrorView(
       BuildContext context, WidgetRef ref, PairingState state) {
     final notifier = ref.read(pairingProvider.notifier);
+    final scheme = Theme.of(context).colorScheme;
 
     return Center(
       child: Padding(
@@ -634,7 +642,7 @@ class _PairingScreenState extends ConsumerState<PairingScreen> {
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
-            const Icon(Icons.error_outline, size: 64, color: Colors.red),
+            Icon(Icons.error_outline, size: 64, color: scheme.error),
             const SizedBox(height: 16),
             Text(
               '配对失败',
@@ -645,7 +653,7 @@ class _PairingScreenState extends ConsumerState<PairingScreen> {
             Text(
               state.errorMessage ?? '发生未知错误。',
               textAlign: TextAlign.center,
-              style: const TextStyle(color: Colors.grey),
+              style: TextStyle(color: scheme.onSurfaceVariant),
             ),
             const SizedBox(height: 32),
             ElevatedButton.icon(

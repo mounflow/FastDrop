@@ -1,3 +1,4 @@
+import 'package:fastdrop_mobile/app/theme.dart';
 import 'package:fastdrop_mobile/core/discovery/device_discovery.dart';
 import 'package:fastdrop_mobile/core/discovery/discovery_providers.dart';
 import 'package:fastdrop_mobile/core/storage/session_store.dart';
@@ -63,7 +64,12 @@ void main() {
             (ref) => _TestMultiDeviceConnectionNotifier(ref, connectionState),
           ),
         ],
-        child: const MaterialApp(home: Scaffold(body: NearbyDevicesSheet())),
+        // 语义色（success/warning）来自 AppTheme 的 FastDropTokens 扩展，
+        // 测试必须使用与真机相同的主题，否则 extension 为空。
+        child: MaterialApp(
+          theme: AppTheme.light,
+          home: const Scaffold(body: NearbyDevicesSheet()),
+        ),
       ),
     );
     await tester.pumpAndSettle();
@@ -92,7 +98,10 @@ void main() {
           ),
           pairedDevicesProvider.overrideWith((ref) async => []),
         ],
-        child: const MaterialApp(home: Scaffold(body: NearbyDevicesSheet())),
+        child: MaterialApp(
+          theme: AppTheme.light,
+          home: const Scaffold(body: NearbyDevicesSheet()),
+        ),
       ),
     );
     await tester.pumpAndSettle();

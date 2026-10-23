@@ -940,7 +940,9 @@ class _DevicesScreenState extends ConsumerState<DevicesScreen>
           ),
           TextButton(
             onPressed: () => Navigator.of(ctx).pop(true),
-            style: TextButton.styleFrom(foregroundColor: Colors.red),
+            style: TextButton.styleFrom(
+              foregroundColor: Theme.of(context).colorScheme.error,
+            ),
             child: const Text('删除'),
           ),
         ],
@@ -1016,12 +1018,12 @@ class _DevicesScreenState extends ConsumerState<DevicesScreen>
               width: 34,
               height: 34,
               decoration: BoxDecoration(
-                color: AppTheme.primary,
+                color: Theme.of(context).colorScheme.primary,
                 borderRadius: BorderRadius.circular(11),
               ),
-              child: const Icon(
+              child: Icon(
                 Icons.swap_horiz_rounded,
-                color: Colors.white,
+                color: Theme.of(context).colorScheme.onPrimary,
                 size: 22,
               ),
             ),
@@ -1090,6 +1092,8 @@ class _DevicesScreenState extends ConsumerState<DevicesScreen>
         .toList(growable: false);
     final selectedPeer = connState.selectedPeer;
     final networkInfo = ref.watch(localNetworkInfoProvider);
+    final scheme = Theme.of(context).colorScheme;
+    final tokens = Theme.of(context).extension<FastDropTokens>()!;
 
     return RefreshIndicator(
       onRefresh: _loadDevices,
@@ -1102,8 +1106,8 @@ class _DevicesScreenState extends ConsumerState<DevicesScreen>
           Container(
             padding: const EdgeInsets.all(18),
             decoration: BoxDecoration(
-              color: AppTheme.primary,
-              borderRadius: BorderRadius.circular(18),
+              color: Theme.of(context).colorScheme.primary,
+              borderRadius: BorderRadius.circular(AppTheme.radiusCard),
             ),
             child: Row(
               children: [
@@ -1114,9 +1118,9 @@ class _DevicesScreenState extends ConsumerState<DevicesScreen>
                     color: Colors.white.withValues(alpha: 0.16),
                     borderRadius: BorderRadius.circular(16),
                   ),
-                  child: const Icon(
+                  child: Icon(
                     Icons.phone_android_rounded,
-                    color: Colors.white,
+                    color: scheme.onPrimary,
                     size: 28,
                   ),
                 ),
@@ -1131,8 +1135,8 @@ class _DevicesScreenState extends ConsumerState<DevicesScreen>
                             : serverState.deviceName,
                         maxLines: 1,
                         overflow: TextOverflow.ellipsis,
-                        style: const TextStyle(
-                          color: Colors.white,
+                        style: TextStyle(
+                          color: scheme.onPrimary,
                           fontSize: 16,
                           fontWeight: FontWeight.w700,
                         ),
@@ -1142,8 +1146,8 @@ class _DevicesScreenState extends ConsumerState<DevicesScreen>
                         serverState.isRunning
                             ? '可被发现 · 端口 ${serverState.port}'
                             : '接收服务未运行',
-                        style: const TextStyle(
-                          color: Color(0xFFDCE2FF),
+                        style: TextStyle(
+                          color: scheme.onPrimary.withValues(alpha: 0.9),
                           fontSize: 12,
                         ),
                       ),
@@ -1160,24 +1164,24 @@ class _DevicesScreenState extends ConsumerState<DevicesScreen>
                               network.displayLabel,
                               maxLines: 2,
                               overflow: TextOverflow.ellipsis,
-                              style: const TextStyle(
-                                color: Color(0xFFDCE2FF),
+                              style: TextStyle(
+                                color: scheme.onPrimary.withValues(alpha: 0.9),
                                 fontSize: 11,
                               ),
                             ),
                           ),
                         ),
-                        loading: () => const Text(
+                        loading: () => Text(
                           '正在读取当前网络…',
                           style: TextStyle(
-                            color: Color(0xFFDCE2FF),
+                            color: scheme.onPrimary.withValues(alpha: 0.9),
                             fontSize: 11,
                           ),
                         ),
-                        error: (_, __) => const Text(
+                        error: (_, __) => Text(
                           '当前网络信息不可用',
                           style: TextStyle(
-                            color: Color(0xFFDCE2FF),
+                            color: scheme.onPrimary.withValues(alpha: 0.9),
                             fontSize: 11,
                           ),
                         ),
@@ -1190,16 +1194,16 @@ class _DevicesScreenState extends ConsumerState<DevicesScreen>
                       const EdgeInsets.symmetric(horizontal: 9, vertical: 5),
                   decoration: BoxDecoration(
                     color: serverState.isRunning
-                        ? const Color(0xFFD6F2E3)
-                        : const Color(0xFFFFF0F1),
-                    borderRadius: BorderRadius.circular(999),
+                        ? tokens.successSoft
+                        : tokens.dangerSoft,
+                    borderRadius: BorderRadius.circular(AppTheme.radiusPill),
                   ),
                   child: Text(
                     serverState.isRunning ? '在线' : '离线',
                     style: TextStyle(
                       color: serverState.isRunning
-                          ? const Color(0xFF176F4A)
-                          : const Color(0xFFB72E35),
+                          ? tokens.success
+                          : tokens.danger,
                       fontSize: 11,
                       fontWeight: FontWeight.w600,
                     ),
@@ -1314,12 +1318,13 @@ class _DevicesScreenState extends ConsumerState<DevicesScreen>
   }
 
   Widget _buildOverviewEmptyState() {
+    final scheme = Theme.of(context).colorScheme;
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 28),
       decoration: BoxDecoration(
-        color: Colors.white,
-        borderRadius: BorderRadius.circular(16),
-        border: Border.all(color: AppTheme.border),
+        color: scheme.surface,
+        borderRadius: BorderRadius.circular(AppTheme.radiusCard),
+        border: Border.all(color: scheme.outline),
       ),
       child: Column(
         children: [
@@ -1327,12 +1332,12 @@ class _DevicesScreenState extends ConsumerState<DevicesScreen>
             width: 54,
             height: 54,
             decoration: BoxDecoration(
-              color: AppTheme.primaryLight,
+              color: scheme.primaryContainer,
               borderRadius: BorderRadius.circular(16),
             ),
-            child: const Icon(
+            child: Icon(
               Icons.devices_other_rounded,
-              color: AppTheme.primaryDark,
+              color: scheme.primary,
             ),
           ),
           const SizedBox(height: 14),
@@ -1363,16 +1368,20 @@ class _DevicesScreenState extends ConsumerState<DevicesScreen>
   }) {
     final connected = status == MultiConnectionStatus.connected;
     final connecting = status == MultiConnectionStatus.connecting;
+    final scheme = Theme.of(context).colorScheme;
+    final tokens = Theme.of(context).extension<FastDropTokens>()!;
     return Material(
-      color: selected ? AppTheme.primaryLight : Colors.white,
+      color: selected ? scheme.primaryContainer : scheme.surface,
       shape: RoundedRectangleBorder(
-        borderRadius: BorderRadius.circular(16),
+        borderRadius: BorderRadius.circular(AppTheme.radiusCard),
         side: BorderSide(
-          color: selected ? const Color(0xFFBEC9FF) : AppTheme.border,
+          color: selected
+              ? scheme.primary.withValues(alpha: 0.4)
+              : scheme.outline,
         ),
       ),
       child: InkWell(
-        borderRadius: BorderRadius.circular(16),
+        borderRadius: BorderRadius.circular(AppTheme.radiusCard),
         onTap: () => ref
             .read(multiDeviceConnectionProvider.notifier)
             .switchToDevice(device),
@@ -1384,12 +1393,12 @@ class _DevicesScreenState extends ConsumerState<DevicesScreen>
                 width: 48,
                 height: 48,
                 decoration: BoxDecoration(
-                  color: AppTheme.primaryLight,
+                  color: scheme.primaryContainer,
                   borderRadius: BorderRadius.circular(15),
                 ),
-                child: const Icon(
+                child: Icon(
                   Icons.computer_rounded,
-                  color: AppTheme.primaryDark,
+                  color: scheme.primary,
                 ),
               ),
               const SizedBox(width: 14),
@@ -1410,8 +1419,8 @@ class _DevicesScreenState extends ConsumerState<DevicesScreen>
                       overflow: TextOverflow.ellipsis,
                       style: Theme.of(context).textTheme.bodySmall?.copyWith(
                             color: errorMessage == null
-                                ? AppTheme.textSecondary
-                                : AppTheme.danger,
+                                ? scheme.onSurfaceVariant
+                                : tokens.danger,
                           ),
                     ),
                   ],
@@ -1421,11 +1430,11 @@ class _DevicesScreenState extends ConsumerState<DevicesScreen>
                 padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 5),
                 decoration: BoxDecoration(
                   color: connected
-                      ? const Color(0xFFD6F2E3)
+                      ? tokens.successSoft
                       : connecting
-                          ? const Color(0xFFFFF7E8)
-                          : const Color(0xFFF1F3F8),
-                  borderRadius: BorderRadius.circular(999),
+                          ? tokens.warningSoft
+                          : scheme.surfaceContainerHighest,
+                  borderRadius: BorderRadius.circular(AppTheme.radiusPill),
                 ),
                 child: Text(
                   // 能力可见：本机持有对方会话且连接在线 = 双向可发送
@@ -1437,10 +1446,10 @@ class _DevicesScreenState extends ConsumerState<DevicesScreen>
                           : '离线',
                   style: TextStyle(
                     color: connected
-                        ? const Color(0xFF176F4A)
+                        ? tokens.success
                         : connecting
-                            ? const Color(0xFF9B5C00)
-                            : AppTheme.textSecondary,
+                            ? tokens.warning
+                            : scheme.onSurfaceVariant,
                     fontSize: 11,
                     fontWeight: FontWeight.w600,
                   ),
@@ -1470,11 +1479,11 @@ class _DevicesScreenState extends ConsumerState<DevicesScreen>
                       value: 'repair',
                       child: Text('重新配对'),
                     ),
-                  const PopupMenuItem(
+                  PopupMenuItem(
                     value: 'delete',
                     child: Text(
                       '删除设备',
-                      style: TextStyle(color: AppTheme.danger),
+                      style: TextStyle(color: tokens.danger),
                     ),
                   ),
                 ],
@@ -1489,11 +1498,13 @@ class _DevicesScreenState extends ConsumerState<DevicesScreen>
 
   Widget _buildIncomingPeerCard(AuthenticatedPeer peer) {
     final isPhone = peer.platform == 'android' || peer.platform == 'ios';
+    final scheme = Theme.of(context).colorScheme;
+    final tokens = Theme.of(context).extension<FastDropTokens>()!;
     return Material(
-      color: Colors.white,
+      color: scheme.surface,
       shape: RoundedRectangleBorder(
-        borderRadius: BorderRadius.circular(16),
-        side: const BorderSide(color: AppTheme.border),
+        borderRadius: BorderRadius.circular(AppTheme.radiusCard),
+        side: BorderSide(color: scheme.outline),
       ),
       child: Padding(
         padding: const EdgeInsets.all(16),
@@ -1503,12 +1514,12 @@ class _DevicesScreenState extends ConsumerState<DevicesScreen>
               width: 48,
               height: 48,
               decoration: BoxDecoration(
-                color: AppTheme.primaryLight,
+                color: scheme.primaryContainer,
                 borderRadius: BorderRadius.circular(15),
               ),
               child: Icon(
                 isPhone ? Icons.phone_android_rounded : Icons.computer_rounded,
-                color: AppTheme.primaryDark,
+                color: scheme.primary,
               ),
             ),
             const SizedBox(width: 14),
@@ -1551,13 +1562,13 @@ class _DevicesScreenState extends ConsumerState<DevicesScreen>
             Container(
               padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 5),
               decoration: BoxDecoration(
-                color: const Color(0xFFFFF7E8),
-                borderRadius: BorderRadius.circular(999),
+                color: tokens.warningSoft,
+                borderRadius: BorderRadius.circular(AppTheme.radiusPill),
               ),
-              child: const Text(
+              child: Text(
                 '仅接收',
                 style: TextStyle(
-                  color: Color(0xFF9B5C00),
+                  color: tokens.warning,
                   fontSize: 11,
                   fontWeight: FontWeight.w600,
                 ),
@@ -1607,7 +1618,7 @@ class _DevicesScreenState extends ConsumerState<DevicesScreen>
                         Text(
                           '${offer.files.length} 个文件',
                           style: theme.textTheme.bodySmall?.copyWith(
-                            color: Colors.grey,
+                            color: theme.colorScheme.onSurfaceVariant,
                           ),
                         ),
                       ],
@@ -1626,8 +1637,10 @@ class _DevicesScreenState extends ConsumerState<DevicesScreen>
                       children: [
                         TextButton(
                           onPressed: () => notifier.rejectOffer(offer),
-                          child: const Text('拒绝',
-                              style: TextStyle(color: Colors.red)),
+                          child: Text(
+                            '拒绝',
+                            style: TextStyle(color: theme.colorScheme.error),
+                          ),
                         ),
                         const SizedBox(width: 8),
                         ElevatedButton(
@@ -1649,6 +1662,7 @@ class _DevicesScreenState extends ConsumerState<DevicesScreen>
   Widget _buildActiveDownloads(MultiDeviceConnectionState state) {
     final notifier = ref.read(multiDeviceConnectionProvider.notifier);
     final theme = Theme.of(context);
+    final tokens = Theme.of(context).extension<FastDropTokens>()!;
     final hasFinished =
         state.activeDownloads.any((d) => d.status != 'downloading');
 
@@ -1692,12 +1706,13 @@ class _DevicesScreenState extends ConsumerState<DevicesScreen>
                       child: LinearProgressIndicator(
                         value: d.progress,
                         minHeight: 6,
-                        backgroundColor: Colors.grey.shade200,
+                        backgroundColor:
+                            theme.colorScheme.surfaceContainerHighest,
                         valueColor: AlwaysStoppedAnimation<Color>(
                           d.status == 'failed'
-                              ? Colors.red
+                              ? tokens.danger
                               : d.status == 'completed'
-                                  ? Colors.green
+                                  ? tokens.success
                                   : theme.colorScheme.primary,
                         ),
                       ),
@@ -1706,7 +1721,7 @@ class _DevicesScreenState extends ConsumerState<DevicesScreen>
                     Text(
                       '${_formatBytes(d.transferredBytes)} / ${_formatBytes(d.totalBytes)}',
                       style: theme.textTheme.bodySmall?.copyWith(
-                        color: Colors.grey,
+                        color: theme.colorScheme.onSurfaceVariant,
                       ),
                     ),
                     if (d.error != null)
@@ -1715,7 +1730,7 @@ class _DevicesScreenState extends ConsumerState<DevicesScreen>
                         child: Text(
                           d.error!,
                           style: theme.textTheme.bodySmall?.copyWith(
-                            color: Colors.red,
+                            color: tokens.danger,
                             fontSize: 11,
                           ),
                           maxLines: 2,
@@ -1734,7 +1749,7 @@ class _DevicesScreenState extends ConsumerState<DevicesScreen>
                               icon: const Icon(Icons.cancel, size: 16),
                               label: const Text('取消'),
                               style: TextButton.styleFrom(
-                                  foregroundColor: Colors.red),
+                                  foregroundColor: tokens.danger),
                             ),
                           ],
                         ),
@@ -1748,19 +1763,21 @@ class _DevicesScreenState extends ConsumerState<DevicesScreen>
   }
 
   Widget _downloadStatusChip(MultiActiveDownload d) {
+    final scheme = Theme.of(context).colorScheme;
+    final tokens = Theme.of(context).extension<FastDropTokens>()!;
     Color color;
     String label;
     switch (d.status) {
       case 'completed':
-        color = Colors.green;
+        color = tokens.success;
         label = '已完成';
         break;
       case 'failed':
-        color = Colors.red;
+        color = tokens.danger;
         label = '失败';
         break;
       default:
-        color = Colors.blue;
+        color = scheme.primary;
         label = '${(d.progress * 100).toInt()}%';
     }
     return Container(
