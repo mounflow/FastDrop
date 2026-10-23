@@ -44,7 +44,17 @@ const (
 	MsgTransferCompleted MessageType = "transfer.completed"
 	MsgSessionRevoked    MessageType = "session.revoked"
 	MsgError             MessageType = "error"
+
+	// Text transfer (registered in spec §8.2). Text rides the control
+	// channel directly — small payloads, no chunking, no disk.
+	MsgTextSend     MessageType = "text.send"
+	MsgTextAck      MessageType = "text.ack"
+	MsgTextReceived MessageType = "text.received"
 )
+
+// TextMaxBytes limits the UTF-8 byte length of a text.send payload
+// (same ceiling as the pair request; well under the 1 MB JSON cap).
+const TextMaxBytes = 64 * 1024
 
 // Envelope is the universal message wrapper (§8.1).
 type Envelope struct {

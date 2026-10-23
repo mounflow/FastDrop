@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"time"
 
 	"fastdrop-desktop/internal/database"
 	"fastdrop-desktop/internal/session"
@@ -27,6 +28,8 @@ func (r *Router) OnMessage(c *Client, env *Envelope) {
 	switch env.Type {
 	case MsgFileOffer:
 		r.handleFileOffer(c, env)
+	case MsgTextSend:
+		r.handleTextSend(c, env)
 	case MsgFileOfferAccept:
 		r.handleFileOfferAccept(c, env)
 	case MsgFileOfferReject:
@@ -205,6 +208,49 @@ func (r *Router) handleFileOffer(c *Client, env *Envelope) {
 		"transferId": res.TransferID,
 		"deviceName": "Phone",
 		"files":      offerFiles,
+	})
+}
+
+// TextSendPayload mirrors spec §8.3 text.send.
+type TextSendPayload struct {
+	TextID string `json:"textId"`
+	Text   string `json:"text"`
+}
+
+// handleTextSend delivers a short text message from an authenticated peer
+// to this session's UI clients (the Vue PC UI). Text rides the WS control
+// channel directly — no disk, no chunks. The text content itself is never
+// logged (only its length), per the security boundaries.
+func (r *Router) handleTextSend(c *Client, env *Envelope) {
+	var p TextSendPayload
+	if err := json.Unmarshal(env.Payload, &p); err != nil {
+		r.sendError(c, "INVALID_REQUEST", "malformed text.send payload")
+		return
+	}
+	if p.TextID == "" {
+		r.sendError(c, "INVALID_REQUEST", "missing textId")
+		return
+	}
+	textLen := len(p.Text)
+	if textLen == 0 {
+		r.sendError(c, "INVALID_REQUEST", "empty text")
+		return
+	}
+	if textLen > TextMaxBytes {
+		r.sendError(c, "INVALID_REQUEST", fmt.Sprintf("text too large: %d bytes (max %d)", textLen, TextMaxBytes))
+		return
+	}
+	log.Printf("[ws] text.send session=%s textId=%s bytes=%d", maskID(c.sessionID), maskID(p.TextID), textLen)
+	// Acknowledge to the sender.
+	ack, _ := NewEnvelope(MsgTextAck, map[string]any{"textId": p.TextID})
+	_ = c.sendEnvelope(ack)
+	// Push to this session's UI clients (e.g. the Vue PC UI). The sender
+	// also receives the echo and may ignore it.
+	r.pushTransferEvent(c.sessionID, MsgTextReceived, map[string]any{
+		"textId":     p.TextID,
+		"text":       p.Text,
+		"deviceName": "Phone",
+		"receivedAt": time.Now().UnixMilli(),
 	})
 }
 
