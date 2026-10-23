@@ -173,8 +173,10 @@ button { color: inherit; }
   background: var(--surface-muted);
 }
 
+.topbar h1 { margin: 0; color: var(--text-primary); font-size: 18px; line-height: 1.3; font-weight: 600; letter-spacing: -0.2px; }
+/* 弹窗内的引言标签与设备图标（首页已不再使用，弹窗仍在用） */
 .eyebrow { margin: 0 0 5px; color: var(--text-tertiary); font-size: 12px; font-weight: 500; line-height: 1.5; }
-.topbar h1 { margin: 0; color: var(--text-primary); font-size: 28px; line-height: 1.18; font-weight: 700; letter-spacing: -0.5px; }
+.device-avatar { display: grid; place-items: center; width: 46px; height: 46px; flex: 0 0 auto; border-radius: var(--radius-card); background: var(--accent-soft); color: var(--accent-hover); }
 .topbar-actions { display: flex; align-items: center; gap: 12px; }
 .online-pill { display: inline-flex; align-items: center; gap: 8px; padding: 8px 12px; border: 1px solid var(--border); border-radius: var(--radius-pill); background: var(--surface); color: var(--text-secondary); font-size: 12px; font-weight: 500; }
 
@@ -196,8 +198,7 @@ button { color: inherit; }
 .drop-panel.active { border-color: var(--accent); background: var(--accent-soft); transform: translateY(-1px); }
 .drop-icon, .empty-icon, .received-icon, .manual-icon { display: grid; place-items: center; flex: 0 0 auto; color: var(--accent-hover); background: var(--accent-soft); }
 .drop-icon { width: 56px; height: 56px; border-radius: var(--radius-card); }
-.drop-copy h2 { margin: 0; font-size: 20px; line-height: 1.3; font-weight: 600; }
-.drop-copy p { margin: 8px 0 0; color: var(--text-tertiary); font-size: 13px; line-height: 1.55; }
+.drop-copy h2 { margin: 0; font-size: 16px; line-height: 1.3; font-weight: 600; }
 .drop-actions { display: flex; align-items: center; gap: 8px; }
 
 .primary-button, .secondary-button, .tertiary-button, .text-button, .icon-button {
@@ -228,30 +229,32 @@ button:focus-visible, input:focus-visible, select:focus-visible { outline: 3px s
 
 .inline-notice { margin: 12px 4px 0; color: var(--accent-hover); font-size: 12px; line-height: 1.5; }
 
-.section-heading { display: flex; align-items: end; justify-content: space-between; margin: 32px 0 16px; }
-.section-heading h2 { margin: 0; font-size: 20px; line-height: 1.3; font-weight: 600; }
+.section-heading { display: flex; align-items: center; justify-content: space-between; margin: 20px 0 10px; }
+.section-heading h2 { margin: 0; font-size: 15px; line-height: 1.3; font-weight: 600; }
 .section-heading p { margin: 5px 0 0; color: var(--text-tertiary); font-size: 12px; }
 
-.device-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; }
-.device-card { position: relative; display: flex; align-items: center; gap: 12px; min-width: 0; min-height: 56px; padding: 16px; border: 1px solid var(--border); border-radius: var(--radius-card); background: var(--surface); text-align: left; cursor: pointer; }
-.device-card:hover { border-color: var(--border-strong); transform: translateY(-1px); }
-.device-card.selected { border-color: var(--accent); background: var(--accent-soft); }
-.device-card.offline { opacity: 0.62; cursor: not-allowed; transform: none; }
-.device-avatar { display: grid; place-items: center; width: 46px; height: 46px; flex: 0 0 auto; border-radius: var(--radius-card); background: var(--accent-soft); color: var(--accent-hover); }
-.device-copy { min-width: 0; }
+/* 设备列表：单列扁平行。原先是 3 列卡片网格——局域网里通常只有 1–3 台
+   设备，网格比列表更占空间、也更难扫读。 */
+.device-list { display: grid; gap: 6px; }
+.device-row-wrap { position: relative; display: flex; align-items: center; gap: 6px; }
+.device-row { display: flex; align-items: center; gap: 10px; flex: 1; min-width: 0; min-height: 52px; padding: 0 12px; border: 1px solid var(--border); border-radius: var(--radius-control); background: var(--surface); text-align: left; cursor: pointer; transition: background var(--transition), border-color var(--transition); }
+.device-row:hover:not(:disabled) { border-color: var(--border-strong); background: var(--surface-sunken); }
+.device-row.selected { border-color: var(--accent); background: var(--accent-soft); }
+.device-row.offline { opacity: 0.55; cursor: not-allowed; }
+.device-dir { display: grid; place-items: center; width: 22px; height: 22px; flex: 0 0 auto; border-radius: 6px; background: var(--surface-sunken); color: var(--text-secondary); }
+.device-copy { display: grid; gap: 1px; min-width: 0; }
 .device-copy strong, .device-copy small { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.device-copy strong { font-size: 14px; font-weight: 600; }
-.device-copy small { margin-top: 5px; color: var(--text-tertiary); font-size: 11px; text-transform: capitalize; }
-.device-check { display: grid; place-items: center; width: 22px; height: 22px; margin-left: auto; border: 1px solid var(--border-strong); border-radius: var(--radius-control); color: var(--accent-on); }
-.device-card.selected .device-check { border-color: var(--accent); background: var(--accent); }
-.device-card-wrap { position: relative; min-width: 0; }
-.device-card-wrap .device-card { width: 100%; }
-.device-remove { position: absolute; top: 8px; right: 8px; width: 28px; height: 28px; border-color: transparent; border-radius: var(--radius-control); background: transparent; color: var(--text-tertiary); opacity: 0; transition: opacity var(--transition); }
-.device-card-wrap:hover .device-remove, .device-remove:focus-visible { opacity: 1; }
+.device-copy strong { font-size: 13px; font-weight: 500; line-height: 1.3; }
+.device-copy small { color: var(--text-tertiary); font-size: 11px; line-height: 1.3; text-transform: capitalize; }
+.device-check { display: grid; place-items: center; width: 18px; height: 18px; flex: 0 0 auto; margin-left: auto; border: 1px solid var(--border-strong); border-radius: 6px; color: var(--accent-on); }
+.device-row.selected .device-check { border-color: var(--accent); background: var(--accent); }
+.device-remove { flex: 0 0 auto; width: 28px; height: 28px; border-color: transparent; background: transparent; color: var(--text-tertiary); opacity: 0; transition: opacity var(--transition); }
+.device-row-wrap:hover .device-remove, .device-remove:focus-visible { opacity: 1; }
 .device-remove:hover { background: var(--danger-soft); color: var(--danger); }
 
-.selection-summary { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-top: 16px; padding: 12px 16px; border-radius: var(--radius-card); background: var(--accent-soft); color: var(--text-secondary); font-size: 12px; }
-.selection-summary strong { color: var(--accent-hover); }
+/* 选中摘要：只做一行状态陈述，不再做成又一块带底色的卡片 */
+.selection-summary { display: flex; align-items: center; gap: 12px; margin-top: 10px; padding: 0 2px; color: var(--text-tertiary); font-size: 12px; }
+.selection-summary strong { color: var(--text-primary); font-weight: 600; }
 
 .empty-state { display: flex; align-items: center; gap: 12px; padding: 16px; border: 1px solid var(--border); border-radius: var(--radius-card); background: var(--surface); }
 .empty-state.compact .primary-button { margin-left: auto; }
@@ -288,23 +291,46 @@ button:focus-visible, input:focus-visible, select:focus-visible { outline: 3px s
 .search-input { width: 260px; height: 40px; padding: 0 14px; border: 1px solid var(--border-strong); border-radius: var(--radius-control); background: var(--surface); color: var(--text-primary); font-size: 13px; }
 .search-input::placeholder { color: var(--text-disabled); }
 
-.history-list { display: grid; gap: 8px; }
-.history-row { display: grid; grid-template-columns: auto minmax(0, 1fr) auto auto auto; align-items: center; gap: 12px; min-height: 56px; padding: 10px 14px; border: 1px solid var(--border); border-radius: var(--radius-card); background: var(--surface); }
+/* 筛选：用独立 chip 而非两组长得一样的分段控件——两组控件同样式会让
+   用户分不清哪组管方向、哪组管状态。 */
+.filter-group { display: flex; align-items: center; gap: 2px; padding: 3px; border: 1px solid var(--border); border-radius: var(--radius-control); background: var(--surface); }
+.chip-filter { min-height: 26px; padding: 0 9px; border: 0; border-radius: 6px; background: transparent; color: var(--text-secondary); font-size: 12px; font-weight: 500; cursor: pointer; white-space: nowrap; transition: background var(--transition), color var(--transition); }
+.chip-filter:hover { background: var(--surface-sunken); color: var(--text-primary); }
+.chip-filter.active { background: var(--accent-soft); color: var(--accent-hover); font-weight: 600; }
+.toolbar-sep { width: 1px; height: 20px; background: var(--border); flex: 0 0 auto; }
+.ghost-button { display: inline-flex; align-items: center; gap: 6px; min-height: 32px; padding: 0 10px; border: 1px solid var(--border); border-radius: var(--radius-control); background: transparent; color: var(--text-secondary); font-size: 12px; font-weight: 500; cursor: pointer; white-space: nowrap; transition: background var(--transition), color var(--transition), border-color var(--transition); }
+.ghost-button:hover:not(:disabled) { background: var(--surface-sunken); color: var(--text-primary); }
+.ghost-button:disabled { opacity: 0.45; cursor: not-allowed; }
+.ghost-button.danger { color: var(--danger); border-color: var(--danger-soft); }
+.ghost-button.danger:hover:not(:disabled) { background: var(--danger-soft); color: var(--danger); }
+
+/* ── 传输列表 ──────────────────────────────────────────────
+   一条记录 = 一行 52px。方向用左侧 22px 小徽标 + 角色色表达，
+   不再用 42px 大方块再叠一个文字徽标（两处说同一件事）。
+   注意列数必须与实际子元素数一致：旧版 5 列装 6 个子元素，第 6 个
+   换行把行高撑到 170px、并在左下角留下一个空圆圈。 */
+.history-list { display: grid; gap: 6px; }
+.history-row { display: grid; grid-template-columns: 22px minmax(0, 1fr) 78px 96px auto 64px; align-items: center; gap: 12px; min-height: 52px; padding: 0 12px; border: 1px solid var(--border); border-radius: var(--radius-control); background: var(--surface); transition: background var(--transition); }
+.history-row:hover { background: var(--surface-sunken); }
+.history-dir { display: grid; place-items: center; width: 22px; height: 22px; border-radius: 6px; }
+.history-row.is-received .history-dir { background: var(--success-soft); color: var(--success); }
+.history-row.is-sent .history-dir { background: var(--accent-soft); color: var(--accent-hover); }
+.history-main { display: grid; gap: 1px; min-width: 0; }
+.history-main strong { overflow: hidden; font-size: 13px; font-weight: 500; line-height: 1.3; text-overflow: ellipsis; white-space: nowrap; }
+.history-main span { overflow: hidden; color: var(--text-tertiary); font-size: 11px; line-height: 1.3; text-overflow: ellipsis; white-space: nowrap; }
+.history-meta { color: var(--text-secondary); font-size: 12px; font-variant-numeric: tabular-nums; }
+/* 行内动作默认半隐，悬停/聚焦才显形——列表安静，操作仍可达 */
+.history-row .row-actions { opacity: 0; transition: opacity var(--transition); }
+.history-row:hover .row-actions, .history-row:focus-within .row-actions { opacity: 1; }
+.history-row .row-actions .icon-button { width: 28px; height: 28px; }
+/* 旧版 42px 方向块与尺寸列仍被「接收文件」页复用 */
 .history-direction { display: grid; place-items: center; width: 42px; height: 42px; border-radius: var(--radius-card); }
 .history-direction.received { background: var(--success-soft); color: var(--success); }
 .history-direction.sent { background: var(--accent-soft); color: var(--accent-hover); }
-/* 方向徽标：与手机端一致，列表里一眼看出是发送还是接收。
-   注意必须用 `.history-main .direction-badge`（两级类）——下面那条
-   `.history-main strong, .history-main span { display: block }` 的元素选择器
-   优先级更高，否则徽标会被拉成整行宽的长色块。 */
-.direction-badge { display: inline-block; margin-right: 6px; padding: 1px 7px; border-radius: var(--radius-pill); font-size: 11px; font-weight: 700; line-height: 1.6; vertical-align: middle; }
-.history-main .direction-badge { display: inline-block; width: auto; margin: 0 6px 0 0; font-size: 11px; }
-.direction-badge.received { background: var(--success-soft); color: var(--success); }
-.direction-badge.sent { background: var(--accent-soft); color: var(--accent-hover); }
-.history-main strong, .history-main span, .history-size strong, .history-size span { display: block; }
-.history-main strong, .history-size strong { font-size: 13px; font-weight: 600; }
-.history-main span, .history-size span { margin-top: 4px; color: var(--text-tertiary); font-size: 11px; }
 .history-size { min-width: 110px; text-align: right; }
+.history-size strong, .history-size span { display: block; }
+.history-size strong { font-size: 13px; font-weight: 600; }
+.history-size span { margin-top: 4px; color: var(--text-tertiary); font-size: 11px; }
 .history-action-button { display: inline-flex; align-items: center; gap: 6px; min-height: 32px; padding: 0 10px; border: 0; border-radius: var(--radius-control); background: var(--accent-soft); color: var(--accent-hover); font-size: 12px; font-weight: 600; cursor: pointer; white-space: nowrap; }
 .history-action-button:hover { background: var(--accent-soft-hover); }
 .history-action-error { margin: 0; color: var(--danger); font-size: 12px; }
@@ -383,7 +409,6 @@ button:focus-visible, input:focus-visible, select:focus-visible { outline: 3px s
   .page { width: calc(100% - 56px); }
   .drop-panel { grid-template-columns: auto minmax(220px, 1fr); }
   .drop-actions { grid-column: 2; }
-  .device-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 }
 
 @media (prefers-reduced-motion: reduce) {

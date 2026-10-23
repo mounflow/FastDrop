@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, onUnmounted, reactive, ref } from 'vue'
+import { computed, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
 import QRCode from 'qrcode'
 
 import AppIcon from './components/AppIcon.vue'
@@ -15,6 +15,7 @@ import {
   clearLocalTransferHistory,
   deleteLocalTransfer,
   listPairRequests,
+  restoreLocalDevice,
   deleteLocalDevice,
   pollPairStatus,
   rejectPair,
@@ -33,7 +34,7 @@ import {
 } from './composables/usePeerPool'
 import type { PairAccepted, QRPayload } from './types'
 
-type DesktopPage = 'home' | 'history' | 'received' | 'settings'
+type DesktopPage = 'home' | 'devices' | 'history' | 'received' | 'settings'
 
 interface WSEnvelope {
   type?: string
@@ -84,6 +85,21 @@ interface ActiveTransfer {
 const activePage = ref<DesktopPage>('home')
 const dragOver = ref(false)
 const uploadStatus = ref('')
+// 状态提示是一次性的：结束态显示几秒后自动消失。长期驻留会让页面永远
+// 挂着一句过期信息（"已自动重新连接…"曾一直留在首页）。
+let uploadStatusTimer: ReturnType<typeof setTimeout> | null = null
+watch(uploadStatus, (value) => {
+  if (uploadStatusTimer) {
+    clearTimeout(uploadStatusTimer)
+    uploadStatusTimer = null
+  }
+  if (!value) return
+  // 进行中的提示会被后续写入覆盖，不设过期时间。
+  if (value.startsWith('正在')) return
+  uploadStatusTimer = setTimeout(() => {
+    uploadStatus.value = ''
+  }, 5000)
+})
 const fileInput = ref<HTMLInputElement | null>(null)
 const folderInput = ref<HTMLInputElement | null>(null)
 const activeTransfers = ref<ActiveTransfer[]>([])
@@ -190,6 +206,7 @@ const desktopNetworkTitle = computed(() => {
 
 const navItems: Array<{ id: DesktopPage; label: string; icon: string }> = [
   { id: 'home', label: '首页', icon: 'home' },
+  { id: 'devices', label: '设备', icon: 'phone' },
   { id: 'history', label: '传输记录', icon: 'history' },
   { id: 'received', label: '接收文件', icon: 'inbox' },
   { id: 'settings', label: '设置', icon: 'settings' },
@@ -207,6 +224,7 @@ async function checkServiceHealth() {
 
 function selectPage(page: DesktopPage) {
   activePage.value = page
+  if (page === 'devices') void loadLocalDeviceRows()
   if (page === 'history' || page === 'received') void loadHistory()
   if (page === 'settings') void loadSettings()
 }
@@ -333,7 +351,9 @@ const textDeliveredCount = computed(
 /// 状态行与输入框、按钮同处一张卡片，无需滚动即可看到。
 const textState = computed<{ tone: string; text: string }>(() => {
   if (textNotice.value) return { tone: 'danger', text: textNotice.value }
-  if (selectedCount.value === 0) return { tone: 'neutral', text: '请先选择接收设备' }
+  // 未选设备与空闲态的文案留空：页面顶部的选中摘要已经说过同一件事，
+  // 这里再写一遍就是同一句话出现两次（这是"臃肿"的典型来源）。
+  if (selectedCount.value === 0) return { tone: 'neutral', text: '' }
   const total = textTargets.value.length
   if (textPhase.value === 'sending') {
     return {
@@ -351,7 +371,7 @@ const textState = computed<{ tone: string; text: string }>(() => {
       text: `${textDeliveredCount.value}/${total} 台已送达，${total - textDeliveredCount.value} 台未确认`,
     }
   }
-  return { tone: 'neutral', text: `已选 ${selectedCount.value} 台设备，可发送文本` }
+  return { tone: 'neutral', text: '' }
 })
 
 /// 逐设备投递标记（发送中 / 已送达 / 未确认）。
@@ -923,6 +943,32 @@ const deviceRows = computed<DeviceRow[]>(() => {
   return [...rows.values()]
 })
 
+// ── 设备页数据 ────────────────────────────────────────────────────────────
+// deviceRows 只由 WS peer 推导，而「已忽略」的设备没有任何活连接，因此永远
+// 不会出现在里面。这里直接读本机 devices 表，才能把 tombstone 行露出来并
+// 提供恢复入口（后端 POST /local/devices/{id}/restore 早已实现，只是没 UI）。
+const localDeviceRows = ref<LocalDeviceRow[]>([])
+const ignoredDeviceRows = computed(() =>
+  localDeviceRows.value.filter((dev) => dev.ignored),
+)
+async function loadLocalDeviceRows() {
+  try {
+    localDeviceRows.value = await listLocalDevices()
+  } catch {
+    // 服务未就绪：下次进入设备页再试
+  }
+}
+async function onRestoreDevice(dev: LocalDeviceRow) {
+  try {
+    await restoreLocalDevice(dev.deviceId)
+    uploadStatus.value = `已恢复 ${dev.deviceName}，正在重新连接`
+    await loadLocalDeviceRows()
+    void ensureMutualSessionWithDevices()
+  } catch (error) {
+    uploadStatus.value = `恢复失败：${readableError(error)}`
+  }
+}
+
 /// 已选择设备数 = 被选中的**可发送设备行**数量（不是原始 peer id 数量：
 /// 同一台设备可能有两条连接，此前会显示成"2 台设备已选择"）。
 /// 同时过滤掉历史遗留的不可发送 id（local-session）。
@@ -1382,14 +1428,14 @@ onUnmounted(() => {
     <main class="workspace">
       <header class="topbar">
         <div>
-          <p class="eyebrow">不登录，不上云，打开就传。</p>
-          <h1 v-if="activePage === 'home'">晚上好，{{ serverName }}</h1>
-          <h1 v-else-if="activePage === 'history'">传输记录</h1>
+          <h1 v-if="activePage === 'home'">发送</h1>
+          <h1 v-else-if="activePage === 'devices'">设备</h1>
+          <h1 v-else-if="activePage === 'history'">传输</h1>
           <h1 v-else-if="activePage === 'received'">接收文件</h1>
           <h1 v-else>设置</h1>
         </div>
         <div class="topbar-actions">
-          <span class="online-pill"><span class="status-dot online"></span>{{ connectedPeers.length }} 台设备在线</span>
+          <span class="online-pill" :title="`仅在局域网内点对点传输，不上云、不登录 · 当前 ${connectedPeers.length} 台设备在线`"><span class="status-dot online"></span>{{ connectedPeers.length }} 台在线</span>
           <button class="icon-button" title="刷新" @click="refreshDesktopState"><AppIcon name="refresh" :size="19" /></button>
         </div>
       </header>
@@ -1404,7 +1450,6 @@ onUnmounted(() => {
           <div class="drop-icon"><AppIcon name="upload" :size="30" /></div>
           <div class="drop-copy">
             <h2>拖放文件或文件夹到这里</h2>
-            <p>文件只在局域网内点对点传输，不经过云端。</p>
           </div>
           <div class="drop-actions">
             <button class="primary-button" @click="openFilePicker"><AppIcon name="file" :size="17" />选择文件</button>
@@ -1417,22 +1462,22 @@ onUnmounted(() => {
         <p v-if="uploadStatus" class="inline-notice">{{ uploadStatus }}</p>
 
         <div class="section-heading">
-          <div><h2>附近设备</h2><p>可多选，同时发送给多台设备</p></div>
+          <div><h2>设备</h2></div>
           <button class="text-button" @click="openConnectPanel"><AppIcon name="plus" :size="17" />添加设备</button>
         </div>
 
-        <div v-if="deviceRows.length" class="device-grid">
-          <div v-for="row in deviceRows" :key="row.key" class="device-card-wrap">
+        <div v-if="deviceRows.length" class="device-list">
+          <div v-for="row in deviceRows" :key="row.key" class="device-row-wrap">
             <button
-              :class="['device-card', { selected: row.sendPeerId ? selectedRecipientIds.includes(row.sendPeerId) : false, offline: !row.sendable }]"
+              :class="['device-row', { selected: row.sendPeerId ? selectedRecipientIds.includes(row.sendPeerId) : false, offline: !row.sendable }]"
               :disabled="!row.sendable"
               @click="row.sendPeerId && toggleRecipient(row.sendPeerId)"
             >
-              <span class="device-avatar"><AppIcon :name="row.platform === 'windows' ? 'computer' : 'phone'" :size="26" /></span>
+              <span class="device-dir"><AppIcon :name="row.platform === 'windows' ? 'computer' : 'phone'" :size="13" /></span>
               <span class="device-copy"><strong>{{ row.name }}</strong><small>{{ row.platform }} · {{ row.label }}</small></span>
-              <span class="device-check"><AppIcon v-if="row.sendPeerId && selectedRecipientIds.includes(row.sendPeerId)" name="check" :size="15" /></span>
+              <span class="device-check"><AppIcon v-if="row.sendPeerId && selectedRecipientIds.includes(row.sendPeerId)" name="check" :size="14" /></span>
             </button>
-            <button class="icon-button danger device-remove" title="删除设备（断开双向连接且不再自动重连）" @click="onRemoveRow(row)"><AppIcon name="x" :size="15" /></button>
+            <button class="icon-button danger device-remove" title="删除设备（断开双向连接且不再自动重连）" @click="onRemoveRow(row)"><AppIcon name="x" :size="14" /></button>
           </div>
         </div>
 
@@ -1443,15 +1488,13 @@ onUnmounted(() => {
         </div>
 
         <div class="selection-summary">
-          <span><strong>{{ selectedCount }}</strong> 台设备已选择</span>
-          <span v-if="selectedCount === 0">发送前请选择接收设备</span>
-          <span v-else>选择文件后将同时发送</span>
+          <span v-if="selectedCount === 0">未选择设备</span>
+          <span v-else><strong>{{ selectedCount }}</strong> 台设备已选</span>
         </div>
 
         <div class="text-send-card">
           <div class="text-send-heading">
             <h3>发送文本</h3>
-            <p>网址、验证码、API key 等短内容，选中设备后随发随达</p>
           </div>
           <textarea
             v-model="textDraft"
@@ -1512,33 +1555,70 @@ onUnmounted(() => {
         </section>
       </section>
 
+      <section v-else-if="activePage === 'devices'" class="page">
+        <div class="section-heading">
+          <div><h2>已配对设备</h2></div>
+          <button class="text-button" @click="openConnectPanel"><AppIcon name="plus" :size="17" />添加设备</button>
+        </div>
+        <div v-if="deviceRows.length" class="device-list">
+          <div v-for="row in deviceRows" :key="row.key" class="device-row-wrap">
+            <div :class="['device-row', { offline: !row.sendable }]">
+              <span class="device-dir"><AppIcon :name="row.platform === 'windows' ? 'computer' : 'phone'" :size="13" /></span>
+              <span class="device-copy"><strong>{{ row.name }}</strong><small>{{ row.platform }} · {{ row.label }}</small></span>
+            </div>
+            <button class="ghost-button danger" title="断开连接并加入忽略名单" @click="onRemoveRow(row)">删除</button>
+          </div>
+        </div>
+        <div v-else class="empty-state compact">
+          <div class="empty-icon"><AppIcon name="wifi" :size="28" /></div>
+          <div><h3>还没有配对设备</h3></div>
+          <button class="primary-button" @click="openConnectPanel">添加设备</button>
+        </div>
+
+        <div class="section-heading">
+          <div><h2>已忽略</h2></div>
+        </div>
+        <div v-if="ignoredDeviceRows.length" class="device-list">
+          <div v-for="dev in ignoredDeviceRows" :key="dev.deviceId" class="device-row-wrap">
+            <div class="device-row offline">
+              <span class="device-dir"><AppIcon :name="dev.platform === 'windows' ? 'computer' : 'phone'" :size="13" /></span>
+              <span class="device-copy"><strong>{{ dev.deviceName }}</strong><small>已删除 · 不会自动重连</small></span>
+            </div>
+            <button class="ghost-button" @click="onRestoreDevice(dev)">恢复</button>
+          </div>
+        </div>
+        <p v-else class="selection-summary">没有已忽略的设备。</p>
+      </section>
+
       <section v-else-if="activePage === 'history'" class="page">
         <div class="toolbar">
-          <div class="segmented-control">
-            <button v-for="filter in [['all','全部',''],['sent','发送','upload'],['received','接收','inbox']]" :key="filter[0]" :class="{ active: historyDirection === filter[0] }" @click="historyDirection = filter[0] as 'all' | 'sent' | 'received'">{{ filter[1] }}</button>
+          <div class="filter-group">
+            <button v-for="filter in [['all','全部'],['sent','发送'],['received','接收']]" :key="filter[0]" :class="['chip-filter', { active: historyDirection === filter[0] }]" @click="historyDirection = filter[0] as 'all' | 'sent' | 'received'">{{ filter[1] }}</button>
           </div>
-          <div class="segmented-control">
-            <button v-for="filter in [['all','全部状态'],['completed','已完成'],['failed','失败'],['cancelled','已取消']]" :key="filter[0]" :class="{ active: historyFilter === filter[0] }" @click="historyFilter = filter[0]">{{ filter[1] }}</button>
+          <span class="toolbar-sep"></span>
+          <div class="filter-group">
+            <button v-for="filter in [['all','全部状态'],['completed','已完成'],['failed','失败'],['cancelled','已取消']]" :key="filter[0]" :class="['chip-filter', { active: historyFilter === filter[0] }]" @click="historyFilter = filter[0]">{{ filter[1] }}</button>
           </div>
           <input v-model="historySearch" class="search-input" placeholder="搜索设备或任务编号" />
-          <button class="secondary-button" :disabled="historyClearing || !displayedHistory.length" @click="onClearHistory"><AppIcon name="trash" :size="16" />清空记录</button>
+          <button class="ghost-button" @click="copyDownloadPath"><AppIcon name="folder" :size="15" />打开下载目录</button>
+          <button class="ghost-button danger" :disabled="historyClearing || !displayedHistory.length" @click="onClearHistory"><AppIcon name="trash" :size="15" />清空</button>
         </div>
         <p v-if="historyActionError" class="history-action-error">{{ historyActionError }}</p>
         <div v-if="historyLoading" class="loading-state">正在加载传输记录…</div>
         <div v-else-if="displayedHistory.length" class="history-list">
-          <article v-for="item in displayedHistory" :key="`${item.peerId}:${item.id}`" class="history-row">
-            <div :class="['history-direction', isReceived(item) ? 'received' : 'sent']"><AppIcon :name="isReceived(item) ? 'inbox' : 'upload'" :size="20" /></div>
+          <article v-for="item in displayedHistory" :key="`${item.peerId}:${item.id}`" :class="['history-row', isReceived(item) ? 'is-received' : 'is-sent']">
+            <span class="history-dir"><AppIcon :name="isReceived(item) ? 'inbox' : 'upload'" :size="13" /></span>
             <div class="history-main">
-              <strong>
-                <span :class="['direction-badge', isReceived(item) ? 'received' : 'sent']">{{ isReceived(item) ? '接收' : '发送' }}</span>
-                {{ item.totalFiles }} 个文件
-              </strong>
-              <span>{{ isReceived(item) ? `来自 ${item.peerName || '设备'}` : `发送到 ${item.peerName || '设备'}` }}</span>
+              <strong>{{ item.totalFiles }} 个文件</strong>
+              <span>{{ isReceived(item) ? '来自' : '发送到' }} {{ item.peerName || '设备' }}</span>
             </div>
-            <div class="history-size"><strong>{{ formatSize(item.totalBytes) }}</strong><span>{{ formatDate(item.createdAt) }}</span></div>
+            <span class="history-meta">{{ formatSize(item.totalBytes) }}</span>
+            <span class="history-meta">{{ formatDate(item.createdAt) }}</span>
             <span :class="['status-badge', item.status]">{{ statusLabel(item.status) }}</span>
-            <button v-if="canRevealTransfer(item)" class="history-action-button" title="在资源管理器中显示" @click="revealTransfer(item)"><AppIcon name="folder" :size="15" />打开位置</button>
-            <button class="icon-button danger" title="删除这条记录（进行中的传输不可删除）" @click="onDeleteHistoryRow(item)"><AppIcon name="trash" :size="15" /></button>
+            <div class="row-actions">
+              <button v-if="canRevealTransfer(item)" class="icon-button" title="在资源管理器中显示" @click="revealTransfer(item)"><AppIcon name="folder" :size="14" /></button>
+              <button class="icon-button danger" title="删除这条记录（进行中的传输不可删除）" @click="onDeleteHistoryRow(item)"><AppIcon name="trash" :size="14" /></button>
+            </div>
           </article>
         </div>
         <div v-else class="empty-state page-empty">
