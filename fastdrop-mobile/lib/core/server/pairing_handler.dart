@@ -3,6 +3,7 @@ import 'dart:collection';
 import 'dart:convert';
 import 'dart:io';
 
+import 'package:flutter/foundation.dart';
 import 'package:fastdrop_mobile/core/security/token.dart';
 import 'package:fastdrop_mobile/core/server/request_reader.dart';
 import 'package:fastdrop_mobile/core/server/session_manager.dart';
@@ -330,8 +331,13 @@ class PairingHandler {
       );
     } on RequestBodyTooLargeException {
       return _error(413, 'INVALID_REQUEST', '配对请求体过大');
-    } catch (_) {
+    } on FormatException {
       return _error(400, 'INVALID_REQUEST', 'JSON 请求体无效');
+    } catch (e, st) {
+      // 只有「内容不合法」才该判 400。流读取失败或内部 bug 若也一律回 400，
+      // 真实故障会被伪装成「客户端请求有问题」而永久隐形，所以如实报 500。
+      debugPrint('[pairing_handler] 读取 JSON 请求体失败: $e\n$st');
+      return _error(500, 'INTERNAL_ERROR', '服务器内部错误');
     }
 
     final pairId = body['pairId'] as String?;
@@ -373,8 +379,13 @@ class PairingHandler {
       );
     } on RequestBodyTooLargeException {
       return _error(413, 'INVALID_REQUEST', '配对请求体过大');
-    } catch (_) {
+    } on FormatException {
       return _error(400, 'INVALID_REQUEST', 'JSON 请求体无效');
+    } catch (e, st) {
+      // 只有「内容不合法」才该判 400。流读取失败或内部 bug 若也一律回 400，
+      // 真实故障会被伪装成「客户端请求有问题」而永久隐形，所以如实报 500。
+      debugPrint('[pairing_handler] 读取 JSON 请求体失败: $e\n$st');
+      return _error(500, 'INTERNAL_ERROR', '服务器内部错误');
     }
 
     final deviceJson = body['device'] as Map<String, dynamic>?;

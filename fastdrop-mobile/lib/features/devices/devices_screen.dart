@@ -646,8 +646,8 @@ class _DevicesScreenState extends ConsumerState<DevicesScreen>
       unawaited(ref
           .read(multiDeviceConnectionProvider.notifier)
           .ensurePairedWithIncomingPeers());
-    } catch (_) {
-      debugPrint('[Devices] Failed to load paired devices');
+    } catch (e) {
+      debugPrint('[Devices] 加载已配对设备失败: $e');
       if (!mounted) return;
       setState(() {
         _loading = false;

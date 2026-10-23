@@ -52,7 +52,9 @@ class TransferHistoryStore {
           .where((row) => !deleted.contains(row.id))
           .toList()
         ..sort((a, b) => b.createdAt.compareTo(a.createdAt));
-    } catch (_) {
+    } catch (e) {
+      // 解析失败不能静默变空——用户会以为历史记录被清空了。
+      debugPrint('[TransferHistoryStore] 历史记录解析失败，按空列表继续: $e');
       return [];
     }
   }

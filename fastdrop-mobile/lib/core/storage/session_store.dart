@@ -141,7 +141,9 @@ class DeviceStore {
       return list
           .map((e) => Device.fromJson(e as Map<String, dynamic>))
           .toList();
-    } catch (_) {
+    } catch (e) {
+      // 存储损坏时不能静默当成「没有设备」——那会让用户以为配对数据丢了却无迹可查。
+      debugPrint('[SessionStore] 已配对设备解析失败，按空列表继续: $e');
       return [];
     }
   }

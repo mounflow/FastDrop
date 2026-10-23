@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 
@@ -41,6 +42,10 @@ class _FilePickerScreenState extends ConsumerState<FilePickerScreen>
   /// 只用于"发送中"反馈，不参与协议（WS 消息类型/字段均未改动）。
   int _textPendingAcks = 0;
 
+  /// 回执超时定时器：ack 始终不回时结束「发送中」态，避免卡片永久转圈。
+  /// 与 PC 端 TEXT_ACK_TIMEOUT_MS 对齐（8s）；纯 UI 侧，不重发、不改协议超时。
+  Timer? _textAckTimer;
+
   @override
   void initState() {
     super.initState();
@@ -63,6 +68,7 @@ class _FilePickerScreenState extends ConsumerState<FilePickerScreen>
 
   @override
   void dispose() {
+    _textAckTimer?.cancel();
     _tabController.dispose();
     _textController.dispose();
     super.dispose();
@@ -86,6 +92,7 @@ class _FilePickerScreenState extends ConsumerState<FilePickerScreen>
         // 全部确认返回后结束「发送中」态。
         if (mounted && _textPendingAcks > 0) {
           setState(() => _textPendingAcks -= 1);
+          if (_textPendingAcks == 0) _textAckTimer?.cancel();
         }
       }
     });
@@ -367,6 +374,18 @@ class _FilePickerScreenState extends ConsumerState<FilePickerScreen>
     _textController.clear();
     // 已投出 queued 条，等待 queued 个 text.ack；期间状态行显示「发送中…」。
     setState(() => _textPendingAcks = queued);
+    // ack 可能永远不回（对端掉线等）：超时后结束「发送中」并如实告知未确认数量，
+    // 否则卡片会永久停在转圈状态。只影响 UI，不重发、不改协议超时。
+    _textAckTimer?.cancel();
+    _textAckTimer = Timer(const Duration(seconds: 8), () {
+      if (!mounted) return;
+      final pending = _textPendingAcks;
+      if (pending <= 0) return;
+      setState(() => _textPendingAcks = 0);
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('$pending 台设备未回执确认，请检查连接')),
+      );
+    });
     ScaffoldMessenger.of(context).showSnackBar(
       SnackBar(
         content: Text(failed == 0

@@ -1,5 +1,6 @@
 import 'dart:convert';
 
+import 'package:flutter/foundation.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 /// 用户明确删除过的设备条目。
@@ -52,7 +53,9 @@ class IgnoredDeviceStore {
       return list
           .map((e) => IgnoredDeviceEntry.fromJson(e as Map<String, dynamic>))
           .toList();
-    } catch (_) {
+    } catch (e) {
+      // 忽略名单损坏时不能静默清空——否则被删除的设备会「悄悄复活」。
+      debugPrint('[IgnoredDeviceStore] 忽略名单解析失败，按空列表继续: $e');
       return [];
     }
   }
