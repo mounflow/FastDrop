@@ -166,6 +166,11 @@ class FastDropServerNotifier extends StateNotifier<ServerState> {
       );
       final historyStore = TransferHistoryStore();
 
+      // 忽略名单可能在别处被改写（上次运行遗留 / 外部清理），启动前强制重读一次。
+      // 否则内存快照会陈旧，出现「持久层已清除、内存仍判为忽略」，导致每一条
+      // pair/discover 都被要求人工确认——表现为 PC 永远停在「仅接收」。
+      await ref.read(ignoredDevicesProvider.notifier).refresh();
+
       final server = FastDropServer(
         localDevice: localDevice,
         requirePairConfirmation: _requirePairConfirmation,
@@ -184,6 +189,12 @@ class FastDropServerNotifier extends StateNotifier<ServerState> {
           // 观测到的地址（不依赖 mDNS）。
           debugPrint('[Server] Peer paired: ${device.deviceName} → reverse pair '
               '(${peerBaseUrl ?? 'no address'})');
+          // 用户显式接受 = 重新允许：解除「删除设备」留下的忽略标记。
+          // 否则删一次就永久无法免确认自动配对（spec 附录 A：非永久黑名单，
+          // 用户显式确认或主动配对后清除标记）。
+          unawaited(ref
+              .read(ignoredDevicesProvider.notifier)
+              .remove(deviceId: device.deviceId, name: device.deviceName));
           unawaited(ref
               .read(multiDeviceConnectionProvider.notifier)
               .ensureMutualSession(

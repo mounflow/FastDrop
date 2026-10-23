@@ -784,6 +784,7 @@ async function autoRepairRemotePair(baseUrl: string, name: string) {
       appVersion: '1.0.0',
     })
     const deadline = Date.now() + 35_000
+    let sawWaiting = false
     while (Date.now() < deadline) {
       await new Promise((resolve) => setTimeout(resolve, 800))
       const result = await pollPairStatus(request.requestId, baseUrl)
@@ -804,11 +805,21 @@ async function autoRepairRemotePair(baseUrl: string, name: string) {
         uploadStatus.value = `已自动重新连接 ${accepted.server.deviceName || remote.name}`
         return
       }
+      if (result.status === 'waiting_confirmation') sawWaiting = true
       if (result.status === 'rejected' || result.status === 'expired') break
     }
-    uploadStatus.value = `${name} 会话已失效，请重新添加设备`
+    // 区分两种结局：等人工确认（手机端要求确认，或该设备曾被删除进忽略名单）
+    // 与真正的会话失效——前者必须给出可执行指引，否则用户只会看到"仅接收"却不知为何。
+    uploadStatus.value = sawWaiting
+      ? `${name} 等待手机确认配对（请在手机上点「接受」）`
+      : `${name} 会话已失效，请重新添加设备`
   } catch (error) {
-    uploadStatus.value = `${name} 自动重连失败：${readableError(error)}`
+    // 自动重连是后台行为：设备离线属预期情况，设备卡片本身已展示离线态，
+    // 不该每轮轮询都用错误横幅打扰用户（"安静克制"）。
+    // 只有"连得上但配对失败"这类需要用户介入的情况才提示。
+    if (!isNetworkError(error)) {
+      uploadStatus.value = `${name} 自动重连失败：${readableError(error)}`
+    }
   }
 }
 
@@ -1205,6 +1216,15 @@ function statusLabel(status: string): string {
   return labels[status] || status
 }
 
+/// 浏览器 fetch 的网络层失败（设备离线 / 不可达）会抛这些原生英文消息，
+/// 不能直接甩给用户看。
+function isNetworkError(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error)
+  return /Failed to fetch|Load failed|NetworkError|ERR_NETWORK|ERR_CONNECTION/i.test(
+    message,
+  )
+}
+
 function readableError(error: unknown): string {
   const message = error instanceof Error ? error.message : String(error)
   const labels: Record<string, string> = {
@@ -1213,6 +1233,9 @@ function readableError(error: unknown): string {
     FILE_HASH_MISMATCH: '文件校验失败，请重试',
     NETWORK_UNREACHABLE: '无法连接该地址，请检查 IP 和端口',
     'Transfer cancelled': '已取消',
+    'Failed to fetch': '设备不在线或网络不可达',
+    'Load failed': '设备不在线或网络不可达',
+    'NetworkError when attempting to fetch resource.': '设备不在线或网络不可达',
   }
   return labels[message] || message || '操作失败，请重试'
 }
