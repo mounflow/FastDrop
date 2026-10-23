@@ -439,6 +439,53 @@ WHERE status IN ('created','waiting_accept','preparing','transferring','paused',
 
 ---
 
+## 问题 14：「删除设备」变成永久黑名单 —— PC 永远停在「仅接收」（2026-10-24，用户实测反馈）
+
+### 现象
+
+PC 端设备卡片长期显示：
+
+```
+FastDrop-VICHKX
+android · 仅接收（本机尚未取得发送权限）
+```
+
+而手机端同时显示 `FastDrop-PC-7EED6F / 双向可发送`。用户在手机上点「接受」后**仍然无效**，且手机每隔几秒就**重新弹一次**配对确认框。
+
+### 根因（三个缺陷叠加，缺一不可）
+
+| # | 缺陷 | 证据 |
+|---|---|---|
+| ① | **`IgnoredDevicesNotifier.remove()` 全仓库零调用**。`add()` 在删除设备时写入忽略名单（`devices_screen.dart:966`），但**没有任何代码会清除它** | `grep ignoredDevicesProvider` 只有 `add` 与读取，无 `remove` |
+| ② | **忽略名单是启动时的内存快照**。`IgnoredDevicesNotifier` 构造时 `refresh()` 一次，之后若持久层变化不会重读 | 手机 `ignored_devices.v1` 已为 `[]`，但 `discover` 仍返回 `waiting_confirmation`；**重启 App 后立刻返回 `accepted`** |
+| ③ | **PC 端把 `waiting_confirmation` 当失败**：`autoRepairRemotePair` 只处理 `status === 'accepted'`，遇到等待确认就静默退避，UI 只显示「仅接收」 | `DesktopApp.vue:790` 原仅有 `if (result.status === 'accepted')` |
+
+三者叠加成死循环：**删除一次 → 进忽略名单 → 每条 discover 都要求人工确认 → 用户点接受只对单个请求有效 → PC 5 秒后再发一条 → 又弹框**。
+
+这直接违反 spec 附录 A 的两条约定：「**非永久黑名单**」「用户显式确认或主动配对后清除标记」。
+
+### 修复
+
+- **手机端** `server_providers.dart`：
+  - `onPeerAccepted` 回调里新增 `ignoredDevicesProvider.notifier.remove(...)` —— 显式接受即视为"重新允许"
+  - `start()` 里在创建 server 前 `await ...refresh()` —— 消除内存快照陈旧
+- **PC 端** `DesktopApp.vue`：
+  - `waiting_confirmation` 被正确识别，超时后提示「等待手机确认配对（请在手机上点「接受」）」，不再误报「会话已失效」
+  - 新增 `isNetworkError()`，自动重连遇网络层失败（`Failed to fetch` / `Load failed` / `NetworkError`）**静默处理**，不再每 5 秒刷一条错误横幅
+  - `readableError()` 补映射浏览器原生网络错误为中文
+
+### 客观证据
+
+- 修复前：`POST /pair/discover` → `{"status":"waiting_confirmation"}`
+- 重启手机 App 后：`POST /pair/discover` → `{"status":"accepted"}`（内存重读生效）
+- 收敛后：PC `hasActiveSession: true`；手机界面 `FastDrop-PC-7EED6F / 双向可发送`；**不再弹确认框**
+
+### 教训
+
+**「写进持久层」不等于「运行时生效」**：凡是"内存缓存 + 持久层"双份状态，必须在关键决策点（这里 = 建服务端、判配对）前重读，否则会出现"文件看着对、行为还是错"的幽灵问题，且极难从现象反推。
+
+---
+
 ## 总结优先级
 
 | 优先级 | 问题 | 工作量 |
