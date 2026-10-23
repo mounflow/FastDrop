@@ -171,7 +171,17 @@ const peerPool = usePeerPool({
 
 const peerViews = peerPool.peers
 const selectedRecipientIds = peerPool.selectedIds
-const connectedPeers = computed(() => peerViews.value.filter((peer) => peer.status === 'connected'))
+/// 在线设备数：**按设备去重**，不是按连接数。
+/// 双向通道下同一台设备会同时存在两条 peer（我方→对端服务器、对端→我方服务器），
+/// 用连接数会把一台设备显示成两台——"2 台在线"实际只有 1 台。
+const onlineDeviceCount = computed(() => {
+  const devices = new Set<string>()
+  for (const peer of peerViews.value) {
+    if (peer.status !== 'connected') continue
+    devices.add(peer.deviceId || peer.name)
+  }
+  return devices.size
+})
 const liveTransfers = computed(() => activeTransfers.value.filter((item) => !isTerminal(item.status)))
 const completedTransfers = computed(() => activeTransfers.value.filter((item) => isTerminal(item.status)))
 const receivedTransfers = computed(() => transfers.value.filter((item) => item.direction === 'client_to_server'))
@@ -1437,7 +1447,7 @@ onUnmounted(() => {
           <h1 v-else>设置</h1>
         </div>
         <div class="topbar-actions">
-          <span class="online-pill" :title="`仅在局域网内点对点传输，不上云、不登录 · 当前 ${connectedPeers.length} 台设备在线`"><span class="status-dot online"></span>{{ connectedPeers.length }} 台在线</span>
+          <span class="online-pill" :title="`仅在局域网内点对点传输，不上云、不登录 · 当前 ${onlineDeviceCount} 台设备在线`"><span class="status-dot online"></span>{{ onlineDeviceCount }} 台在线</span>
           <button class="icon-button" title="刷新" @click="refreshDesktopState"><AppIcon name="refresh" :size="19" /></button>
         </div>
       </header>
