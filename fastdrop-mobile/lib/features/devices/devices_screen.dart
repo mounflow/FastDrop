@@ -1104,7 +1104,7 @@ class _DevicesScreenState extends ConsumerState<DevicesScreen>
           Text('我的设备', style: Theme.of(context).textTheme.titleSmall),
           const SizedBox(height: 10),
           Container(
-            padding: const EdgeInsets.all(18),
+            padding: const EdgeInsets.all(12),
             decoration: BoxDecoration(
               color: Theme.of(context).colorScheme.primary,
               borderRadius: BorderRadius.circular(AppTheme.radiusCard),
@@ -1112,19 +1112,19 @@ class _DevicesScreenState extends ConsumerState<DevicesScreen>
             child: Row(
               children: [
                 Container(
-                  width: 52,
-                  height: 52,
+                  width: 36,
+                  height: 36,
                   decoration: BoxDecoration(
                     color: Colors.white.withValues(alpha: 0.16),
-                    borderRadius: BorderRadius.circular(16),
+                    borderRadius: BorderRadius.circular(AppTheme.radiusControl),
                   ),
                   child: Icon(
                     Icons.phone_android_rounded,
                     color: scheme.onPrimary,
-                    size: 28,
+                    size: 20,
                   ),
                 ),
-                const SizedBox(width: 14),
+                const SizedBox(width: 10),
                 Expanded(
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
@@ -1295,13 +1295,6 @@ class _DevicesScreenState extends ConsumerState<DevicesScreen>
             _buildActiveDownloads(connState),
           ],
           const SizedBox(height: 20),
-          Center(
-            child: Text(
-              '文件仅在当前局域网内传输，不登录，不上云。',
-              style: Theme.of(context).textTheme.bodySmall,
-              textAlign: TextAlign.center,
-            ),
-          ),
         ],
       ),
     );

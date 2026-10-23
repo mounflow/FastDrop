@@ -9,6 +9,7 @@ import 'package:fastdrop_mobile/core/discovery/discovery_providers.dart';
 import 'package:fastdrop_mobile/core/app_info.dart';
 import 'package:fastdrop_mobile/core/platform/background_receive_service.dart';
 import 'package:fastdrop_mobile/core/server/server_providers.dart';
+import 'package:fastdrop_mobile/core/storage/ignored_device_providers.dart';
 import 'package:fastdrop_mobile/core/storage/session_store.dart';
 import 'package:fastdrop_mobile/core/providers.dart';
 import 'package:fastdrop_mobile/features/devices/multi_device_connection.dart';
@@ -358,6 +359,56 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
                 fontSize: 12,
               ),
             ),
+          ),
+
+          const Divider(),
+
+          // -- 已忽略设备 -----------------------------------------------------
+          // 「删除设备」会写入忽略名单（该设备不再免确认自动配对）。过去没有
+          // 任何入口能清除标记，导致删一次就等于永久拉黑。这里给出可恢复列表。
+          const _SectionHeader(title: '已忽略设备'),
+          Consumer(
+            builder: (context, ref, child) {
+              final ignored = ref.watch(ignoredDevicesProvider);
+              if (ignored.isEmpty) {
+                return Padding(
+                  padding:
+                      const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+                  child: Text(
+                    '没有已忽略的设备。删除过的设备会出现在这里，可随时恢复。',
+                    style: TextStyle(
+                      color: scheme.onSurfaceVariant,
+                      fontSize: 12,
+                    ),
+                  ),
+                );
+              }
+              return Column(
+                children: [
+                  for (final entry in ignored)
+                    ListTile(
+                      leading: const Icon(Icons.block_outlined),
+                      title: Text(entry.name),
+                      subtitle: const Text('已删除 · 不会自动重连'),
+                      trailing: TextButton(
+                        onPressed: () async {
+                          await ref
+                              .read(ignoredDevicesProvider.notifier)
+                              .remove(
+                                deviceId: entry.deviceId,
+                                name: entry.name,
+                              );
+                          if (!context.mounted) return;
+                          ScaffoldMessenger.of(context).showSnackBar(
+                            SnackBar(content: Text('已恢复 ${entry.name}')),
+                          );
+                        },
+                        child: const Text('恢复'),
+                      ),
+                    ),
+                ],
+              );
+            },
           ),
 
           const Divider(),

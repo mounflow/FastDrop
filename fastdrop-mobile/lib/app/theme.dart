@@ -14,8 +14,9 @@ class AppTheme {
   // ---------------------------------------------------------------------------
   // 圆角：只允许三档 + 圆形
   // ---------------------------------------------------------------------------
-  static const double radiusCard = 12;
-  static const double radiusControl = 10;
+  static const double radiusCard = 10;
+  static const double radiusControl = 6;
+  static const double radiusDialog = 14;
   static const double radiusPill = 999;
 
   // ---------------------------------------------------------------------------
@@ -270,7 +271,7 @@ class AppTheme {
         backgroundColor: surfaceColor,
         surfaceTintColor: Colors.transparent,
         shape: RoundedRectangleBorder(
-          borderRadius: BorderRadius.circular(radiusCard),
+          borderRadius: BorderRadius.circular(radiusDialog),
           side: BorderSide(color: borderColor),
         ),
       ),
