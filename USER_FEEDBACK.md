@@ -367,10 +367,83 @@ WHERE status IN ('created','waiting_accept','preparing','transferring','paused',
 
 ---
 
+## 问题 13：两端 UI 中英混排 + 文本快传入口位置反直觉（2026-10-06，用户实测反馈）
+
+### 现象
+
+用户反馈「功能都好着，但是需要优化下UI」，并明确表示「我找不到界面呀」。具体三类：
+
+1. **中英混排**。手机端页面标题 `Send Files`、标签页 `Images` / `Videos` / `All Files`、
+   提示 `Tap to browse images`、悬浮按钮 `Send (N)`、`N files selected` 全是英文，
+   而同屏新增的「发送到（可多选）」「粘贴」「发送文本」是中文。
+   `pairing_screen.dart` 近乎整页英文（AppBar、扫码引导、手动 IP 弹窗、轮询/成功/失败三态）；
+   `settings_screen.dart` 的 About 段与下载目录段、`devices_screen.dart` 的「接收」区块
+   （1590–1778 行：`Incoming Files`/`Reject`/`Accept`/`Downloads`/`Done`/`Failed`）整块英文。
+2. **文本快传入口位置反直觉**。PC 端 `.text-send-card` 排在「附近设备」选择器**上方**，
+   而发送按钮又要求先选设备 → 用户须先下滚选设备、再上滚点发送。
+   手机端的文本输入行被写在 `_buildRecipientSelector()`（「发送到（可多选）」容器）**内部**——
+   语义上"发文本"不属于"选择收件人"。
+3. **只有图标没有文字**。手机端粘贴/发送是两个 `IconButton`，只能靠长按 tooltip 才知道是什么。
+
+### 根因
+
+| # | 根因 |
+|---|------|
+| ① | **无 i18n 框架，字符串全部硬编码**。功能迭代时新文案写中文、旧骨架保留英文，长期累积成混排 |
+| ② | **相对时间是两份分叉实现**：`history_screen` 用英文 `Just now`/`Nm ago`，`transfer_screen` 用中文 `刚刚`/`N 分钟前`。中文化只做了一半 |
+| ③ | **交互控件排在其前提条件之前**：发送按钮在设备选择器上方，而按钮又要求先选设备 |
+| ④ | **"为什么不能点"只靠置灰表达**，用户看不出原因（这正是"找不到界面"的直接来源） |
+| ⑤ | 错误码在无 message 时**原样渲染英文常量**（`transfer_screen` 为 `errorMessage ?? errorCode`） |
+
+### 修复
+
+**文案（手机端 20 个文件）**
+- 全量中文化并按统一术语表替换：`Send Files`→发送文件、`Images/Videos/All Files`→图片/视频/所有文件、
+  `Tap to browse …`→点击浏览…、`Send (N)`→发送 (N)、`Cancel`→取消、`Retry`→重试、
+  `Incoming Files`→接收文件、`Reject/Accept`→拒绝/接收、`Download Directory`→下载目录、
+  `About/Version/License`→关于/版本/开源协议 等；`pairing_screen` 整页重写为中文。
+- **相对时间抽公共函数** `lib/shared/utils/relative_time.dart`：
+  `String? formatRelativeTime(DateTime, {DateTime? now})`，`≥7 天返回 null` 由调用方决定绝对格式
+  （两个调用点的绝对格式本就不同），彻底消灭②的分叉。
+- **错误码显示层映射** `humanizeErrorCode(String code)`（`lib/core/errors/app_error.dart`），
+  覆盖 30 个码；兜底 `_errorCodeMessages[code] ?? code`——映射不到**原样返回原始码**，不丢排障线索。
+  接入点：传输失败行、历史记录错误列、错误码行。
+
+**布局与可发现性**
+- PC 端把 `.text-send-card` 移到设备网格与 `.selection-summary` 之后，操作流变为
+  **选设备 → 摘要 → 输入 → 发送**。
+- 手机端把文本输入从 `_buildRecipientSelector()` 移出，独立成 `_buildTextSendCard` 卡片：
+  标题 + 说明 + 粘贴按钮 + `$bytes / 65536 字节` 计数（超限变红并禁用）+ **带文字的发送按钮**。
+- 未选设备时不再只置灰，而是显示可见文字「请先选择接收设备」（PC 端同步，四态分色）。
+
+**逐设备送达状态**
+- `text.ack` 的 payload **只带 `textId`、不含设备标识**（Go `router.go:245`、Flutter `ws_server.dart:317` 两端一致），
+  因此按**每台目标设备各生成一个 textId** 的方式做归属映射，而不是改协议加字段。
+
+### 客观证据
+
+| 检查 | 结果 |
+|---|---|
+| `flutter analyze` | 改动前后**均为 67 问题 / 0 error**；去掉行号后逐条比对，**新增 0、消失 0** |
+| `flutter test` | **105 条全绿**（原 103 + 新增 2 条相对时间测试） |
+| `go test ./...` | **12 个包全部 ok** |
+| 真机 UI dump | 设备页英文清零，仅剩 `FastDrop`（品牌）与 `Wi-Fi`（专有名词）；`发送文件` 取代 `Send Files` |
+| 隐藏耦合核验 | `file_utils.dart:63 'unnamed_file'`、`transfer_receiver.dart:326 'unnamed'`、`'PC'` 兜底名 9 处、错误码常量值 —— 全部按要求**未改动** |
+
+### 遗留（未在本次修复）
+
+- **Go 端错误消息仍为英文**（约 85 处 `writeError`）。手机用户收到 PC 的报错时仍会看到英文，
+  中文化只完成了手机侧。这是两端不对称，需单独处理。
+- 手机文本卡片在回执全部到达后不再显示结果（只靠已弹出的 SnackBar），PC 端有持久状态行，两端体验不一致。
+- 无 i18n 框架这件事没变：本次只是补齐了中文，若将来要多语言仍需一次专门改造。
+
+---
+
 ## 总结优先级
 
 | 优先级 | 问题 | 工作量 |
 |--------|------|--------|
+| 🔴 高 | #13 两端 UI 中英混排 + 文本快传入口反直觉 | ✅ 已修复并真机验证（详见问题 13；Go 侧错误消息待中文化） |
 | 🔴 高 | #1 相册重复照片 | 小（加 .nomedia） |
 | 🔴 高 | #3 刷新页面状态丢失 | 中（sessionStorage 持久化） |
 | 🔴 高 | #7 上传失败后 PC 端卡"传输中"无法取消 | 部分修复（断线自动失败+取消已通；③④待办） |
