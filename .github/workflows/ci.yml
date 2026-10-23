@@ -1,0 +1,76 @@
+name: CI
+
+# 最小门禁：只验证「能不能编译 + 测试是否全绿」。
+# 不构建 APK / EXE 安装包——那是发布流程，不是每次提交都要跑的。
+on:
+  push:
+    branches: [master]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  desktop:
+    name: Desktop / Go
+    runs-on: windows-latest
+    defaults:
+      run:
+        working-directory: fastdrop-desktop
+    steps:
+      - uses: actions/checkout@v4
+
+      # 前端产物 webdist/ 被 gitignore，而 Go 侧是 //go:embed webdist ——
+      # 所以必须先构建前端，否则 go build 会直接失败。
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: fastdrop-desktop/web/package-lock.json
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: fastdrop-desktop/go.mod
+          cache-dependency-path: fastdrop-desktop/go.sum
+
+      - name: Install web dependencies
+        working-directory: fastdrop-desktop/web
+        run: npm ci
+
+      # build.cmd 做四件事：npm build → 同步 dist 到 cmd/fastdrop/webdist
+      # → 准备 Windows 图标资源 → go build -tags desktop,production。
+      # 必须带 desktop,production 标签，否则 Wails UI 不可用（后端却正常，极难排查）。
+      - name: Build (Vue + webdist + Go)
+        run: .\build.cmd
+        shell: cmd
+
+      - name: Test
+        run: go test ./...
+
+  mobile:
+    name: Mobile / Flutter
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: fastdrop-mobile
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: 3.44.6
+          channel: stable
+          cache: true
+
+      - name: Install dependencies
+        run: flutter pub get
+
+      # 仓库存在 67 条既有 info/warning（0 error）。
+      # 不加这两个开关的话 flutter analyze 会因既有 info 恒返回 1，门禁一开始就是红的。
+      # 这里的目的是「拦住新引入的 error」，既有的 lint 建议不该阻断提交。
+      - name: Analyze (errors only)
+        run: flutter analyze --no-fatal-infos --no-fatal-warnings
+
+      - name: Test
+        run: flutter test
