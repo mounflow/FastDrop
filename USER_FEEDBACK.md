@@ -486,6 +486,50 @@ android · 仅接收（本机尚未取得发送权限）
 
 ---
 
+## 问题 15：「2 台在线」实际只有 1 台（2026-10-24，用户实测反馈）
+
+### 现象
+
+PC 顶栏显示「2 台在线」，但局域网里只连了 1 台手机。
+
+### 根因
+
+**统计口径错：数的是连接条数，不是设备数。**
+
+双向通道下，一台设备在 `peerPool` 里会同时存在**两条 peer**：
+
+| peer | 含义 |
+|---|---|
+| `remote-server` | 我方主动连到**对端服务器**（本机能发给对方 → 「双向可发送」） |
+| `local-session` | 对端连入**我方服务器**（对方能发给我 → `hasActiveSession`） |
+
+`connectedPeers = peerViews.filter(status === 'connected')` 数的是这两条连接，于是**同一台设备被计了两次**。
+
+### 修复
+
+改为按 `peer.deviceId`（缺省退化到 `peer.name`）去重后计数：
+
+```ts
+const onlineDeviceCount = computed(() => {
+  const devices = new Set<string>()
+  for (const peer of peerViews.value) {
+    if (peer.status !== 'connected') continue
+    devices.add(peer.deviceId || peer.name)
+  }
+  return devices.size
+})
+```
+
+### 客观证据
+
+同一环境下重启后，顶栏从「**2 台在线**」变为「**1 台在线**」，与 `/local/devices` 中真正持有会话的设备数一致。
+
+### 为什么手机端没有这个问题（对照）
+
+手机端用的是 `Set<String>` 去重：`onlineNames` 合并了出站 `connected` 与入站 `incomingPeers` 的**设备名**，天然不会重复计数。**同一个语义，两端实现方式不同 → 一端对一端错**，这正说明该语义应该被抽象成共享的判定口径，而不是各写各的。
+
+---
+
 ## 总结优先级
 
 | 优先级 | 问题 | 工作量 |
