@@ -259,6 +259,6 @@ func fileExists(path string) bool {
 
 // Errors.
 var (
-	ErrHashMismatch = errors.New("file hash mismatch")
-	ErrSkipConflict = errors.New("file already exists (skip policy)")
+	ErrHashMismatch = errors.New("文件校验失败（SHA-256 不一致）")
+	ErrSkipConflict = errors.New("文件已存在（skip 策略）")
 )

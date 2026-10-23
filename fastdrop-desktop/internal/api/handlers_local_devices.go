@@ -103,7 +103,7 @@ func (s *Server) handleDeleteLocalDevice(w http.ResponseWriter, r *http.Request)
 	ctx := r.Context()
 	deviceID := r.PathValue("deviceId")
 	if deviceID == "" {
-		writeError(w, http.StatusBadRequest, "INVALID_REQUEST", "deviceId is required", requestID(r))
+		writeError(w, http.StatusBadRequest, "INVALID_REQUEST", "缺少 deviceId 参数", requestID(r))
 		return
 	}
 
@@ -133,7 +133,7 @@ func (s *Server) handleDeleteLocalDevice(w http.ResponseWriter, r *http.Request)
 func (s *Server) handleRestoreLocalDevice(w http.ResponseWriter, r *http.Request) {
 	deviceID := r.PathValue("deviceId")
 	if deviceID == "" {
-		writeError(w, http.StatusBadRequest, "INVALID_REQUEST", "deviceId is required", requestID(r))
+		writeError(w, http.StatusBadRequest, "INVALID_REQUEST", "缺少 deviceId 参数", requestID(r))
 		return
 	}
 	if err := s.DB.SetDeviceIgnored(r.Context(), deviceID, false); err != nil {

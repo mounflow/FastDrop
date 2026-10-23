@@ -112,6 +112,6 @@ func Advance(from, to Status) (Status, error) {
 
 // ErrFileNotFound / ErrTransferNotFound — sentinel errors for callers.
 var (
-	ErrTransferNotFound = errors.New("transfer not found")
-	ErrFileNotFound     = errors.New("file not found")
+	ErrTransferNotFound = errors.New("传输任务不存在")
+	ErrFileNotFound     = errors.New("文件不存在")
 )

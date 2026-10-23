@@ -62,6 +62,8 @@
 | 🟡 中 | 手机「我的设备」地址显示错误 | 显示 `172.19.0.1`（Java `isSiteLocalAddress` 把 `172.16/12` 也算内网），实际 LAN 为 `192.168.1.29`。仅影响显示，但用户照它手填 IP 会失败 |
 | 🟢 低 | 巨型单体文件拆分 | `devices_screen.dart` 1656 行、`DesktopApp.vue` 1655 行、`transfer_screen.dart` 1478 行、`multi_device_connection.dart` 1119 行（后者职责过载：连接池 + 会话协商 + 上传下载调度 + 历史写入） |
 | 🟢 低 | 死代码清理 | `web/src/App.vue`（`main.ts` 只挂 `DesktopApp.vue`）、`ProgressCard`、`StatusBadge` 全仓库无引用。按项目规范「只提不删」，需明确同意后再删 |
+| 🟢 低 | 手机端 Dart server 措辞与 Go 端对齐 | Go 侧已统一为「请求体格式错误 / 分块内容过大 / 传输请求中没有文件 / 文件校验失败（SHA-256 不一致）」；手机 `transfer_receiver.dart` 仍是「JSON 请求体无效 / 分块请求体过大 / offer 中没有文件 / SHA-256 校验失败」，同一故障两端两种说法 |
+| 🟢 低 | `storage.ErrSkipConflict` 的错误码映射 | 目前走 `500 INTERNAL_ERROR`，语义上更像 409 或 200 + 跳过说明。属既有问题，非本轮引入 |
 
 ---
 

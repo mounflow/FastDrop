@@ -71,7 +71,7 @@ func (s *Server) handleUpdateSettings(w http.ResponseWriter, r *http.Request) {
 	reqID, _ := generateID()
 	var req updateSettingsRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeError(w, http.StatusBadRequest, "INVALID_REQUEST", "malformed JSON body", reqID)
+		writeError(w, http.StatusBadRequest, "INVALID_REQUEST", "请求体格式错误", reqID)
 		return
 	}
 
@@ -80,14 +80,14 @@ func (s *Server) handleUpdateSettings(w http.ResponseWriter, r *http.Request) {
 	if req.DeviceName != nil {
 		name := strings.TrimSpace(*req.DeviceName)
 		if name == "" || len([]rune(name)) > 40 || strings.ContainsFunc(name, unicode.IsControl) {
-			writeError(w, http.StatusBadRequest, "INVALID_REQUEST", "deviceName must be 1-40 visible characters", reqID)
+			writeError(w, http.StatusBadRequest, "INVALID_REQUEST", "设备名必须是 1-40 个可见字符", reqID)
 			return
 		}
 		if name != s.Cfg.Server.DeviceName {
 			s.Cfg.Server.DeviceName = name
 			if s.Discovery != nil {
 				if err := s.Discovery.SetDeviceName(name); err != nil {
-					writeError(w, http.StatusInternalServerError, "INTERNAL_ERROR", "failed to refresh mDNS name: "+err.Error(), reqID)
+					writeError(w, http.StatusInternalServerError, "INTERNAL_ERROR", "刷新 mDNS 名称失败："+err.Error(), reqID)
 					return
 				}
 			}
@@ -99,22 +99,22 @@ func (s *Server) handleUpdateSettings(w http.ResponseWriter, r *http.Request) {
 	if req.DownloadDirectory != nil {
 		dir := filepath.Clean(*req.DownloadDirectory)
 		if dir == "" {
-			writeError(w, http.StatusBadRequest, "INVALID_REQUEST", "downloadDirectory cannot be empty", reqID)
+			writeError(w, http.StatusBadRequest, "INVALID_REQUEST", "下载目录不能为空", reqID)
 			return
 		}
 		abs, err := filepath.Abs(dir)
 		if err != nil {
-			writeError(w, http.StatusBadRequest, "INVALID_REQUEST", "invalid path: "+err.Error(), reqID)
+			writeError(w, http.StatusBadRequest, "INVALID_REQUEST", "路径无效："+err.Error(), reqID)
 			return
 		}
 		// Verify the directory is usable (create if needed).
 		if err := os.MkdirAll(abs, 0o755); err != nil {
-			writeError(w, http.StatusBadRequest, "INVALID_REQUEST", "cannot create directory: "+err.Error(), reqID)
+			writeError(w, http.StatusBadRequest, "INVALID_REQUEST", "无法创建目录："+err.Error(), reqID)
 			return
 		}
 		// Hot-reload the storage manager.
 		if err := s.Storage.SetDownloadDir(abs); err != nil {
-			writeError(w, http.StatusInternalServerError, "INTERNAL_ERROR", "failed to set download dir: "+err.Error(), reqID)
+			writeError(w, http.StatusInternalServerError, "INTERNAL_ERROR", "设置下载目录失败："+err.Error(), reqID)
 			return
 		}
 		s.Cfg.Storage.DownloadDirectory = abs
@@ -125,7 +125,7 @@ func (s *Server) handleUpdateSettings(w http.ResponseWriter, r *http.Request) {
 	if req.ConflictPolicy != nil {
 		p := *req.ConflictPolicy
 		if p != "rename" && p != "overwrite" && p != "skip" {
-			writeError(w, http.StatusBadRequest, "INVALID_REQUEST", "conflictPolicy must be rename, overwrite, or skip", reqID)
+			writeError(w, http.StatusBadRequest, "INVALID_REQUEST", "冲突策略只能是 rename、overwrite 或 skip", reqID)
 			return
 		}
 		s.Cfg.Storage.ConflictPolicy = p
@@ -137,7 +137,7 @@ func (s *Server) handleUpdateSettings(w http.ResponseWriter, r *http.Request) {
 	if req.MdnsEnabled != nil {
 		if s.Discovery != nil {
 			if err := s.Discovery.SetEnabled(*req.MdnsEnabled); err != nil {
-				writeError(w, http.StatusInternalServerError, "INTERNAL_ERROR", "failed to toggle mDNS: "+err.Error(), reqID)
+				writeError(w, http.StatusInternalServerError, "INTERNAL_ERROR", "切换 mDNS 状态失败："+err.Error(), reqID)
 				return
 			}
 		}
@@ -157,7 +157,7 @@ func (s *Server) handleUpdateSettings(w http.ResponseWriter, r *http.Request) {
 
 	if changed {
 		if err := saveCfg(s.Cfg); err != nil {
-			writeError(w, http.StatusInternalServerError, "INTERNAL_ERROR", "failed to save config: "+err.Error(), reqID)
+			writeError(w, http.StatusInternalServerError, "INTERNAL_ERROR", "保存配置失败："+err.Error(), reqID)
 			return
 		}
 	}

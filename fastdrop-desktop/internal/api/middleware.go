@@ -61,7 +61,7 @@ func (s *Server) withPairRateLimit(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		ip := clientIP(r)
 		if !pairLimiter.allow(ip, time.Now()) {
-			writeError(w, http.StatusTooManyRequests, "TOO_MANY_REQUESTS", "rate limit exceeded; try again later", requestID(r))
+			writeError(w, http.StatusTooManyRequests, "TOO_MANY_REQUESTS", "请求过于频繁，请稍后重试", requestID(r))
 			return
 		}
 		next(w, r)
@@ -80,7 +80,7 @@ func withLocalDesktop(next http.HandlerFunc) http.HandlerFunc {
 		}
 		ip := net.ParseIP(host)
 		if ip == nil || !ip.IsLoopback() {
-			writeError(w, http.StatusForbidden, "SESSION_INVALID", "desktop settings are only available on this PC", requestID(r))
+			writeError(w, http.StatusForbidden, "SESSION_INVALID", "设置仅在运行本服务的那台电脑上可用", requestID(r))
 			return
 		}
 		next(w, r)

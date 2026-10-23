@@ -267,7 +267,7 @@ func (m *Manager) Cancel(ctx context.Context, transferID string) error {
 		return ErrTransferNotFound
 	}
 	if Status(t.Status).IsTerminal() {
-		return fmt.Errorf("transfer already terminal: %s", t.Status)
+		return fmt.Errorf("传输任务已处于 %s 状态", t.Status)
 	}
 	if _, err := Advance(Status(t.Status), StatusCancelled); err != nil {
 		// Some states (e.g. waiting_accept) cannot cancel directly; force
@@ -277,4 +277,4 @@ func (m *Manager) Cancel(ctx context.Context, transferID string) error {
 }
 
 // ErrHashMismatch is returned by CompleteFile when the SHA-256 doesn't match.
-var ErrHashMismatch = errors.New("file hash mismatch")
+var ErrHashMismatch = errors.New("文件校验失败（SHA-256 不一致）")

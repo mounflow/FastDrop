@@ -141,7 +141,7 @@ func withRecover(h http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		defer func() {
 			if rec := recover(); rec != nil {
-				writeError(w, http.StatusInternalServerError, "INTERNAL_ERROR", "internal server error", requestID(r))
+				writeError(w, http.StatusInternalServerError, "INTERNAL_ERROR", "服务器内部错误", requestID(r))
 			}
 		}()
 		h.ServeHTTP(w, r)
@@ -227,13 +227,13 @@ func (s *Server) withAuth(next http.HandlerFunc) http.HandlerFunc {
 
 		authHeader := r.Header.Get("Authorization")
 		if !strings.HasPrefix(authHeader, "Bearer ") {
-			writeError(w, http.StatusUnauthorized, "SESSION_INVALID", "missing bearer token", reqID)
+			writeError(w, http.StatusUnauthorized, "SESSION_INVALID", "缺少认证信息", reqID)
 			return
 		}
 		token := strings.TrimPrefix(authHeader, "Bearer ")
 		sessionID := r.Header.Get("X-Session-Id")
 		if sessionID == "" {
-			writeError(w, http.StatusUnauthorized, "SESSION_INVALID", "missing session id", reqID)
+			writeError(w, http.StatusUnauthorized, "SESSION_INVALID", "缺少认证信息", reqID)
 			return
 		}
 		ip := clientIP(r)
@@ -243,7 +243,7 @@ func (s *Server) withAuth(next http.HandlerFunc) http.HandlerFunc {
 		row, err := s.Session.Validate(r.Context(), sessionID, token, ip, false)
 		if err != nil {
 			code, status := sessionErrToHTTP(err)
-			writeError(w, status, code, "session rejected", reqID)
+			writeError(w, status, code, "会话无效或已过期", reqID)
 			return
 		}
 		r = withContext(r, ctxSessionID, row.ID)

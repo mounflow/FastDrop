@@ -186,7 +186,7 @@ func (m *Manager) CreateRequest(pairID string, dev ClientDevice) (*PairRequest, 
 		return nil, ErrTokenInvalid
 	}
 	if !t.Consumed {
-		return nil, fmt.Errorf("pair token not yet validated")
+		return nil, fmt.Errorf("配对令牌尚未校验")
 	}
 	reqID, err := security.NewUUID()
 	if err != nil {
@@ -254,7 +254,7 @@ func (m *Manager) Accept(requestID string, result AcceptResult) error {
 		return ErrRequestNotFound
 	}
 	if r.Status != StatusWaitingConfirmation {
-		return fmt.Errorf("pair request is in terminal state %q", r.Status)
+		return fmt.Errorf("配对请求已处于 %s 状态", r.Status)
 	}
 	if m.now().After(r.ExpiresAt) {
 		r.Status = StatusExpired
@@ -274,7 +274,7 @@ func (m *Manager) Reject(requestID, reason string) error {
 		return ErrRequestNotFound
 	}
 	if r.Status != StatusWaitingConfirmation {
-		return fmt.Errorf("pair request is in terminal state %q", r.Status)
+		return fmt.Errorf("配对请求已处于 %s 状态", r.Status)
 	}
 	r.Status = StatusRejected
 	r.RejectReason = reason
@@ -376,10 +376,10 @@ func (m *Manager) Cleanup() {
 //   ErrRequestNotFound    -> PAIR_REQUEST_EXPIRED
 //   ErrRequestExpired     -> PAIR_REQUEST_EXPIRED
 var (
-	ErrTokenInvalid      = errors.New("pair token invalid")
-	ErrTokenExpired      = errors.New("pair token expired")
-	ErrTokenAlreadyUsed  = errors.New("pair token already used")
-	ErrTokenLocked       = errors.New("pair token locked after repeated failures")
-	ErrRequestNotFound   = errors.New("pair request not found")
-	ErrRequestExpired    = errors.New("pair request expired")
+	ErrTokenInvalid      = errors.New("配对二维码无效")
+	ErrTokenExpired      = errors.New("配对二维码已过期")
+	ErrTokenAlreadyUsed  = errors.New("配对二维码已被使用")
+	ErrTokenLocked       = errors.New("配对尝试次数过多，请重新生成二维码")
+	ErrRequestNotFound   = errors.New("配对请求不存在")
+	ErrRequestExpired    = errors.New("配对请求已过期")
 )

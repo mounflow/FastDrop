@@ -33,11 +33,11 @@ type createTransferFile struct {
 func (s *Server) handleCreateTransfer(w http.ResponseWriter, r *http.Request) {
 	var body createTransferBody
 	if err := readJSON(r, &body); err != nil {
-		writeError(w, http.StatusBadRequest, "INVALID_REQUEST", "malformed body", requestID(r))
+		writeError(w, http.StatusBadRequest, "INVALID_REQUEST", "请求体格式错误", requestID(r))
 		return
 	}
 	if len(body.Files) == 0 {
-		writeError(w, http.StatusBadRequest, "INVALID_REQUEST", "no files", requestID(r))
+		writeError(w, http.StatusBadRequest, "INVALID_REQUEST", "传输请求中没有文件", requestID(r))
 		return
 	}
 	dir := transfer.DirClientToServer
@@ -120,11 +120,11 @@ func (s *Server) handleOfferTransfer(w http.ResponseWriter, r *http.Request) {
 	transferID := r.PathValue("transferId")
 	t, err := s.transferOwned(r.Context(), transferID, sessID)
 	if err != nil {
-		writeError(w, http.StatusForbidden, "SESSION_INVALID", "transfer not owned by session", requestID(r))
+		writeError(w, http.StatusForbidden, "SESSION_INVALID", "该传输任务属于其他会话", requestID(r))
 		return
 	}
 	if t.Direction != string(transfer.DirServerToClient) {
-		writeError(w, http.StatusConflict, "INVALID_REQUEST", "only server_to_client transfers can be offered", requestID(r))
+		writeError(w, http.StatusConflict, "INVALID_REQUEST", "只有 server_to_client 方向的传输可以发起 offer", requestID(r))
 		return
 	}
 	files, err := s.DB.ListTransferFiles(r.Context(), transferID)
@@ -172,7 +172,7 @@ func fileSizeByID(body createTransferBody, clientID string) int64 {
 }
 
 // errForbidden signals a cross-session access attempt.
-var errForbidden = errors.New("resource does not belong to caller session")
+var errForbidden = errors.New("该资源不属于当前会话")
 
 // transferOwned loads a transfer and verifies it belongs to callerSession.
 // Every transfer-scoped handler MUST gate on this so one paired device
@@ -212,9 +212,9 @@ func (s *Server) fileOwned(ctx context.Context, transferID, fileID, callerSessio
 func writeOwnedError(w http.ResponseWriter, r *http.Request, err error) {
 	switch {
 	case errors.Is(err, transfer.ErrTransferNotFound):
-		writeError(w, http.StatusNotFound, "TRANSFER_NOT_FOUND", "no such transfer", requestID(r))
+		writeError(w, http.StatusNotFound, "TRANSFER_NOT_FOUND", "传输任务不存在", requestID(r))
 	case errors.Is(err, transfer.ErrFileNotFound):
-		writeError(w, http.StatusNotFound, "FILE_NOT_FOUND", "no such file in transfer", requestID(r))
+		writeError(w, http.StatusNotFound, "FILE_NOT_FOUND", "传输任务中不存在该文件", requestID(r))
 	case errors.Is(err, errForbidden):
 		writeError(w, http.StatusForbidden, "PERMISSION_DENIED", err.Error(), requestID(r))
 	default:
@@ -269,7 +269,7 @@ func (s *Server) handleClearLocalTransferHistory(w http.ResponseWriter, r *http.
 func (s *Server) handleDeleteLocalTransfer(w http.ResponseWriter, r *http.Request) {
 	transferID := r.PathValue("transferId")
 	if transferID == "" {
-		writeError(w, http.StatusBadRequest, "INVALID_REQUEST", "transferId is required", requestID(r))
+		writeError(w, http.StatusBadRequest, "INVALID_REQUEST", "缺少 transferId 参数", requestID(r))
 		return
 	}
 	deleted, err := s.DB.DeleteTransfer(r.Context(), transferID)
@@ -279,7 +279,7 @@ func (s *Server) handleDeleteLocalTransfer(w http.ResponseWriter, r *http.Reques
 	}
 	if !deleted {
 		writeError(w, http.StatusConflict, "INVALID_REQUEST",
-			"transfer is still active and cannot be deleted", requestID(r))
+			"传输任务仍在进行中，无法删除", requestID(r))
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"transferId": transferID, "deleted": true})
@@ -348,7 +348,7 @@ func (s *Server) handleRetryTransfer(w http.ResponseWriter, r *http.Request) {
 	}
 	// §12: only failed (or an already-retrying) transfer may be retried.
 	if _, err := transfer.Advance(transfer.Status(t.Status), transfer.StatusRetrying); err != nil {
-		writeError(w, http.StatusConflict, "TRANSFER_NOT_ACTIVE", "cannot retry from state "+t.Status, requestID(r))
+		writeError(w, http.StatusConflict, "TRANSFER_NOT_ACTIVE", "传输任务处于 "+t.Status+" 状态，无法重试", requestID(r))
 		return
 	}
 	_ = s.DB.UpdateTransferStatus(r.Context(), t.ID, string(transfer.StatusRetrying), t.TransferredBytes, "", "")
@@ -387,7 +387,7 @@ func (s *Server) handlePutChunk(w http.ResponseWriter, r *http.Request) {
 	idxStr := r.PathValue("chunkIndex")
 	idx, err := strconv.Atoi(idxStr)
 	if err != nil || idx < 0 {
-		writeError(w, http.StatusBadRequest, "CHUNK_INDEX_INVALID", "bad chunk index", requestID(r))
+		writeError(w, http.StatusBadRequest, "CHUNK_INDEX_INVALID", "分块序号无效", requestID(r))
 		return
 	}
 	callerSession, _ := r.Context().Value(ctxSessionID).(string)
@@ -398,7 +398,7 @@ func (s *Server) handlePutChunk(w http.ResponseWriter, r *http.Request) {
 	}
 	// Reject chunks aimed at a transfer that has already finished.
 	if transfer.Status(t.Status).IsTerminal() {
-		writeError(w, http.StatusConflict, "TRANSFER_NOT_ACTIVE", "transfer is "+t.Status, requestID(r))
+		writeError(w, http.StatusConflict, "TRANSFER_NOT_ACTIVE", "传输任务已处于 "+t.Status+" 状态", requestID(r))
 		return
 	}
 	// §12: retrying → transferring when the next chunk arrives.
@@ -406,7 +406,7 @@ func (s *Server) handlePutChunk(w http.ResponseWriter, r *http.Request) {
 		_ = s.DB.UpdateTransferStatus(r.Context(), transferID, string(transfer.StatusTransferring), t.TransferredBytes, "", "")
 	}
 	if idx >= f.TotalChunks {
-		writeError(w, http.StatusBadRequest, "CHUNK_INDEX_INVALID", "chunk out of range", requestID(r))
+		writeError(w, http.StatusBadRequest, "CHUNK_INDEX_INVALID", "分块序号无效", requestID(r))
 		return
 	}
 	// Body size = at most chunkSize + small slack (spec §28.1). The reader
@@ -418,14 +418,14 @@ func (s *Server) handlePutChunk(w http.ResponseWriter, r *http.Request) {
 	sched := s.Transfer.Scheduler()
 	if sched != nil {
 		if err := sched.Acquire(r.Context(), fileID); err != nil {
-			writeError(w, http.StatusServiceUnavailable, "TOO_MANY_REQUESTS", "scheduler busy", requestID(r))
+			writeError(w, http.StatusServiceUnavailable, "TOO_MANY_REQUESTS", "当前并发已满，请稍后重试", requestID(r))
 			return
 		}
 		defer sched.Release(fileID)
 	}
 	data, err := io.ReadAll(r.Body)
 	if err != nil {
-		writeError(w, http.StatusRequestEntityTooLarge, "INVALID_REQUEST", "chunk too large", requestID(r))
+		writeError(w, http.StatusRequestEntityTooLarge, "INVALID_REQUEST", "分块内容过大", requestID(r))
 		return
 	}
 	if _, err := s.Storage.WriteChunk(transferID, fileID, idx, f.ChunkSize, data); err != nil {
@@ -500,7 +500,7 @@ func (s *Server) handleCompleteFile(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if body.Size > 0 && body.Size != f.TotalBytes {
-		writeError(w, http.StatusBadRequest, "FILE_SIZE_MISMATCH", "size mismatch", requestID(r))
+		writeError(w, http.StatusBadRequest, "FILE_SIZE_MISMATCH", "文件大小不一致", requestID(r))
 		return
 	}
 	// Verify bitmap is complete.
@@ -514,7 +514,7 @@ func (s *Server) handleCompleteFile(w http.ResponseWriter, r *http.Request) {
 		completedCount += popcountByte(b)
 	}
 	if completedCount != f.TotalChunks {
-		writeError(w, http.StatusBadRequest, "INVALID_REQUEST", "not all chunks received", requestID(r))
+		writeError(w, http.StatusBadRequest, "INVALID_REQUEST", "分块缺失", requestID(r))
 		return
 	}
 	// §12: If this is the last incomplete file, transition to verifying
@@ -537,14 +537,14 @@ func (s *Server) handleCompleteFile(w http.ResponseWriter, r *http.Request) {
 			// §12: verifying → failed. The transfer can never complete with
 			// a corrupt file, so terminalize it, notify, and drop all
 			// staged .part data.
-			_ = s.DB.UpdateTransferStatus(r.Context(), transferID, string(transfer.StatusFailed), t.TransferredBytes, "FILE_HASH_MISMATCH", "file hash mismatch")
+			_ = s.DB.UpdateTransferStatus(r.Context(), transferID, string(transfer.StatusFailed), t.TransferredBytes, "FILE_HASH_MISMATCH", "文件校验失败（SHA-256 不一致）")
 			s.pushWSEvent(callerSession, ws.MsgTransferFailed, map[string]any{
 				"transferId": transferID,
 				"fileId":     fileID,
-				"error":      "file hash mismatch",
+				"error":      "文件校验失败（SHA-256 不一致）",
 			})
 			_ = s.Storage.CleanupTransfer(transferID)
-			writeError(w, http.StatusBadRequest, "FILE_HASH_MISMATCH", "hash mismatch", requestID(r))
+			writeError(w, http.StatusBadRequest, "FILE_HASH_MISMATCH", "文件校验失败（SHA-256 不一致）", requestID(r))
 			return
 		}
 		writeError(w, http.StatusInternalServerError, "INTERNAL_ERROR", err.Error(), requestID(r))
@@ -671,24 +671,24 @@ func (s *Server) handleDownloadFile(w http.ResponseWriter, r *http.Request) {
 	fileID := r.PathValue("fileId")
 	f, err := s.DB.GetTransferFile(r.Context(), fileID)
 	if err != nil {
-		writeError(w, http.StatusNotFound, "FILE_NOT_FOUND", "no such file", requestID(r))
+		writeError(w, http.StatusNotFound, "FILE_NOT_FOUND", "文件不存在", requestID(r))
 		return
 	}
 	// Ownership check: the file's transfer must belong to the caller's session.
 	// Without this, any paired device could read other sessions' files by
 	// guessing fileId.
 	if f.TransferID != transferID {
-		writeError(w, http.StatusNotFound, "FILE_NOT_FOUND", "file not in transfer", requestID(r))
+		writeError(w, http.StatusNotFound, "FILE_NOT_FOUND", "传输任务中不存在该文件", requestID(r))
 		return
 	}
 	t, err := s.DB.GetTransfer(r.Context(), transferID)
 	if err != nil {
-		writeError(w, http.StatusNotFound, "TRANSFER_NOT_FOUND", "no such transfer", requestID(r))
+		writeError(w, http.StatusNotFound, "TRANSFER_NOT_FOUND", "传输任务不存在", requestID(r))
 		return
 	}
 	callerSession, _ := r.Context().Value(ctxSessionID).(string)
 	if t.SessionID != callerSession {
-		writeError(w, http.StatusForbidden, "PERMISSION_DENIED", "file does not belong to caller session", requestID(r))
+		writeError(w, http.StatusForbidden, "PERMISSION_DENIED", "该文件不属于当前会话", requestID(r))
 		return
 	}
 
@@ -704,7 +704,7 @@ func (s *Server) handleDownloadFile(w http.ResponseWriter, r *http.Request) {
 
 	file, err := openFile(diskPath)
 	if err != nil {
-		writeError(w, http.StatusNotFound, "FILE_NOT_FOUND", "file not accessible on disk", requestID(r))
+		writeError(w, http.StatusNotFound, "FILE_NOT_FOUND", "文件不可访问", requestID(r))
 		return
 	}
 	defer file.Close()
@@ -732,7 +732,7 @@ func (s *Server) handleDownloadFile(w http.ResponseWriter, r *http.Request) {
 	start, end, ok := parseRange(rangeHeader, fileSize)
 	if !ok {
 		w.Header().Set("Content-Range", "bytes */"+formatInt(fileSize))
-		writeError(w, http.StatusRequestedRangeNotSatisfiable, "INVALID_REQUEST", "bad range", requestID(r))
+		writeError(w, http.StatusRequestedRangeNotSatisfiable, "INVALID_REQUEST", "请求的字节范围无效", requestID(r))
 		return
 	}
 	// parseRange already normalizes open-ended ranges (bytes=N-) to

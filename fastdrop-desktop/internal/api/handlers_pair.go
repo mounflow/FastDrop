@@ -20,11 +20,11 @@ type pairRequestPayload struct {
 func (s *Server) handlePairRequest(w http.ResponseWriter, r *http.Request) {
 	var body pairRequestPayload
 	if err := readJSON(r, &body); err != nil {
-		writeError(w, http.StatusBadRequest, "INVALID_REQUEST", "malformed pair request", requestID(r))
+		writeError(w, http.StatusBadRequest, "INVALID_REQUEST", "请求体格式错误", requestID(r))
 		return
 	}
 	if body.PairID == "" || body.Token == "" || body.Device.DeviceID == "" {
-		writeError(w, http.StatusBadRequest, "INVALID_REQUEST", "missing required fields", requestID(r))
+		writeError(w, http.StatusBadRequest, "INVALID_REQUEST", "缺少必填字段", requestID(r))
 		return
 	}
 	_, err := s.Pairing.Validate(body.PairID, body.Token)
@@ -63,11 +63,11 @@ type pairDiscoverPayload struct {
 func (s *Server) handlePairDiscover(w http.ResponseWriter, r *http.Request) {
 	var body pairDiscoverPayload
 	if err := readJSON(r, &body); err != nil {
-		writeError(w, http.StatusBadRequest, "INVALID_REQUEST", "malformed discover request", requestID(r))
+		writeError(w, http.StatusBadRequest, "INVALID_REQUEST", "请求体格式错误", requestID(r))
 		return
 	}
 	if body.Device.DeviceID == "" || body.Device.DeviceName == "" {
-		writeError(w, http.StatusBadRequest, "INVALID_REQUEST", "device.deviceId and device.deviceName required", requestID(r))
+		writeError(w, http.StatusBadRequest, "INVALID_REQUEST", "缺少 device.deviceId 或 device.deviceName", requestID(r))
 		return
 	}
 	req, err := s.Pairing.CreateDirectRequest(body.Device)
@@ -96,7 +96,7 @@ func (s *Server) handlePairStatus(w http.ResponseWriter, r *http.Request) {
 	requestID := r.PathValue("requestId")
 	req, ok := s.Pairing.GetRequest(requestID)
 	if !ok {
-		writeError(w, http.StatusNotFound, "PAIR_REQUEST_EXPIRED", "no such pair request", newReqIDError(r))
+		writeError(w, http.StatusNotFound, "PAIR_REQUEST_EXPIRED", "配对请求不存在", newReqIDError(r))
 		return
 	}
 	switch req.Status {
@@ -208,7 +208,7 @@ func (s *Server) handlePairTokenRefresh(w http.ResponseWriter, r *http.Request) 
 	}
 	_ = readJSON(r, &body)
 	if body.PairID == "" {
-		writeError(w, http.StatusBadRequest, "INVALID_REQUEST", "pairId required", requestID(r))
+		writeError(w, http.StatusBadRequest, "INVALID_REQUEST", "缺少 pairId 参数", requestID(r))
 		return
 	}
 	pt, err := s.Pairing.Refresh(body.PairID, s.Cfg.Server.DeviceName, clientIP(r))
