@@ -262,7 +262,8 @@ button:focus-visible, input:focus-visible, select:focus-visible { outline: 3px s
 .empty-icon { width: 52px; height: 52px; border-radius: var(--radius-card); }
 .empty-state h3 { margin: 0; font-size: 16px; font-weight: 600; }
 .empty-state p { margin: 6px 0 0; color: var(--text-tertiary); font-size: 13px; line-height: 1.5; }
-.page-empty { flex-direction: column; justify-content: center; min-height: 360px; text-align: center; }
+/* 页面级空态不再包一层卡片：空态本身就是"没有内容"，套个边框只会显得空荡 */
+.page-empty { flex-direction: column; justify-content: center; min-height: 240px; text-align: center; border: 0; background: transparent; }
 
 .transfer-drawer { margin-top: 16px; border: 1px solid var(--border); border-radius: var(--radius-card); background: var(--surface); overflow: hidden; }
 .drawer-heading { display: flex; align-items: center; justify-content: space-between; min-height: 56px; padding: 0 20px; border-bottom: 1px solid var(--border); }
@@ -304,6 +305,27 @@ button:focus-visible, input:focus-visible, select:focus-visible { outline: 3px s
 .ghost-button:disabled { opacity: 0.45; cursor: not-allowed; }
 .ghost-button.danger { color: var(--danger); border-color: var(--danger-soft); }
 .ghost-button.danger:hover:not(:disabled) { background: var(--danger-soft); color: var(--danger); }
+
+/* 页面级双视图（进行中 / 历史）。用轻量 tab 而非分段控件——分段控件是
+   "同一对象的两种表示"，这里切换的是两个不同列表。 */
+.page-tabs { display: flex; align-items: center; gap: 2px; margin-bottom: 12px; }
+.page-tab { display: inline-flex; align-items: center; gap: 6px; min-height: 30px; padding: 0 10px; border: 0; border-radius: var(--radius-control); background: transparent; color: var(--text-secondary); font-size: 13px; font-weight: 500; cursor: pointer; transition: background var(--transition), color var(--transition); }
+.page-tab:hover { background: var(--surface-sunken); color: var(--text-primary); }
+.page-tab.active { background: var(--accent-soft); color: var(--accent-hover); font-weight: 600; }
+.page-tab-count { min-width: 18px; padding: 1px 5px; border-radius: var(--radius-pill); background: var(--accent); color: var(--accent-on); font-size: 11px; font-weight: 600; text-align: center; }
+
+/* 进行中列表：一张卡 + 内部分隔线，而不是每行一张卡。
+   收发混排，方向用左侧角色色徽标区分。 */
+.activity-list { border: 1px solid var(--border); border-radius: var(--radius-card); background: var(--surface); overflow: hidden; }
+.activity-list .transfer-row { padding: 10px 12px; }
+.transfer-dir { display: grid; place-items: center; width: 22px; height: 22px; border-radius: 6px; }
+.transfer-dir.received { background: var(--success-soft); color: var(--success); }
+.transfer-dir.sent { background: var(--accent-soft); color: var(--accent-hover); }
+
+/* 首页活动条：替代原来的"当前传输"抽屉，只留一行，点进传输页 */
+.activity-bar { display: flex; align-items: center; gap: 8px; margin-top: 12px; padding: 0 12px; min-height: 40px; border: 1px solid var(--border); border-radius: var(--radius-control); background: var(--surface); color: var(--text-secondary); font-size: 12px; cursor: pointer; transition: background var(--transition); }
+.activity-bar:hover { background: var(--surface-sunken); }
+.activity-arrow { margin-left: auto; color: var(--text-tertiary); font-size: 15px; }
 
 /* ── 传输列表 ──────────────────────────────────────────────
    一条记录 = 一行 52px。方向用左侧 22px 小徽标 + 角色色表达，

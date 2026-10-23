@@ -83,6 +83,9 @@ interface ActiveTransfer {
 }
 
 const activePage = ref<DesktopPage>('home')
+// 传输页两段视图：进行中（收发混排）与历史。用户问的是两个不同问题——
+// "东西在传吗"和"我以前传过什么"，不该挤进同一个列表。
+const transferTab = ref<'active' | 'history'>('active')
 const dragOver = ref(false)
 const uploadStatus = ref('')
 // 状态提示是一次性的：结束态显示几秒后自动消失。长期驻留会让页面永远
@@ -1526,32 +1529,11 @@ onUnmounted(() => {
           </div>
         </div>
 
-        <section v-if="liveTransfers.length || completedTransfers.length" class="transfer-drawer">
-          <div class="drawer-heading">
-            <div><span class="status-dot online"></span><strong>当前传输</strong><small>{{ liveTransfers.length }} 个进行中</small></div>
-            <button class="text-button" @click="selectPage('history')">查看全部</button>
-          </div>
-          <article v-for="item in activeTransfers.slice(0, 4)" :key="`${item.peerId}:${item.transferId}`" class="transfer-row" :class="{ expandable: (item.files?.length ?? 0) > 1 }" @click="toggleTransferExpanded(item)">
-            <div class="file-avatar"><AppIcon name="file" :size="20" /></div>
-            <div class="transfer-main">
-              <div class="transfer-title"><strong>{{ item.filename }}</strong><span>{{ statusLabel(item.status) }}</span></div>
-              <div class="progress-track"><span :class="item.status" :style="{ width: `${progressPercent(item)}%` }"></span></div>
-              <div class="transfer-meta"><span>{{ item.incoming ? '来自' : '到' }} {{ item.peerName }} · {{ formatSize(item.transferredBytes) }} / {{ formatSize(item.totalBytes) }}<template v-if="(item.files?.length ?? 0) > 1"> · {{ item.files!.filter((f) => f.status === 'completed').length }}/{{ item.files!.length }} 个文件</template></span><span>{{ formatSpeed(item.speedBps) || `${progressPercent(item)}%` }}</span></div>
-              <div v-if="item.expanded && item.files?.length" class="transfer-files" @click.stop>
-                <div v-for="file in item.files" :key="file.fileId" class="transfer-file-row">
-                  <span class="tf-name" :title="file.name">{{ file.name }}</span>
-                  <div class="progress-track mini"><span :class="file.status" :style="{ width: `${file.totalBytes ? (file.transferredBytes / file.totalBytes) * 100 : 0}%` }"></span></div>
-                  <span class="tf-status" :class="file.status">{{ fileStatusLabel(file.status) }}</span>
-                </div>
-              </div>
-            </div>
-            <div class="row-actions">
-              <button v-if="item.status === 'transferring'" class="icon-button" title="暂停" @click.stop="pauseTransfer(item)"><AppIcon name="pause" :size="17" /></button>
-              <button v-if="item.status === 'paused'" class="icon-button" title="继续" @click.stop="resumeTransfer(item)"><AppIcon name="play" :size="17" /></button>
-              <button v-if="!isTerminal(item.status)" class="icon-button danger" title="取消" @click.stop="cancelTransfer(item)"><AppIcon name="x" :size="17" /></button>
-            </div>
-          </article>
-        </section>
+        <div v-if="activeTransfers.length" class="activity-bar" @click="selectPage('history')">
+          <span class="status-dot online"></span>
+          <span>{{ liveTransfers.length }} 个进行中<template v-if="activeTransfers.length > liveTransfers.length"> · {{ activeTransfers.length - liveTransfers.length }} 个已结束</template></span>
+          <span class="activity-arrow">›</span>
+        </div>
       </section>
 
       <section v-else-if="activePage === 'devices'" class="page">
@@ -1590,43 +1572,82 @@ onUnmounted(() => {
       </section>
 
       <section v-else-if="activePage === 'history'" class="page">
-        <div class="toolbar">
-          <div class="filter-group">
-            <button v-for="filter in [['all','全部'],['sent','发送'],['received','接收']]" :key="filter[0]" :class="['chip-filter', { active: historyDirection === filter[0] }]" @click="historyDirection = filter[0] as 'all' | 'sent' | 'received'">{{ filter[1] }}</button>
+        <div class="page-tabs">
+          <button :class="['page-tab', { active: transferTab === 'active' }]" @click="transferTab = 'active'">
+            进行中<span v-if="liveTransfers.length" class="page-tab-count">{{ liveTransfers.length }}</span>
+          </button>
+          <button :class="['page-tab', { active: transferTab === 'history' }]" @click="transferTab = 'history'">历史</button>
+        </div>
+
+        <template v-if="transferTab === 'active'">
+          <div v-if="activeTransfers.length" class="activity-list">
+            <article v-for="item in activeTransfers" :key="`${item.peerId}:${item.transferId}`" class="transfer-row" :class="{ expandable: (item.files?.length ?? 0) > 1 }" @click="toggleTransferExpanded(item)">
+              <span :class="['transfer-dir', item.incoming ? 'received' : 'sent']"><AppIcon :name="item.incoming ? 'inbox' : 'upload'" :size="13" /></span>
+              <div class="transfer-main">
+                <div class="transfer-title"><strong>{{ item.filename }}</strong><span>{{ statusLabel(item.status) }}</span></div>
+                <div class="progress-track"><span :class="item.status" :style="{ width: `${progressPercent(item)}%` }"></span></div>
+                <div class="transfer-meta"><span>{{ item.incoming ? '来自' : '发到' }} {{ item.peerName }} · {{ formatSize(item.transferredBytes) }} / {{ formatSize(item.totalBytes) }}<template v-if="(item.files?.length ?? 0) > 1"> · {{ item.files!.filter((f) => f.status === 'completed').length }}/{{ item.files!.length }} 个文件</template></span><span>{{ formatSpeed(item.speedBps) || `${progressPercent(item)}%` }}</span></div>
+                <div v-if="item.expanded && item.files?.length" class="transfer-files" @click.stop>
+                  <div v-for="file in item.files" :key="file.fileId" class="transfer-file-row">
+                    <span class="tf-name" :title="file.name">{{ file.name }}</span>
+                    <div class="progress-track mini"><span :class="file.status" :style="{ width: `${file.totalBytes ? (file.transferredBytes / file.totalBytes) * 100 : 0}%` }"></span></div>
+                    <span class="tf-status" :class="file.status">{{ fileStatusLabel(file.status) }}</span>
+                  </div>
+                </div>
+              </div>
+              <div class="row-actions">
+                <button v-if="item.status === 'transferring'" class="icon-button" title="暂停" @click.stop="pauseTransfer(item)"><AppIcon name="pause" :size="16" /></button>
+                <button v-if="item.status === 'paused'" class="icon-button" title="继续" @click.stop="resumeTransfer(item)"><AppIcon name="play" :size="16" /></button>
+                <button v-if="!isTerminal(item.status)" class="icon-button danger" title="取消" @click.stop="cancelTransfer(item)"><AppIcon name="x" :size="16" /></button>
+              </div>
+            </article>
           </div>
-          <span class="toolbar-sep"></span>
-          <div class="filter-group">
-            <button v-for="filter in [['all','全部状态'],['completed','已完成'],['failed','失败'],['cancelled','已取消']]" :key="filter[0]" :class="['chip-filter', { active: historyFilter === filter[0] }]" @click="historyFilter = filter[0]">{{ filter[1] }}</button>
+          <div v-else class="empty-state page-empty">
+            <div class="empty-icon"><AppIcon name="upload" :size="30" /></div>
+            <div><h3>没有进行中的传输</h3></div>
+            <button class="primary-button" @click="selectPage('home')">去发送</button>
           </div>
-          <input v-model="historySearch" class="search-input" placeholder="搜索设备或任务编号" />
-          <button class="ghost-button" @click="copyDownloadPath"><AppIcon name="folder" :size="15" />打开下载目录</button>
-          <button class="ghost-button danger" :disabled="historyClearing || !displayedHistory.length" @click="onClearHistory"><AppIcon name="trash" :size="15" />清空</button>
-        </div>
-        <p v-if="historyActionError" class="history-action-error">{{ historyActionError }}</p>
-        <div v-if="historyLoading" class="loading-state">正在加载传输记录…</div>
-        <div v-else-if="displayedHistory.length" class="history-list">
-          <article v-for="item in displayedHistory" :key="`${item.peerId}:${item.id}`" :class="['history-row', isReceived(item) ? 'is-received' : 'is-sent']">
-            <span class="history-dir"><AppIcon :name="isReceived(item) ? 'inbox' : 'upload'" :size="13" /></span>
-            <div class="history-main">
-              <strong>{{ item.totalFiles }} 个文件</strong>
-              <span>{{ isReceived(item) ? '来自' : '发送到' }} {{ item.peerName || '设备' }}</span>
+        </template>
+
+        <template v-else>
+          <div class="toolbar">
+            <div class="filter-group">
+              <button v-for="filter in [['all','全部'],['sent','发送'],['received','接收']]" :key="filter[0]" :class="['chip-filter', { active: historyDirection === filter[0] }]" @click="historyDirection = filter[0] as 'all' | 'sent' | 'received'">{{ filter[1] }}</button>
             </div>
-            <span class="history-meta">{{ formatSize(item.totalBytes) }}</span>
-            <span class="history-meta">{{ formatDate(item.createdAt) }}</span>
-            <span :class="['status-badge', item.status]">{{ statusLabel(item.status) }}</span>
-            <div class="row-actions">
-              <button v-if="canRevealTransfer(item)" class="icon-button" title="在资源管理器中显示" @click="revealTransfer(item)"><AppIcon name="folder" :size="14" /></button>
-              <button class="icon-button danger" title="删除这条记录（进行中的传输不可删除）" @click="onDeleteHistoryRow(item)"><AppIcon name="trash" :size="14" /></button>
+            <span class="toolbar-sep"></span>
+            <div class="filter-group">
+              <button v-for="filter in [['all','全部状态'],['completed','已完成'],['failed','失败'],['cancelled','已取消']]" :key="filter[0]" :class="['chip-filter', { active: historyFilter === filter[0] }]" @click="historyFilter = filter[0]">{{ filter[1] }}</button>
             </div>
-          </article>
-        </div>
-        <div v-else class="empty-state page-empty">
-          <div class="empty-icon"><AppIcon name="history" :size="30" /></div>
-          <div v-if="historyDirection === 'all'"><h3>还没有传输记录</h3><p>发送或接收文件后，任务状态和时间会显示在这里。</p></div>
-          <div v-else-if="historyDirection === 'sent'"><h3>没有发送记录</h3><p>切换到「全部」或「接收」查看其它方向的记录。</p></div>
-          <div v-else><h3>没有接收记录</h3><p>切换到「全部」或「发送」查看其它方向的记录。</p></div>
-          <button class="primary-button" @click="selectPage('home')">开始发送</button>
-        </div>
+            <input v-model="historySearch" class="search-input" placeholder="搜索设备或任务编号" />
+            <button class="ghost-button" @click="copyDownloadPath"><AppIcon name="folder" :size="15" />打开下载目录</button>
+            <button class="ghost-button danger" :disabled="historyClearing || !displayedHistory.length" @click="onClearHistory"><AppIcon name="trash" :size="15" />清空</button>
+          </div>
+          <p v-if="historyActionError" class="history-action-error">{{ historyActionError }}</p>
+          <div v-if="historyLoading" class="loading-state">正在加载传输记录…</div>
+          <div v-else-if="displayedHistory.length" class="history-list">
+            <article v-for="item in displayedHistory" :key="`${item.peerId}:${item.id}`" :class="['history-row', isReceived(item) ? 'is-received' : 'is-sent']">
+              <span class="history-dir"><AppIcon :name="isReceived(item) ? 'inbox' : 'upload'" :size="13" /></span>
+              <div class="history-main">
+                <strong>{{ item.totalFiles }} 个文件</strong>
+                <span>{{ isReceived(item) ? '来自' : '发送到' }} {{ item.peerName || '设备' }}</span>
+              </div>
+              <span class="history-meta">{{ formatSize(item.totalBytes) }}</span>
+              <span class="history-meta">{{ formatDate(item.createdAt) }}</span>
+              <span :class="['status-badge', item.status]">{{ statusLabel(item.status) }}</span>
+              <div class="row-actions">
+                <button v-if="canRevealTransfer(item)" class="icon-button" title="在资源管理器中显示" @click="revealTransfer(item)"><AppIcon name="folder" :size="14" /></button>
+                <button class="icon-button danger" title="删除这条记录（进行中的传输不可删除）" @click="onDeleteHistoryRow(item)"><AppIcon name="trash" :size="14" /></button>
+              </div>
+            </article>
+          </div>
+          <div v-else class="empty-state page-empty">
+            <div class="empty-icon"><AppIcon name="history" :size="30" /></div>
+            <div v-if="historyDirection === 'all'"><h3>还没有传输记录</h3></div>
+            <div v-else-if="historyDirection === 'sent'"><h3>没有发送记录</h3></div>
+            <div v-else><h3>没有接收记录</h3></div>
+            <button class="primary-button" @click="selectPage('home')">开始发送</button>
+          </div>
+        </template>
       </section>
 
       <section v-else-if="activePage === 'received'" class="page">
