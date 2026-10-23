@@ -471,6 +471,31 @@ transfer.completed
 
 session.revoked
 error
+
+text.send
+text.ack
+text.received
+```
+
+### 8.2.1 文本快传消息（text.*）
+
+文本走 WebSocket 控制通道直传（量小，无需分块/落盘）。约束：
+
+- `text.send` payload：`{textId, text}`；`text` 为 UTF-8，上限 **64 KB**（`TEXT_MAX_BYTES = 65536`），空文本 / 超限 / 缺 `textId` → 复用错误码 `INVALID_REQUEST`
+- 接收方校验通过后回 `text.ack` `{textId}`（送达确认），并向本机 UI 广播 `text.received` `{textId, text, deviceName, receivedAt}`
+- 仅已认证会话可收发（auth-first 不变）；文本内容不落库、不写日志（日志只记长度与 textId）
+- 接收端不弹接受确认框（两端已配对、文本无执行风险），展示为可复制的对话框
+
+```json
+{
+  "version": 1,
+  "type": "text.send",
+  "timestamp": 1784436000123,
+  "payload": {
+    "textId": "txt-uuid",
+    "text": "https://example.com"
+  }
+}
 ```
 
 ### 8.3 文件发送请求

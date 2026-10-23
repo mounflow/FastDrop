@@ -80,7 +80,7 @@ Canonical states (§12): `created → waiting_accept → preparing → transferr
 
 ## REST & WS Contract
 
-All endpoints are prefixed `/api/v1/`. WebSocket path: `ws://host:9527/ws/v1`. Auth on protected routes requires both `Authorization: Bearer <sessionToken>` and `X-Session-Id: <sessionId>`. WS auth: prefer headers; fall back to a first-message `{type:"auth",...}` — and until that auth succeeds, no other message types may be processed. Full route list and message-type catalog are in §20 and §8 of the spec — consult them before adding endpoints.
+All endpoints are prefixed `/api/v1/`. WebSocket path: `ws://host:9527/ws/v1`. Auth on protected routes requires both `Authorization: Bearer <sessionToken>` and `X-Session-Id: <sessionId>`. WS auth: prefer headers; fall back to a first-message `{type:"auth",...}` — and until that auth succeeds, no other message types may be processed. Full route list and message-type catalog are in §20 and §8 of the spec — consult them before adding endpoints. **Text transfer（文本快传）**: `text.send` / `text.ack` / `text.received` ride the WS control channel (spec §8.2.1); UTF-8 ≤ 64 KB, no accept prompt, never log text content.
 
 ## Error Model
 
