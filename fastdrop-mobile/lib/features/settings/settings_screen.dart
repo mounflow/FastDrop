@@ -97,50 +97,52 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
           // -- Paired Device ---------------------------------------------------
           if (_activeDevice != null) ...[
             const _SectionHeader(title: '当前设备'),
-            Card(
-              margin: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
-              child: ListTile(
-                leading: const Icon(Icons.computer),
-                title: Text(_activeDevice!.name),
-                subtitle: Text(_activeDevice!.serverBaseUrl),
-                trailing: _activeDevice!.isExpired
-                    ? Chip(
-                        label: const Text(
-                          '已过期',
-                          style: TextStyle(fontSize: 11),
-                        ),
-                        backgroundColor: tokens.danger,
-                        labelStyle: TextStyle(color: scheme.onPrimary),
-                      )
-                    : Chip(
-                        label: const Text(
-                          '有效',
-                          style: TextStyle(fontSize: 11),
-                        ),
-                        backgroundColor: tokens.success,
-                        labelStyle: TextStyle(color: scheme.onPrimary),
-                      ),
+            // 与页面其余分组保持一致：平铺行 + 分隔线，不单独套卡片。
+            // 整页只有这一组是卡片、其余是平面行，圆角与平面混排很跳。
+            ListTile(
+              leading: const Icon(Icons.computer),
+              title: Text(
+                _activeDevice!.name,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+              ),
+              subtitle: Text(_activeDevice!.serverBaseUrl),
+              // 状态标签用"淡底 + 同色字"，不用实心色块：实心绿比主操作
+              // 还抢眼，而这里表达的是状态，不是可点的操作。
+              trailing: Container(
+                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+                decoration: BoxDecoration(
+                  color: _activeDevice!.isExpired
+                      ? tokens.dangerSoft
+                      : tokens.successSoft,
+                  borderRadius: BorderRadius.circular(AppTheme.radiusPill),
+                ),
+                child: Text(
+                  _activeDevice!.isExpired ? '已过期' : '有效',
+                  style: TextStyle(
+                    fontSize: 11,
+                    fontWeight: FontWeight.w600,
+                    color: _activeDevice!.isExpired
+                        ? tokens.danger
+                        : tokens.success,
+                  ),
+                ),
               ),
             ),
-            const SizedBox(height: 8),
-          ],
-
-          // -- Unpair ----------------------------------------------------------
-          if (_activeDevice != null) ...[
-            const Divider(),
-            Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
-              child: OutlinedButton.icon(
-                onPressed: _confirmUnpair,
-                icon: Icon(Icons.link_off, color: tokens.danger),
-                label: Text(
-                  '删除此设备',
-                  style: TextStyle(color: tokens.danger),
-                ),
-                style: OutlinedButton.styleFrom(
-                  side: BorderSide(color: tokens.danger),
+            // 危险操作做成同组内的第二行：既不占首屏视觉重心，也仍然可发现
+            // （纯图标的删除按钮在手机上没有 hover 提示，等于不可发现）。
+            ListTile(
+              dense: true,
+              leading: Icon(Icons.link_off, size: 20, color: tokens.danger),
+              title: Text(
+                '删除此设备',
+                style: TextStyle(
+                  color: tokens.danger,
+                  fontSize: 14,
+                  fontWeight: FontWeight.w500,
                 ),
               ),
+              onTap: _confirmUnpair,
             ),
             const Divider(),
           ],
@@ -156,17 +158,6 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
             ),
             trailing: const Icon(Icons.chevron_right),
             onTap: _changeDownloadDir,
-          ),
-          Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
-            child: Text(
-              '从 PC 端接收的文件会保存到这里。'
-              '留空使用默认位置。',
-              style: TextStyle(
-                color: scheme.onSurfaceVariant,
-                fontSize: 12,
-              ),
-            ),
           ),
           const Divider(),
 
@@ -194,17 +185,6 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
                 },
               );
             },
-          ),
-          Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
-            child: Text(
-              '开启后，本机将作为 FastDrop 服务器运行，'
-              '其他设备（PC/手机）可以发现并向本机发送文件。',
-              style: TextStyle(
-                color: scheme.onSurfaceVariant,
-                fontSize: 12,
-              ),
-            ),
           ),
           Consumer(
             builder: (context, ref, child) {
@@ -609,9 +589,11 @@ class _SectionHeader extends StatelessWidget {
       child: Text(
         title,
         style: TextStyle(
-          color: Theme.of(context).colorScheme.primary,
+          // 分组标题用中性色：拿主色制造分区会和"可点击/主操作"撞语义。
+          // 层级由字号与间距承担，不靠颜色。
+          color: Theme.of(context).colorScheme.onSurfaceVariant,
           fontWeight: FontWeight.w600,
-          fontSize: 13,
+          fontSize: 12,
         ),
       ),
     );
