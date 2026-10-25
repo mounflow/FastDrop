@@ -344,6 +344,16 @@ button:focus-visible, input:focus-visible, select:focus-visible { outline: 3px s
 .conv-state.online { background: var(--success-soft); color: var(--success); }
 .conv-state.connecting, .conv-state.pending { background: var(--warning-soft); color: var(--warning); }
 
+/* 多选群发：不引入"群聊"实体，只是把同一批发给 N 台设备 */
+.heading-actions { display: flex; align-items: center; gap: 14px; }
+.conversation-row.selected { border-color: var(--accent); background: var(--accent-soft); }
+.conversation-row.disabled { opacity: 0.4; cursor: not-allowed; }
+.conv-check { display: grid; place-items: center; width: 16px; height: 16px; border: 1px solid var(--border-strong); border-radius: 4px; color: var(--accent-on); }
+.conversation-row.selected .conv-check { border-color: var(--accent); background: var(--accent); }
+.multiselect-bar { display: flex; align-items: center; gap: 8px; margin-top: 12px; padding: 10px 12px; border: 1px solid var(--border); border-radius: var(--radius-card); background: var(--surface); font-size: 12px; }
+.multiselect-bar > span { color: var(--text-secondary); white-space: nowrap; }
+.multiselect-bar strong { color: var(--primary-strong, var(--text-primary)); font-weight: 600; }
+
 /* ── 会话详情 ─────────────────────────────────────────────────────────────
    传输气泡：发件靠右（主色淡底）、收件靠左（中性）。气泡表达的是
    "一次真实发生过的传输"，不是"消息"——所以离线时输入区直接禁用，

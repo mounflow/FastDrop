@@ -1108,6 +1108,26 @@ function openConversation(row: ConversationRow) {
   activePage.value = 'conversation'
 }
 
+// 多选群发（方案 A）：不引入"群聊"实体——仍是 N 条独立会话，只是把同一批
+// 文件/文本一次发给 N 台设备。选择态复用 peerPool.selectedIds，不另造一份。
+const multiSelect = ref(false)
+
+function isSelected(row: ConversationRow) {
+  return Boolean(
+    row.sendPeerId && selectedRecipientIds.value.includes(row.sendPeerId),
+  )
+}
+
+function toggleMultiSelect(row: ConversationRow) {
+  if (!row.sendPeerId) return
+  toggleRecipient(row.sendPeerId)
+}
+
+function exitMultiSelect() {
+  multiSelect.value = false
+  selectedRecipientIds.value = []
+}
+
 /// 已选择设备数 = 被选中的**可发送设备行**数量（不是原始 peer id 数量：
 /// 同一台设备可能有两条连接，此前会显示成"2 台设备已选择"）。
 /// 同时过滤掉历史遗留的不可发送 id（local-session）。
@@ -1598,7 +1618,10 @@ onUnmounted(() => {
       <section v-if="activePage === 'home'" class="page home-page">
         <div class="section-heading">
           <div><h2>会话</h2></div>
-          <button class="text-button" @click="openConnectPanel"><AppIcon name="plus" :size="17" />添加设备</button>
+          <div class="heading-actions">
+            <button v-if="!multiSelect" class="text-button" @click="multiSelect = true">多选</button>
+            <button class="text-button" @click="openConnectPanel"><AppIcon name="plus" :size="17" />添加设备</button>
+          </div>
         </div>
 
         <p v-if="uploadStatus" class="inline-notice">{{ uploadStatus }}</p>
@@ -1607,10 +1630,11 @@ onUnmounted(() => {
           <button
             v-for="row in conversationRows"
             :key="row.name"
-            class="conversation-row"
-            @click="openConversation(row)"
+            :class="['conversation-row', { selected: isSelected(row), disabled: multiSelect && !row.sendPeerId }]"
+            @click="multiSelect ? toggleMultiSelect(row) : openConversation(row)"
           >
-            <span :class="['conv-dot', row.state]"></span>
+            <span v-if="multiSelect" class="conv-check"><AppIcon v-if="isSelected(row)" name="check" :size="12" /></span>
+            <span v-else :class="['conv-dot', row.state]"></span>
             <span class="conv-main">
               <strong>{{ row.name }}</strong>
               <small>{{ row.lastSummary || '还没有传输记录' }}</small>
@@ -1620,6 +1644,20 @@ onUnmounted(() => {
               <span :class="['conv-state', row.state]">{{ row.label }}</span>
             </span>
           </button>
+        </div>
+
+        <div v-if="multiSelect" class="multiselect-bar">
+          <span>已选 <strong>{{ selectedCount }}</strong> 台</span>
+          <input
+            v-model="textDraft"
+            class="composer-input"
+            placeholder="群发文本…（≤ 64 KB）"
+            @input="onTextDraftInput"
+            @keydown.enter.exact.prevent="sendText"
+          />
+          <button class="primary-button" :disabled="selectedCount === 0 || !textDraft.trim()" @click="sendText">群发文本</button>
+          <button class="primary-button" :disabled="selectedCount === 0" @click="openFilePicker">群发文件</button>
+          <button class="ghost-button" @click="exitMultiSelect">取消</button>
         </div>
 
         <div v-else class="empty-state compact">
@@ -1682,8 +1720,6 @@ onUnmounted(() => {
             @keydown.enter.exact.prevent="sendText"
           />
           <button class="primary-button" :disabled="!activeConversation?.sendable || !textDraft.trim()" @click="sendText">发送</button>
-          <input ref="fileInput" type="file" multiple hidden @change="handleFilePickerChange" />
-          <input ref="folderInput" type="file" multiple webkitdirectory hidden @change="handleFilePickerChange" />
         </div>
         <p v-if="textState.text" class="inline-notice">{{ textState.text }}</p>
       </section>
@@ -1722,7 +1758,6 @@ onUnmounted(() => {
         </div>
         <p v-else class="selection-summary">没有已忽略的设备。</p>
       </section>
-
       <section v-else-if="activePage === 'history'" class="page">
         <div class="page-tabs">
           <button :class="['page-tab', { active: transferTab === 'active' }]" @click="transferTab = 'active'">
@@ -1854,6 +1889,10 @@ onUnmounted(() => {
           </div>
         </div>
       </section>
+
+      <!-- 文件选择器常驻：会话详情与首页的多选群发都要用它，放在页面切换之外才不会因卸载丢失 ref -->
+      <input ref="fileInput" type="file" multiple hidden @change="handleFilePickerChange" />
+      <input ref="folderInput" type="file" multiple webkitdirectory hidden @change="handleFilePickerChange" />
     </main>
 
     <Teleport to="body">
