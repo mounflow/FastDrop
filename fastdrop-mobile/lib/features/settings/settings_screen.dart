@@ -6,6 +6,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:fastdrop_mobile/app/theme.dart';
 import 'package:fastdrop_mobile/core/discovery/device_discovery.dart';
 import 'package:fastdrop_mobile/core/discovery/discovery_providers.dart';
+import 'package:fastdrop_mobile/core/network/local_network_info.dart';
 import 'package:fastdrop_mobile/core/app_info.dart';
 import 'package:fastdrop_mobile/core/platform/background_receive_service.dart';
 import 'package:fastdrop_mobile/core/server/server_providers.dart';
@@ -94,6 +95,61 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
       ),
       body: ListView(
         children: [
+          // -- 本机 -------------------------------------------------------------
+          // 「本机是谁、地址是什么、服务开没开」属于设备信息，放在设置里才合理；
+          // 原先它占据会话列表首屏最显眼的位置，而用户来首页是看"我能发给谁"。
+          const _SectionHeader(title: '本机'),
+          Consumer(
+            builder: (context, ref, child) {
+              final server = ref.watch(fastdropServerProvider);
+              final network = ref.watch(localNetworkInfoProvider);
+              final networkLabel = network.maybeWhen(
+                data: (value) => value.displayLabel,
+                orElse: () => '—',
+              );
+              final needsPermission = network.maybeWhen(
+                data: (value) => value.permissionRequired,
+                orElse: () => false,
+              );
+              return Column(
+                children: [
+                  ListTile(
+                    leading: const Icon(Icons.smartphone),
+                    title: const Text('设备名称'),
+                    subtitle: Text(
+                      server.deviceName.isEmpty ? '—' : server.deviceName,
+                    ),
+                  ),
+                  ListTile(
+                    leading: const Icon(Icons.wifi),
+                    title: const Text('接收地址'),
+                    subtitle: Text('$networkLabel · 端口 ${server.port}'),
+                    trailing: needsPermission
+                        ? TextButton(
+                            onPressed: () async {
+                              try {
+                                await ref
+                                    .read(localNetworkInfoServiceProvider)
+                                    .requestWifiNamePermission();
+                              } finally {
+                                ref.invalidate(localNetworkInfoProvider);
+                              }
+                            },
+                            child: const Text('授权'),
+                          )
+                        : null,
+                  ),
+                  ListTile(
+                    leading: const Icon(Icons.podcasts),
+                    title: const Text('接收服务'),
+                    subtitle: Text(server.isRunning ? '运行中' : '已关闭'),
+                  ),
+                ],
+              );
+            },
+          ),
+          const Divider(),
+
           // -- Paired Device ---------------------------------------------------
           if (_activeDevice != null) ...[
             const _SectionHeader(title: '当前设备'),

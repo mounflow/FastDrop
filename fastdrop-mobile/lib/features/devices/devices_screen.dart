@@ -1085,7 +1085,6 @@ class _DevicesScreenState extends ConsumerState<DevicesScreen>
         ),
       );
     }
-    final serverState = ref.watch(fastdropServerProvider);
     final nearby = ref.watch(nearbyDevicesProvider);
     final connected = connState.connectedDevices;
     final incomingPeers =
@@ -1102,9 +1101,6 @@ class _DevicesScreenState extends ConsumerState<DevicesScreen>
             (peer) => !_devices.any((device) => device.name == peer.deviceName))
         .toList(growable: false);
     final selectedPeer = connState.selectedPeer;
-    final networkInfo = ref.watch(localNetworkInfoProvider);
-    final scheme = Theme.of(context).colorScheme;
-    final tokens = Theme.of(context).extension<FastDropTokens>()!;
 
     return RefreshIndicator(
       onRefresh: _loadDevices,
@@ -1112,117 +1108,6 @@ class _DevicesScreenState extends ConsumerState<DevicesScreen>
         physics: const AlwaysScrollableScrollPhysics(),
         padding: const EdgeInsets.fromLTRB(16, 8, 16, 28),
         children: [
-          Text('我的设备', style: Theme.of(context).textTheme.titleSmall),
-          const SizedBox(height: 10),
-          Container(
-            padding: const EdgeInsets.all(12),
-            decoration: BoxDecoration(
-              color: Theme.of(context).colorScheme.primary,
-              borderRadius: BorderRadius.circular(AppTheme.radiusCard),
-            ),
-            child: Row(
-              children: [
-                Container(
-                  width: 36,
-                  height: 36,
-                  decoration: BoxDecoration(
-                    color: Colors.white.withValues(alpha: 0.16),
-                    borderRadius: BorderRadius.circular(AppTheme.radiusControl),
-                  ),
-                  child: Icon(
-                    Icons.phone_android_rounded,
-                    color: scheme.onPrimary,
-                    size: 20,
-                  ),
-                ),
-                const SizedBox(width: 10),
-                Expanded(
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Text(
-                        serverState.deviceName.isEmpty
-                            ? 'FastDrop 手机'
-                            : serverState.deviceName,
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
-                        style: TextStyle(
-                          color: scheme.onPrimary,
-                          fontSize: 16,
-                          fontWeight: FontWeight.w700,
-                        ),
-                      ),
-                      const SizedBox(height: 5),
-                      Text(
-                        serverState.isRunning
-                            ? '可被发现 · 端口 ${serverState.port}'
-                            : '接收服务未运行',
-                        style: TextStyle(
-                          color: scheme.onPrimary.withValues(alpha: 0.9),
-                          fontSize: 12,
-                        ),
-                      ),
-                      const SizedBox(height: 3),
-                      networkInfo.when(
-                        data: (network) => InkWell(
-                          onTap: network.permissionRequired
-                              ? _requestWifiNamePermission
-                              : null,
-                          borderRadius: BorderRadius.circular(6),
-                          child: Padding(
-                            padding: const EdgeInsets.symmetric(vertical: 2),
-                            child: Text(
-                              network.displayLabel,
-                              maxLines: 2,
-                              overflow: TextOverflow.ellipsis,
-                              style: TextStyle(
-                                color: scheme.onPrimary.withValues(alpha: 0.9),
-                                fontSize: 11,
-                              ),
-                            ),
-                          ),
-                        ),
-                        loading: () => Text(
-                          '正在读取当前网络…',
-                          style: TextStyle(
-                            color: scheme.onPrimary.withValues(alpha: 0.9),
-                            fontSize: 11,
-                          ),
-                        ),
-                        error: (_, __) => Text(
-                          '当前网络信息不可用',
-                          style: TextStyle(
-                            color: scheme.onPrimary.withValues(alpha: 0.9),
-                            fontSize: 11,
-                          ),
-                        ),
-                      ),
-                    ],
-                  ),
-                ),
-                Container(
-                  padding:
-                      const EdgeInsets.symmetric(horizontal: 9, vertical: 5),
-                  decoration: BoxDecoration(
-                    color: serverState.isRunning
-                        ? tokens.successSoft
-                        : tokens.dangerSoft,
-                    borderRadius: BorderRadius.circular(AppTheme.radiusPill),
-                  ),
-                  child: Text(
-                    serverState.isRunning ? '在线' : '离线',
-                    style: TextStyle(
-                      color: serverState.isRunning
-                          ? tokens.success
-                          : tokens.danger,
-                      fontSize: 11,
-                      fontWeight: FontWeight.w600,
-                    ),
-                  ),
-                ),
-              ],
-            ),
-          ),
           const SizedBox(height: 28),
           Row(
             children: [
@@ -1311,15 +1196,6 @@ class _DevicesScreenState extends ConsumerState<DevicesScreen>
     );
   }
 
-  Future<void> _requestWifiNamePermission() async {
-    try {
-      await ref
-          .read(localNetworkInfoServiceProvider)
-          .requestWifiNamePermission();
-    } finally {
-      ref.invalidate(localNetworkInfoProvider);
-    }
-  }
 
   Widget _buildOverviewEmptyState() {
     final scheme = Theme.of(context).colorScheme;
