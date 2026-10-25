@@ -14,6 +14,7 @@ import 'package:fastdrop_mobile/core/storage/ignored_device_providers.dart';
 import 'package:fastdrop_mobile/core/storage/session_store.dart';
 import 'package:fastdrop_mobile/core/storage/transfer_history_store.dart';
 import 'package:fastdrop_mobile/core/providers.dart';
+import 'package:fastdrop_mobile/features/conversation/conversation_screen.dart';
 import 'package:fastdrop_mobile/features/devices/nearby_devices_sheet.dart';
 import 'package:fastdrop_mobile/features/devices/multi_device_connection.dart';
 import 'package:fastdrop_mobile/features/pairing/pairing_screen.dart';
@@ -1398,9 +1399,17 @@ class _DevicesScreenState extends ConsumerState<DevicesScreen>
       ),
       child: InkWell(
         borderRadius: BorderRadius.circular(AppTheme.radiusCard),
-        onTap: () => ref
-            .read(multiDeviceConnectionProvider.notifier)
-            .switchToDevice(device),
+        onTap: () {
+          // 保留原有的"切到该设备"，避免影响既有的发送流程；同时进入会话详情。
+          ref
+              .read(multiDeviceConnectionProvider.notifier)
+              .switchToDevice(device);
+          Navigator.of(context).push(
+            MaterialPageRoute<void>(
+              builder: (_) => ConversationScreen(device: device),
+            ),
+          );
+        },
         child: Padding(
           padding: const EdgeInsets.all(16),
           child: Row(
