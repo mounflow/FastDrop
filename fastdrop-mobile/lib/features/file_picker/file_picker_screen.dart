@@ -38,6 +38,9 @@ class _FilePickerScreenState extends ConsumerState<FilePickerScreen>
   bool _routeArgsLoaded = false;
   final TextEditingController _textController = TextEditingController();
 
+  /// 文本快传是否展开（默认折叠，把主位让给文件选择）。
+  bool _textExpanded = false;
+
   /// 文本快传的 UI 本地状态：本轮已投出、尚在等待 `text.ack` 的设备数。
   /// 只用于"发送中"反馈，不参与协议（WS 消息类型/字段均未改动）。
   int _textPendingAcks = 0;
@@ -112,8 +115,21 @@ class _FilePickerScreenState extends ConsumerState<FilePickerScreen>
       body: Column(
         children: [
           _buildRecipientSelector(theme, connections),
-          // 操作流：选设备 → 文本快传 → 已选文件 → 文件选择。
-          _buildTextSendCard(theme),
+          // 文本快传默认折叠成一行：本页的主任务是"选文件"，一张常驻的文本框
+          // 会占掉顶部三分之一。文本的首选入口已移到会话详情页的输入区。
+          ListTile(
+            dense: true,
+            leading: const Icon(Icons.text_fields_rounded),
+            title: const Text('文本快传'),
+            subtitle: const Text('发送网址、验证码、API key 等短文本'),
+            trailing: Icon(
+              _textExpanded
+                  ? Icons.expand_less_rounded
+                  : Icons.expand_more_rounded,
+            ),
+            onTap: () => setState(() => _textExpanded = !_textExpanded),
+          ),
+          if (_textExpanded) _buildTextSendCard(theme),
           if (_selected.isNotEmpty)
             Container(
               width: double.infinity,
