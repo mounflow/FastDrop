@@ -1430,12 +1430,12 @@ class _DevicesScreenState extends ConsumerState<DevicesScreen>
                   borderRadius: BorderRadius.circular(AppTheme.radiusPill),
                 ),
                 child: Text(
-                  // 能力可见：本机持有对方会话且连接在线 = 双向可发送
-                  // （本机能发、对方也能发）；连接中 = 正在建立双向通道。
+                  // 状态收敛为三态，与 PC 一致：在线（双向就绪，唯一可发送）、
+                  // 连接中（正在建立发送通道）、离线。
                   connected
-                      ? '双向可发送'
+                      ? '在线'
                       : connecting
-                          ? '正在建立双向连接…'
+                          ? '连接中…'
                           : '离线',
                   style: TextStyle(
                     color: connected
@@ -1528,7 +1528,7 @@ class _DevicesScreenState extends ConsumerState<DevicesScreen>
                   ),
                   const SizedBox(height: 4),
                   Text(
-                    '仅接收（对方已连接到本机，本机尚未取得发送权限）',
+                    '正在建立发送通道…',
                     maxLines: 2,
                     overflow: TextOverflow.ellipsis,
                     style: Theme.of(context).textTheme.bodySmall,
@@ -1544,7 +1544,7 @@ class _DevicesScreenState extends ConsumerState<DevicesScreen>
                           observedBaseUrl: peer.remoteBaseUrl,
                         )),
                     icon: const Icon(Icons.sync_rounded, size: 16),
-                    label: const Text('建立双向连接'),
+                    label: const Text('重试连接'),
                     style: OutlinedButton.styleFrom(
                       visualDensity: VisualDensity.compact,
                     ),
@@ -1559,7 +1559,7 @@ class _DevicesScreenState extends ConsumerState<DevicesScreen>
                 borderRadius: BorderRadius.circular(AppTheme.radiusPill),
               ),
               child: Text(
-                '仅接收',
+                '连接中',
                 style: TextStyle(
                   color: tokens.warning,
                   fontSize: 11,
