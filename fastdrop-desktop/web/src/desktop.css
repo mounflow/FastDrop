@@ -327,6 +327,51 @@ button:focus-visible, input:focus-visible, select:focus-visible { outline: 3px s
 .activity-bar:hover { background: var(--surface-sunken); }
 .activity-arrow { margin-left: auto; color: var(--text-tertiary); font-size: 15px; }
 
+/* ── 会话列表 ─────────────────────────────────────────────────────────────
+   设备 = 联系人。列表只回答两件事：谁在线、我们最后一次往来是什么。 */
+.conversation-list { display: grid; gap: 2px; }
+.conversation-row { display: grid; grid-template-columns: 8px minmax(0, 1fr) auto; align-items: center; gap: 12px; width: 100%; min-height: 58px; padding: 0 12px; border: 1px solid transparent; border-radius: var(--radius-control); background: transparent; text-align: left; cursor: pointer; transition: background var(--transition), border-color var(--transition); }
+.conversation-row:hover { border-color: var(--border); background: var(--surface); }
+.conv-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--border-strong); }
+.conv-dot.online { background: var(--success); }
+.conv-dot.connecting, .conv-dot.pending { background: var(--warning); }
+.conv-main { display: grid; gap: 2px; min-width: 0; }
+.conv-main strong { overflow: hidden; font-size: 14px; font-weight: 500; line-height: 1.3; text-overflow: ellipsis; white-space: nowrap; }
+.conv-main small { overflow: hidden; color: var(--text-tertiary); font-size: 11px; line-height: 1.3; text-overflow: ellipsis; white-space: nowrap; }
+.conv-side { display: grid; gap: 3px; justify-items: end; flex: 0 0 auto; }
+.conv-side small { color: var(--text-tertiary); font-size: 11px; }
+.conv-state { padding: 1px 7px; border-radius: var(--radius-pill); background: var(--surface-sunken); color: var(--text-secondary); font-size: 11px; font-weight: 600; }
+.conv-state.online { background: var(--success-soft); color: var(--success); }
+.conv-state.connecting, .conv-state.pending { background: var(--warning-soft); color: var(--warning); }
+
+/* ── 会话详情 ─────────────────────────────────────────────────────────────
+   传输气泡：发件靠右（主色淡底）、收件靠左（中性）。气泡表达的是
+   "一次真实发生过的传输"，不是"消息"——所以离线时输入区直接禁用，
+   不做假的乐观队列。 */
+.conversation-page { display: flex; flex-direction: column; gap: 10px; }
+.conv-header { display: flex; align-items: center; gap: 10px; }
+.conv-title { display: flex; flex: 1; align-items: center; gap: 8px; min-width: 0; }
+.conv-title strong { overflow: hidden; font-size: 15px; font-weight: 600; text-overflow: ellipsis; white-space: nowrap; }
+.bubble-area { min-height: 260px; max-height: calc(100vh - 300px); overflow: auto; padding: 12px; border: 1px solid var(--border); border-radius: var(--radius-card); background: var(--surface-sunken); }
+.bubble-area.active { border-color: var(--accent); background: var(--accent-soft); }
+.bubble-list { display: grid; gap: 8px; }
+.bubble { max-width: 64%; padding: 8px 10px; border: 1px solid var(--border); border-radius: var(--radius-card); background: var(--surface); }
+.bubble.out { justify-self: end; border-color: var(--accent-soft); background: var(--accent-soft); }
+.bubble.in { justify-self: start; }
+.bubble-body { display: grid; gap: 2px; }
+.bubble-body strong { font-size: 13px; font-weight: 500; }
+.bubble-body span { color: var(--text-tertiary); font-size: 11px; }
+.bubble-foot { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-top: 4px; }
+.bubble-foot .icon-button { width: 26px; height: 26px; }
+.bubble-status { color: var(--text-secondary); font-size: 11px; }
+.bubble-status.completed { color: var(--success); }
+.bubble-status.failed, .bubble-status.cancelled { color: var(--danger); }
+.bubble-empty { display: grid; place-items: center; height: 236px; color: var(--text-tertiary); font-size: 12px; }
+.composer { display: flex; align-items: center; gap: 8px; padding: 10px 12px; border: 1px solid var(--border); border-radius: var(--radius-card); background: var(--surface); }
+.composer-input { flex: 1; min-width: 120px; height: 34px; padding: 0 10px; border: 1px solid var(--border-strong); border-radius: var(--radius-control); background: var(--surface); color: var(--text-primary); font-size: 13px; }
+.composer-input:disabled { opacity: 0.45; cursor: not-allowed; }
+.composer .primary-button:disabled, .composer .secondary-button:disabled { opacity: 0.45; cursor: not-allowed; }
+
 /* ── 传输列表 ──────────────────────────────────────────────
    一条记录 = 一行 52px。方向用左侧 22px 小徽标 + 角色色表达，
    不再用 42px 大方块再叠一个文字徽标（两处说同一件事）。

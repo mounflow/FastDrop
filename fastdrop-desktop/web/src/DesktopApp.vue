@@ -34,7 +34,7 @@ import {
 } from './composables/usePeerPool'
 import type { PairAccepted, QRPayload } from './types'
 
-type DesktopPage = 'home' | 'devices' | 'history' | 'received' | 'settings'
+type DesktopPage = 'home' | 'conversation' | 'devices' | 'history' | 'received' | 'settings'
 
 interface WSEnvelope {
   type?: string
@@ -218,7 +218,7 @@ const desktopNetworkTitle = computed(() => {
 })
 
 const navItems: Array<{ id: DesktopPage; label: string; icon: string }> = [
-  { id: 'home', label: '发送', icon: 'home' },
+  { id: 'home', label: '会话', icon: 'home' },
   { id: 'history', label: '传输', icon: 'history' },
   { id: 'devices', label: '设备', icon: 'phone' },
   { id: 'settings', label: '设置', icon: 'settings' },
@@ -1011,6 +1011,103 @@ async function onRestoreDevice(dev: LocalDeviceRow) {
   }
 }
 
+// ── 会话模型 ──────────────────────────────────────────────────────────────
+// 以「设备」为线程：列表 = 设备 + 最后一次传输摘要，点进去是该设备的传输
+// 气泡流。用户看到的是"我和这台设备之间的往来"，而不是一个混在一起的全局
+// 流水账；也就不必再出现"仅接收 / 双向可发送"这类协议层措辞。
+// 分组键用设备名：服务端记录里 peerId 为空串，只有 peer_name 可用。
+interface ConversationRow extends DeviceRow {
+  lastAt: number
+  lastSummary: string
+}
+
+const activeConversationName = ref<string | null>(null)
+
+/// 设备名 → 最后一条传输（时间 + 摘要）。
+const lastTransferByName = computed(() => {
+  const map = new Map<string, { at: number; summary: string }>()
+  for (const item of transfers.value) {
+    const name = item.peerName || ''
+    if (!name) continue
+    const at = item.createdAt || 0
+    const previous = map.get(name)
+    if (previous && previous.at >= at) continue
+    map.set(name, {
+      at,
+      summary: `${item.totalFiles} 个文件 · ${formatSize(item.totalBytes)}`,
+    })
+  }
+  return map
+})
+
+const conversationRows = computed<ConversationRow[]>(() => {
+  const rows = new Map<string, ConversationRow>()
+  // 1) 有活连接的设备（在线 / 连接中 / 待对方同意）
+  for (const row of deviceRows.value) {
+    const last = lastTransferByName.value.get(row.name)
+    rows.set(row.name, {
+      ...row,
+      lastAt: last?.at ?? 0,
+      lastSummary: last?.summary ?? '',
+    })
+  }
+  // 2) 已知但当前没有连接的设备也要留在列表里，否则"以前传过的设备"会凭空
+  //    消失——会话列表的前提是"设备＝联系人"，联系人不会因为离线而消失。
+  for (const device of localDeviceRows.value) {
+    if (device.ignored) continue
+    // 排除"本机自己"与环回地址：DB 里会留下自身/127.0.0.1 的测试记录，
+    // 把它们做成会话等于"和自己聊天"。
+    if (device.deviceName === serverName.value) continue
+    const ip = device.lastIp || ''
+    if (ip.startsWith('127.') || ip === '::1' || ip === 'localhost') {
+      continue
+    }
+    if (rows.has(device.deviceName)) continue
+    const last = lastTransferByName.value.get(device.deviceName)
+    rows.set(device.deviceName, {
+      key: device.deviceId || device.deviceName,
+      name: device.deviceName,
+      platform: device.platform || '',
+      state: 'offline',
+      label: '离线',
+      sendable: false,
+      peerIds: [],
+      lastAt: last?.at ?? 0,
+      lastSummary: last?.summary ?? '',
+    })
+  }
+  return [...rows.values()].sort((a, b) => {
+    const aOnline = a.state === 'online' ? 1 : 0
+    const bOnline = b.state === 'online' ? 1 : 0
+    if (aOnline !== bOnline) return bOnline - aOnline
+    return b.lastAt - a.lastAt
+  })
+})
+
+const activeConversation = computed(
+  () =>
+    conversationRows.value.find(
+      (row) => row.name === activeConversationName.value,
+    ) ?? null,
+)
+
+/// 当前会话的传输记录（新的在上）。
+const conversationTransfers = computed(() => {
+  const name = activeConversationName.value
+  if (!name) return []
+  return transfers.value
+    .filter((item) => (item.peerName || '') === name)
+    .slice()
+    .sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0))
+})
+
+function openConversation(row: ConversationRow) {
+  activeConversationName.value = row.name
+  // 复用既有发送通道：把发送目标设成这台设备（仅在线时有 sendPeerId）。
+  selectedRecipientIds.value = row.sendPeerId ? [row.sendPeerId] : []
+  activePage.value = 'conversation'
+}
+
 /// 已选择设备数 = 被选中的**可发送设备行**数量（不是原始 peer id 数量：
 /// 同一台设备可能有两条连接，此前会显示成"2 台设备已选择"）。
 /// 同时过滤掉历史遗留的不可发送 id（local-session）。
@@ -1424,7 +1521,7 @@ let devicePollTimer: ReturnType<typeof setInterval> | null = null
 onMounted(async () => {
   peerPool.restore()
   await Promise.all([loadSettings(), checkServiceHealth()])
-  await Promise.all([refreshQR(), loadHistory(), pollPairRequests()])
+  await Promise.all([refreshQR(), loadHistory(), pollPairRequests(), loadLocalDeviceRows()])
   pairPollTimer = setInterval(pollPairRequests, 2000)
   qrTimer = setInterval(refreshQR, 50_000)
   countdownTimer = setInterval(tickCountdown, 1000)
@@ -1485,7 +1582,8 @@ onUnmounted(() => {
     <main class="workspace">
       <header class="topbar">
         <div>
-          <h1 v-if="activePage === 'home'">发送</h1>
+          <h1 v-if="activePage === 'home'">会话</h1>
+          <h1 v-else-if="activePage === 'conversation'">会话</h1>
           <h1 v-else-if="activePage === 'devices'">设备</h1>
           <h1 v-else-if="activePage === 'history'">传输</h1>
           <h1 v-else-if="activePage === 'received'">接收文件</h1>
@@ -1498,90 +1596,36 @@ onUnmounted(() => {
       </header>
 
       <section v-if="activePage === 'home'" class="page home-page">
-        <div
-          :class="['drop-panel', { active: dragOver }]"
-          @dragover="handleDragOver"
-          @dragleave="handleDragLeave"
-          @drop="handleDrop"
-        >
-          <div class="drop-icon"><AppIcon name="upload" :size="30" /></div>
-          <div class="drop-copy">
-            <h2>拖放文件或文件夹到这里</h2>
-          </div>
-          <div class="drop-actions">
-            <button class="primary-button" @click="openFilePicker"><AppIcon name="file" :size="17" />选择文件</button>
-            <button class="secondary-button" @click="openFolderPicker"><AppIcon name="folder" :size="17" />选择文件夹</button>
-          </div>
-          <input ref="fileInput" type="file" multiple hidden @change="handleFilePickerChange" />
-          <input ref="folderInput" type="file" multiple webkitdirectory hidden @change="handleFilePickerChange" />
+        <div class="section-heading">
+          <div><h2>会话</h2></div>
+          <button class="text-button" @click="openConnectPanel"><AppIcon name="plus" :size="17" />添加设备</button>
         </div>
 
         <p v-if="uploadStatus" class="inline-notice">{{ uploadStatus }}</p>
 
-        <div class="section-heading">
-          <div><h2>设备</h2></div>
-          <button class="text-button" @click="openConnectPanel"><AppIcon name="plus" :size="17" />添加设备</button>
-        </div>
-
-        <div v-if="deviceRows.length" class="device-list">
-          <div v-for="row in deviceRows" :key="row.key" class="device-row-wrap">
-            <button
-              :class="['device-row', { selected: row.sendPeerId ? selectedRecipientIds.includes(row.sendPeerId) : false, offline: !row.sendable }]"
-              :disabled="!row.sendable"
-              @click="row.sendPeerId && toggleRecipient(row.sendPeerId)"
-            >
-              <span class="device-dir"><AppIcon :name="row.platform === 'windows' ? 'computer' : 'phone'" :size="13" /></span>
-              <span class="device-copy"><strong>{{ row.name }}</strong><small>{{ row.platform }} · {{ row.label }}</small></span>
-              <span class="device-check"><AppIcon v-if="row.sendPeerId && selectedRecipientIds.includes(row.sendPeerId)" name="check" :size="14" /></span>
-            </button>
-            <button class="icon-button danger device-remove" title="删除设备（断开双向连接且不再自动重连）" @click="onRemoveRow(row)"><AppIcon name="x" :size="14" /></button>
-          </div>
+        <div v-if="conversationRows.length" class="conversation-list">
+          <button
+            v-for="row in conversationRows"
+            :key="row.name"
+            class="conversation-row"
+            @click="openConversation(row)"
+          >
+            <span :class="['conv-dot', row.state]"></span>
+            <span class="conv-main">
+              <strong>{{ row.name }}</strong>
+              <small>{{ row.lastSummary || '还没有传输记录' }}</small>
+            </span>
+            <span class="conv-side">
+              <small>{{ row.lastAt ? formatDate(row.lastAt) : '' }}</small>
+              <span :class="['conv-state', row.state]">{{ row.label }}</span>
+            </span>
+          </button>
         </div>
 
         <div v-else class="empty-state compact">
           <div class="empty-icon"><AppIcon name="wifi" :size="28" /></div>
-          <div><h3>还没有可发送的设备</h3><p>让另一台设备打开 FastDrop，然后扫码或输入局域网 IP 连接。</p></div>
+          <div><h3>还没有设备</h3></div>
           <button class="primary-button" @click="openConnectPanel">添加设备</button>
-        </div>
-
-        <div class="selection-summary">
-          <span v-if="selectedCount === 0">未选择设备</span>
-          <span v-else><strong>{{ selectedCount }}</strong> 台设备已选</span>
-        </div>
-
-        <div class="text-send-card">
-          <div class="text-send-heading">
-            <h3>发送文本</h3>
-          </div>
-          <textarea
-            v-model="textDraft"
-            class="text-send-input"
-            rows="2"
-            placeholder="发送文本：网址、API key、验证码…（≤ 64 KB）"
-            @input="onTextDraftInput"
-            @keydown.enter.exact.prevent="sendText"
-          ></textarea>
-          <div v-if="textTargets.length" class="text-send-targets">
-            <span
-              v-for="target in textTargets"
-              :key="target.textId"
-              class="text-target-chip"
-              :class="textTargetState(target).state"
-            >
-              <strong>{{ target.name }}</strong>{{ textTargetState(target).label }}
-            </span>
-          </div>
-          <div class="text-send-actions">
-            <span v-if="textState.text" class="text-send-status" :class="textState.tone">{{ textState.text }}</span>
-            <button
-              class="primary-button"
-              :disabled="!textDraft.trim() || selectedCount === 0"
-              :title="selectedCount === 0 ? '请先在上方选择接收设备' : ''"
-              @click="sendText"
-            >
-              <AppIcon name="upload" :size="16" />发送文本
-            </button>
-          </div>
         </div>
 
         <div v-if="activeTransfers.length" class="activity-bar" @click="selectPage('history')">
@@ -1589,6 +1633,59 @@ onUnmounted(() => {
           <span>{{ liveTransfers.length }} 个进行中<template v-if="activeTransfers.length > liveTransfers.length"> · {{ activeTransfers.length - liveTransfers.length }} 个已结束</template></span>
           <span class="activity-arrow">›</span>
         </div>
+      </section>
+
+      <section v-else-if="activePage === 'conversation'" class="page conversation-page">
+        <div class="conv-header">
+          <button class="icon-button" title="返回会话列表" @click="selectPage('home')">←</button>
+          <div class="conv-title">
+            <strong>{{ activeConversation?.name || '会话' }}</strong>
+            <span :class="['conv-state', activeConversation?.state || 'offline']">{{ activeConversation?.label || '离线' }}</span>
+          </div>
+          <button class="ghost-button danger" @click="activeConversation && onRemoveRow(activeConversation)">删除设备</button>
+        </div>
+
+        <div
+          :class="['bubble-area', { active: dragOver }]"
+          @dragover="handleDragOver"
+          @dragleave="handleDragLeave"
+          @drop="handleDrop"
+        >
+          <div v-if="conversationTransfers.length" class="bubble-list">
+            <div
+              v-for="item in conversationTransfers"
+              :key="`${item.peerId}:${item.id}`"
+              :class="['bubble', isReceived(item) ? 'in' : 'out']"
+            >
+              <div class="bubble-body">
+                <strong>{{ item.totalFiles }} 个文件</strong>
+                <span>{{ formatSize(item.totalBytes) }} · {{ formatDate(item.createdAt) }}</span>
+              </div>
+              <div class="bubble-foot">
+                <span :class="['bubble-status', item.status]">{{ statusLabel(item.status) }}</span>
+                <button v-if="canRevealTransfer(item)" class="icon-button" title="在资源管理器中显示" @click="revealTransfer(item)"><AppIcon name="folder" :size="14" /></button>
+              </div>
+            </div>
+          </div>
+          <div v-else class="bubble-empty">还没有传输记录。把文件拖到这里，或点下方按钮。</div>
+        </div>
+
+        <div class="composer">
+          <button class="primary-button" :disabled="!activeConversation?.sendable" @click="openFilePicker"><AppIcon name="file" :size="16" />文件</button>
+          <button class="secondary-button" :disabled="!activeConversation?.sendable" @click="openFolderPicker"><AppIcon name="folder" :size="16" />文件夹</button>
+          <input
+            v-model="textDraft"
+            class="composer-input"
+            :disabled="!activeConversation?.sendable"
+            :placeholder="activeConversation?.sendable ? '输入要发送的文本…（≤ 64 KB）' : '设备不在线，无法发送'"
+            @input="onTextDraftInput"
+            @keydown.enter.exact.prevent="sendText"
+          />
+          <button class="primary-button" :disabled="!activeConversation?.sendable || !textDraft.trim()" @click="sendText">发送</button>
+          <input ref="fileInput" type="file" multiple hidden @change="handleFilePickerChange" />
+          <input ref="folderInput" type="file" multiple webkitdirectory hidden @change="handleFilePickerChange" />
+        </div>
+        <p v-if="textState.text" class="inline-notice">{{ textState.text }}</p>
       </section>
 
       <section v-else-if="activePage === 'devices'" class="page">
