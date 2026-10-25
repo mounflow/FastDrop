@@ -807,7 +807,11 @@ async function connectNearby(device: NearbyDevice) {
 
 // 信任设备自动重配对：remote-server 会话失效后自动重走 pair/discover。
 // 单次尝试，不循环——失败则提示用户手动重新添加设备。
-async function autoRepairRemotePair(baseUrl: string, name: string) {
+async function autoRepairRemotePair(
+  baseUrl: string,
+  name: string,
+  deviceId?: string,
+) {
   try {
     const request = await requestDiscoverPair(baseUrl, {
       deviceId: localClientId(),
@@ -834,18 +838,26 @@ async function autoRepairRemotePair(baseUrl: string, name: string) {
           role: 'remote-server',
           deviceId: remote.deviceId,
         })
+        if (deviceId) pcPairPending.delete(deviceId)
         uploadStatus.value = `已自动重新连接 ${accepted.server.deviceName || remote.name}`
         return
       }
       if (result.status === 'waiting_confirmation') sawWaiting = true
       if (result.status === 'rejected' || result.status === 'expired') break
     }
+    if (sawWaiting) {
+      // 记下"正在等对方点头"：设备行据此显示「待对方同意」。
+      if (deviceId) pcPairPending.set(deviceId, Date.now())
+    } else if (deviceId) {
+      pcPairPending.delete(deviceId)
+    }
     // 区分两种结局：等人工确认（手机端要求确认，或该设备曾被删除进忽略名单）
-    // 与真正的会话失效——前者必须给出可执行指引，否则用户只会看到"仅接收"却不知为何。
+    // 与真正的会话失效——前者必须给出可执行指引。
     uploadStatus.value = sawWaiting
       ? `${name} 等待手机确认配对（请在手机上点「接受」）`
       : `${name} 会话已失效，请重新添加设备`
   } catch (error) {
+    if (deviceId) pcPairPending.delete(deviceId)
     // 自动重连是后台行为：设备离线属预期情况，设备卡片本身已展示离线态，
     // 不该每轮轮询都用错误横幅打扰用户（"安静克制"）。
     // 只有"连得上但配对失败"这类需要用户介入的情况才提示。
@@ -920,11 +932,16 @@ interface DeviceRow {
   key: string
   name: string
   platform: string
+  state: 'online' | 'connecting' | 'pending' | 'offline'
   label: string
   sendable: boolean
   sendPeerId?: string
   peerIds: string[]
 }
+
+// 反向配对正在等对方确认的设备（deviceId → 发起时刻）。
+// 有这个标记时 UI 显示「待对方同意」，而不是让用户对着「仅接收」猜原因。
+const pcPairPending = reactive(new Map<string, number>())
 
 const deviceRows = computed<DeviceRow[]>(() => {
   const rows = new Map<string, DeviceRow>()
@@ -937,6 +954,7 @@ const deviceRows = computed<DeviceRow[]>(() => {
         key,
         name: peer.name,
         platform: peer.platform,
+        state: 'offline',
         label: '离线',
         sendable: false,
         peerIds: [],
@@ -944,12 +962,24 @@ const deviceRows = computed<DeviceRow[]>(() => {
       rows.set(key, row)
     }
     row.peerIds.push(peer.id)
-    if (peer.role === 'remote-server' && peer.status === 'connected') {
+    if (peer.status !== 'connected') continue
+    if (peer.role === 'remote-server') {
+      // 双向通道都就绪——这是唯一允许发送的状态。
+      row.state = 'online'
+      row.label = '在线'
       row.sendable = true
       row.sendPeerId = peer.id
-      row.label = '双向可发送'
-    } else if (!row.sendable && peer.status === 'connected') {
-      row.label = '仅接收（本机尚未取得发送权限）'
+    } else if (row.state !== 'online') {
+      // 只有对端连入、本机还没拿到对方会话。"能不能发"取决于反向配对
+      // 是否在等对方点头——把这个区别显式说出来，而不是用「仅接收」
+      // 让用户自己去猜（协议细节不该泄漏到界面）。
+      if (pcPairPending.has(key)) {
+        row.state = 'pending'
+        row.label = '待对方同意'
+      } else {
+        row.state = 'connecting'
+        row.label = '连接中…'
+      }
     }
   }
   return [...rows.values()]
@@ -1359,7 +1389,7 @@ async function ensureMutualSessionWithDevices() {
     )
     const baseUrl = `http://${device.lastIp}:9527`
     try {
-      await autoRepairRemotePair(baseUrl, device.deviceName)
+      await autoRepairRemotePair(baseUrl, device.deviceName, device.deviceId)
       if (
         peerViews.value.some(
           (p) => p.baseUrl === baseUrl && p.status === 'connected',
@@ -1372,6 +1402,21 @@ async function ensureMutualSessionWithDevices() {
     }
   }
 }
+
+// 事件驱动反向建连：只要有 peer 新连上（尤其对端连入的 local-session），
+// 立刻尝试建反向会话。原先只靠 5 秒轮询，那个窗口里 UI 只能停在"半连接"，
+// 这正是「仅接收」会稳定出现的原因之一。
+let lastMutualKickAt = 0
+watch(
+  () => peerViews.value.filter((item) => item.status === 'connected').length,
+  (count, previous) => {
+    if (count <= (previous ?? 0)) return
+    const now = Date.now()
+    if (now - lastMutualKickAt < 1000) return
+    lastMutualKickAt = now
+    void ensureMutualSessionWithDevices()
+  },
+)
 
 let incomingPollTimer: ReturnType<typeof setInterval> | null = null
 let devicePollTimer: ReturnType<typeof setInterval> | null = null
