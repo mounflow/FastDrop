@@ -12,6 +12,7 @@ import 'package:fastdrop_mobile/core/server/pairing_providers.dart';
 import 'package:fastdrop_mobile/core/server/ws_server.dart';
 import 'package:fastdrop_mobile/core/storage/ignored_device_providers.dart';
 import 'package:fastdrop_mobile/core/storage/session_store.dart';
+import 'package:fastdrop_mobile/core/storage/transfer_history_store.dart';
 import 'package:fastdrop_mobile/core/providers.dart';
 import 'package:fastdrop_mobile/features/devices/nearby_devices_sheet.dart';
 import 'package:fastdrop_mobile/features/devices/multi_device_connection.dart';
@@ -603,6 +604,8 @@ class DevicesScreen extends ConsumerStatefulWidget {
 class _DevicesScreenState extends ConsumerState<DevicesScreen>
     with TickerProviderStateMixin {
   List<Device> _devices = [];
+  /// 本地传输历史（用于在会话行显示"最后活动"摘要）。
+  List<TransferRow> _historyRows = [];
   bool _loading = true;
   String? _loadError;
   TabController? _tabController;
@@ -656,6 +659,13 @@ class _DevicesScreenState extends ConsumerState<DevicesScreen>
       return;
     }
     if (!mounted) return;
+
+    // 会话列表要回答"我们最后一次往来是什么"，所以顺带读一次本地历史。
+    try {
+      _historyRows = await TransferHistoryStore().load();
+    } catch (e) {
+      debugPrint('[Devices] 加载传输历史失败: $e');
+    }
 
     setState(() {
       _devices = devices;
@@ -1352,6 +1362,19 @@ class _DevicesScreenState extends ConsumerState<DevicesScreen>
     );
   }
 
+  /// 该设备最后一次传输的摘要（没有记录则返回 null，调用方回退到地址）。
+  /// 会话行的第二行应该是"我们最后一次往来是什么"，而不是一长串会被截断的 URL。
+  String? _lastActivityText(Device device) {
+    final keys = <String>{device.id, device.serverBaseUrl};
+    TransferRow? latest;
+    for (final row in _historyRows) {
+      if (!keys.contains(row.peerDeviceId)) continue;
+      if (latest == null || row.createdAt > latest.createdAt) latest = row;
+    }
+    if (latest == null) return null;
+    return '${latest.totalFiles} 个文件 · ${_formatBytes(latest.totalBytes)}';
+  }
+
   Widget _buildOverviewDeviceCard(
     Device device,
     MultiConnectionStatus status, {
@@ -1407,7 +1430,7 @@ class _DevicesScreenState extends ConsumerState<DevicesScreen>
                     ),
                     const SizedBox(height: 4),
                     Text(
-                      errorMessage ?? subtitle ?? device.serverBaseUrl,
+                      errorMessage ?? subtitle ?? _lastActivityText(device) ?? device.serverBaseUrl,
                       maxLines: 1,
                       overflow: TextOverflow.ellipsis,
                       style: Theme.of(context).textTheme.bodySmall?.copyWith(
