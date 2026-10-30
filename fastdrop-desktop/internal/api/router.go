@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/url"
+	"runtime"
 	"strings"
 	"time"
 
@@ -169,7 +170,7 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 		"status":     "ok",
 		"deviceId":   s.Cfg.Server.DeviceID,
 		"deviceName": s.Cfg.Server.DeviceName,
-		"platform":   "windows",
+		"platform":   runtime.GOOS,
 		"version":    config.AppVersion,
 		"protocol":   1,
 	})
@@ -179,7 +180,7 @@ func (s *Server) handleServerInfo(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{
 		"deviceId":    s.Cfg.Server.DeviceID,
 		"name":        s.Cfg.Server.DeviceName,
-		"platform":    "windows",
+		"platform":    runtime.GOOS,
 		"protocol":    1,
 		"version":     config.AppVersion,
 		"port":        s.Cfg.Server.Port,

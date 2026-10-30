@@ -13,6 +13,7 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"runtime"
 	"strings"
 	"sync"
 	"time"
@@ -216,7 +217,7 @@ func main() {
 	if err := discoveryCtl.Start(rootCtx, discovery.ServiceInfo{
 		DeviceID: cfg.Server.DeviceID, DeviceName: cfg.Server.DeviceName,
 		Host: host, Port: port, ProtocolVersion: 1,
-		AppVersion: config.AppVersion, Platform: "windows",
+		AppVersion: config.AppVersion, Platform: runtime.GOOS,
 	}); err != nil {
 		log.Printf("[discovery] start failed: %v (continuing without mDNS)", err)
 	}
