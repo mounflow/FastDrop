@@ -264,6 +264,8 @@ class _NearbyDeviceTile extends ConsumerWidget {
         return Icons.laptop_mac;
       case 'windows':
         return Icons.computer;
+      case 'linux':
+        return Icons.computer;
       default:
         return Icons.devices;
     }

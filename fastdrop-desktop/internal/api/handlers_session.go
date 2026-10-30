@@ -2,6 +2,7 @@ package api
 
 import (
 	"net/http"
+	"runtime"
 	"strings"
 	"time"
 
@@ -41,7 +42,7 @@ func serverDeviceIdentity(s *Server) pairing.ClientDevice {
 	return pairing.ClientDevice{
 		DeviceID:   s.Cfg.Server.DeviceID,
 		DeviceName: s.Cfg.Server.DeviceName,
-		Platform:   "windows",
+		Platform:   runtime.GOOS,
 		AppVersion: config.AppVersion,
 	}
 }
